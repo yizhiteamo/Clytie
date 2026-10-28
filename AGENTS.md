@@ -68,7 +68,7 @@ Clytie 是一个可复用的 AI 伴侣框架：**本体 + 插件**。本体提�
 
 ### 自动验收
 
-- 每次推送 PR 更新、且 CI 通过后，运行 `claude -p` 验收（命令模板见下）。
+- 每次推送 PR 更新、且 CI 通过后，由 GPT 将 `gh pr view <编号> --json body,title,commits,headRefOid`、`gh pr diff <编号>`、`gh pr checks <编号>` 的输出分别保存到 `.cache/auto-review/pr-<编号>/view.json`、`diff.patch`、`checks.txt`，再运行 `claude -p` 验收（命令模板见下）。每轮刷新这些文件，确认对应本轮提交；Claude 只读这些快照，不使用命令行工具。
 - Claude 只把验收结论输出到命令行，不直接在 GitHub 上发布任何内容。由 GPT 先用通用扫描和私有名单扫描检查输出内容，全部通过后再用 `gh pr comment` 发到 PR；扫描命中时不发布，报告用户。
 - 默认不给 Claude 实例目录的访问权限。自动验收是第 0 节的例外：验收时默认不读取 AGENTS.local.md。确实需要部署专属规则时，必须先报告用户；用户同意后才加上 `--add-dir`，并且输出同样要先扫描再发布。
 - 结论为“需要修改”时，按意见修改后再次验收。同一个 PR 最多自动验收 3 轮；第 3 轮仍未通过就停下来，报告用户。
@@ -80,13 +80,13 @@ Clytie 是一个可复用的 AI 伴侣框架：**本体 + 插件**。本体提�
 命令模板（只读，不能发布、编辑、提交、推送、合并）：
 
 ```shell
-claude -p "<验收指令>" --allowedTools "Read(./**),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*)"
+claude -p "<验收指令>" --allowedTools "Read(./**)" --disallowedTools "Bash" --permission-mode dontAsk --permission-prompts none --safe-mode --strict-mcp-config --no-session-persistence --output-format stream-json --verbose
 ```
 
 验收指令模板：
 
 ```text
-验收 Clytie 的 PR #<编号>。先读 AGENTS.md、docs/roadmap.md 中对应里程碑的验收清单，以及 docs/architecture/ 下的规格。用 gh pr view、gh pr diff、gh pr checks 查看 PR。只读，不修改任何文件。不访问仓库目录以外的文件，不读取被 git 忽略的文件；不需要部署专属规则。搜索和读取都只限于仓库目录内。逐项判断验收清单，最后给出结论：通过 / 需要修改（列出具体问题）/ 需要用户决定（列出问题）。
+验收 Clytie 的 PR #<编号>。先读 AGENTS.md、docs/roadmap.md 中对应里程碑的验收清单，以及 docs/architecture/ 下的规格。从 .cache/auto-review/pr-<编号>/ 的 view.json、diff.patch、checks.txt 读取 PR 信息，不使用命令行。只读，不修改任何文件。不访问仓库目录以外的文件；被 git 忽略的文件仅允许读取本轮上述 PR 信息快照，不读取其他忽略文件；不需要部署专属规则。搜索和读取都只限于仓库目录内。逐项判断验收清单，最后给出结论：通过 / 需要修改（列出具体问题）/ 需要用户决定（列出问题）。
 ```
 
 不对应里程碑的 PR 按 `AGENTS.md` 的现行规则检查。
