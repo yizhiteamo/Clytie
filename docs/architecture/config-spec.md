@@ -19,6 +19,7 @@
 | `schema_version` | 是 | `1` |
 | `timezone` | 是 | IANA 时区，如 `Asia/Shanghai` |
 | `people` | 是 | `{actor_id: {role: owner|member, accounts: [{channel, account}]}}`；必须恰好有一个 `owner` |
+| `accounts` | 否 | 伴侣自己使用的平台账号：`{account_ref: {channel: 插件 id, account: 平台账号, secret?: 相对 secrets/ 的路径}}`；伴侣配置的 `channels[].account` 引用这里的键 |
 | `conversations` | 否 | `{conversation_id: {channel, platform_id, kind, scene, members_expected?: [actor_id]}}`；`members_expected` 用于测试会话的成员检查 |
 | `scenes` | 是 | 场景名列表，必须包含 `owner_private`、`public_group`、`stranger_private` |
 | `test_conversation` | 否 | 一个 `conversation_id`；只有它可以接收真实测试 |
@@ -43,8 +44,28 @@
 | `permissions` | 是 | `{role: [tool 名称]}`：每种身份能用的能力；`owner` 可以写 `"*"` |
 | `plugins` | 否 | `{plugin_id: {enabled: bool, priority?: int, config: {...}}}` |
 | `task_card` | 否 | 任务单模板，按场景：`{internal: str, external: str}`；可用变量 `{label} {id} {name} {helper} {duration}` |
-| `boundary` | 否 | 关系边界的阈值、类别开关、永不对外发布清单 |
-| `context` | 否 | 上下文预算（条数、字数、资料保留时间） |
+| `boundary` | 否 | 关系边界设置，子字段见下 |
+| `context` | 否 | 上下文预算，子字段见下 |
+
+**`channels[].account`**：实例配置 `accounts` 中的一个键。校验：键必须存在；对应条目的 `channel` 必须等于 `channels[].plugin`；同一个 `account_ref` 不能被两个伴侣同时使用。`secret` 只检查文件是否存在，不读取内容。
+
+**`boundary`**（全部可选，括号内为默认值）：
+| 字段 | 类型 |
+|---|---|
+| `refusal_threshold` | 整数 1–100（5） |
+| `window_hours` | 整数 1–168（24） |
+| `categories` | `{romance, persona_change, scripted_intimacy, intimate_images, owner_privacy}`，各为布尔值（全部 `true`） |
+| `never_publish` | 字符串列表（空）：对外场景中不允许出现的词句 |
+| `notify_owner` | 布尔值（`true`） |
+
+**`context`**（全部可选，括号内为默认值）：
+| 字段 | 类型 |
+|---|---|
+| `max_messages` | 整数 1–1000（100） |
+| `max_chars` | 整数 1,000–200,000（20,000） |
+| `max_single_message_chars` | 整数 100–20,000（2000） |
+| `material_full_minutes` | 整数 0–1440（15） |
+| `material_budget_chars` | 整数 0–100,000（6,000） |
 
 ## 4. 插件清单 `plugin.json`
 
@@ -89,6 +110,16 @@
 1. 插件清单 `config` 中的 `default`
 2. 实例配置 `plugins.<id>.config`
 3. 伴侣配置 `plugins.<id>.config`
+
+作为模型或平台使用的插件多一层（最高）：
+
+4. 伴侣配置 `model.config`（模型插件）或 `channels[i].config`（平台插件，每个账号一份）
+
+也就是：清单默认 < 实例 `plugins.<id>.config` < 伴侣 `plugins.<id>.config` < `model.config` / `channels[i].config`。
+
+被 `model` 或 `channels` 引用的插件视为已启用；如果同时在 `plugins.<id>` 中写了 `enabled: false`，报错。
+
+同一个插件 id 同时出现在仓库 `plugins/` 和 `CLYTIE_HOME/plugins/` 中时报错（不允许用安装的插件覆盖官方插件）。
 
 规则：
 - 对象逐键深度合并；列表和标量整体替换（高层覆盖低层）。
