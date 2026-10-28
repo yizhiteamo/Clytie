@@ -394,9 +394,10 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
 | `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
 | `proactive` | `message.proactive` | `async submit(conversation_id, parts, *, reason: str) -> str`（返回 `intent_id`；仍经过边界和出站检查，可能被拒绝） |
-| `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None) -> ProcessResult`（`returncode`、`stdout`、`stderr`）；不经过 shell，工作目录固定为插件私有目录 |
+| `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
 | `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`；映射来自实例配置 |
 
+- `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
 - `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
 - `memory.search` 的 `scene` 由调用方传入，宿主按场景和权限共同决定可见等级：只有 `memory.read.private` 且 `scene == owner_private` 时才包含私密记录。
 - **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
