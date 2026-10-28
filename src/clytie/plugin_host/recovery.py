@@ -18,12 +18,12 @@ class RecoveryError(SnapshotError):
 
 
 def restore_preserving(manager, snapshot, companion_id, plugin_id):
-    payload = manager.read(snapshot, companion_id, plugin_id)
     destination = manager.state_path(companion_id, plugin_id)
     archive = contained(manager.home, Path(snapshot).parent)
     failed = contained(archive, archive / ("failed-" + Path(snapshot).stem + "-" + uuid4().hex))
     temporary = None
     try:
+        payload = manager.read(snapshot, companion_id, plugin_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".restore-", dir=destination.parent))
         contained(manager.home, temporary)
@@ -71,6 +71,8 @@ def inventory(directory):
 
 
 def failed_status(home):
+    from .journal import recovery_status
+
     root = Path(home).resolve()
     base = contained(root, root / "backups" / "plugin-upgrades")
     result = []
@@ -101,6 +103,7 @@ def failed_status(home):
         "directories": result,
         "total_bytes": sum(r["bytes"] or 0 for r in result),
         "size_complete": all(r["bytes"] is not None for r in result),
+        "recovery_errors": recovery_status(root),
     }
 
 
@@ -125,6 +128,8 @@ class Cleanup:
         self.home, self.log, self.plans = Path(home).resolve(), log, {}
 
     def _inventory(self, directories):
+        from .journal import blocks_cleanup
+
         result = {}
         for name in directories:
             path = contained(self.home, self.home / name)
@@ -136,6 +141,8 @@ class Cleanup:
                 or not path.is_dir()
             ):
                 raise SnapshotError("only retained failed directories can be cleaned")
+            if blocks_cleanup(self.home, path):
+                raise SnapshotError("directory is referenced by an unfinished recovery")
             result[name] = inventory(path)
         return result
 

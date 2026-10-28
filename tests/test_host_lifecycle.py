@@ -150,3 +150,54 @@ async def test_close_uses_loaded_manifest_if_source_removed(tmp_path):
     h.refresh()
     await h.close()
     assert runtime.plugin.stopped
+
+
+async def test_start_cleanup_resists_repeated_cancel_and_cleans_all_units(tmp_path):
+    source = """class Plugin:
+    async def start(self, ctx):
+        self.ctx = ctx
+        self.entered = True
+        if ctx.config["wait"]:
+            await ctx.clock.sleep(100)
+    async def stop(self):
+        self.stopping = True
+        await self.ctx.clock.sleep(100)
+"""
+    plugin(
+        tmp_path,
+        "worker",
+        source,
+        config={"type": "object", "properties": {"wait": {"type": "boolean"}}},
+    )
+    h = host(tmp_path)
+    h.unit_configs["companion_a", "worker"] = [
+        {"role": None, "config": {"wait": False}},
+        {"role": None, "config": {"wait": True}},
+    ]
+    task = asyncio.create_task(h.apply(h.plan_enable("companion_a", "worker").plan_id))
+
+    def all_started():
+        runtime = h.runtimes.get(("companion_a", "worker"))
+        return (
+            runtime
+            and len(runtime.units) == 2
+            and getattr(runtime.units[1].plugin, "entered", False)
+        )
+
+    await pump(h.clock, all_started)
+    task.cancel()
+    runtime = h.runtimes["companion_a", "worker"]
+    await pump(h.clock, lambda: getattr(runtime.units[1].plugin, "stopping", False))
+    task.cancel()
+    await h.clock.sleep(0)
+    h.clock.advance(10)
+    await pump(h.clock, lambda: getattr(runtime.units[0].plugin, "stopping", False))
+    task.cancel()
+    await h.clock.sleep(0)
+    h.clock.advance(10)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.status == "start_failed" and runtime.registrations == ()
+    assert all(unit.plugin.stopping for unit in runtime.units)
+    assert any(e.name == "plugin.disabled" and e.payload["plugin_id"] == "worker" for e in h.events)
+    assert not h._version("companion_a", "worker")

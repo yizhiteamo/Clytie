@@ -34,6 +34,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             actual = json.dumps(error.to_dict()["actual"], ensure_ascii=False)
             print(f"{error.file}#{error.pointer}：期望 {error.expected}；实际 {actual}")
         retained = result["failed_plugin_state"]
+        for alert in retained.get("recovery_errors", []):
+            print("恢复未完成 [error]：" + json.dumps(alert, ensure_ascii=False))
         for entry in retained.get("directories", []):
             hint = "问题已解决，可以清理" if entry["resolved"] else "故障状态保留，等待确认清理"
             print(f"{hint}：{entry['path']}；大小 {entry['bytes']} bytes")

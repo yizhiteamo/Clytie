@@ -70,18 +70,30 @@ async def test_in_place_migration_success_or_preserved_failure(tmp_path, failure
             await h.apply_migration(plan.plan_id, CancelToken())
     else:
         result = await h.apply_migration(plan.plan_id)
-        assert result["outcome"] == ("migrated" if failure is None else "migration_failed")
+        assert result["outcome"] == (
+            "migrated"
+            if failure is None
+            else "start_failed"
+            if failure == "start"
+            else "migration_failed"
+        )
     assert h.snapshots._tree(path.parent) == code
     assert h.runtimes["companion_a", "stateful"].status == (
-        "active" if failure is None else "migration_failed"
+        "active"
+        if failure is None
+        else "start_failed"
+        if failure == "start"
+        else "migration_failed"
     )
     assert await old.storage.get("value") == (
-        "fictional-upgraded" if failure is None else "fictional-original"
+        "fictional-upgraded" if failure in (None, "start") else "fictional-original"
     )
-    assert h._version("companion_a", "stateful")["data_version"] == (2 if failure is None else 1)
+    assert h._version("companion_a", "stateful")["data_version"] == (
+        2 if failure in (None, "start") else 1
+    )
     retained = h.failed_state_status()["directories"]
-    assert bool(retained) == (failure is not None)
-    if failure:
+    assert bool(retained) == (failure in ("migration", "cancel"))
+    if failure in ("migration", "cancel"):
         assert (tmp_path / retained[0]["path"] / "new.txt").read_bytes() == b"fictional-new-file"
         assert not retained[0]["resolved"]
         assert ("companion_a", "stateful") not in h.unit_configs
@@ -192,46 +204,29 @@ async def test_uninstall_retains_code_private_state_and_version(tmp_path):
     await restarted.close()
 
 
-async def test_cancel_during_post_migration_stop_still_restores(tmp_path, monkeypatch):
-    """回归：不能在 rollback 的 stop 被取消后跳过快照恢复。"""
+async def test_cancel_during_post_commit_start_keeps_new_data(tmp_path):
+    """U3 取代旧的启动失败回滚语义；提交后的取消也不回退数据。"""
     h, path, old = await prepared(tmp_path)
-    source = (
-        SOURCE
-        + """
-    async def stop(self):
-        await self.ctx.storage.set("stopping", "fictional")
-        await self.ctx.clock.sleep(100)
-"""
-    )
+    source = SOURCE.replace("self.seen = []", "self.seen = []\n        await ctx.clock.sleep(100)")
     update(path, source=source, script=MIGRATE)
-    cancel = CancelToken()
-    start = h._start
-
-    async def cancel_after_start(*args, **kwargs):
-        result = await start(*args, **kwargs)
-        cancel.cancel("fictional-cancel-after-start")
-        return result
-
-    monkeypatch.setattr(h, "_start", cancel_after_start)
     task = asyncio.create_task(
-        h.apply_migration(h.plan_migration("companion_a", "stateful").plan_id, cancel)
+        h.apply_migration(h.plan_migration("companion_a", "stateful").plan_id)
     )
     for _ in range(80):
-        if await old.storage.get("stopping"):
+        if (
+            h._version("companion_a", "stateful")["data_version"] == 2
+            and h.clock.pending_sleep_count
+        ):
             break
         await h.clock.sleep(0)
-    assert await old.storage.get("stopping") == "fictional"
     task.cancel()
-    await h.clock.sleep(0)
-    task.cancel()
-    h.clock.advance(10)
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert await old.storage.get("value") == "fictional-original"
-    assert await old.storage.get("stopping") is None
-    assert h.runtimes["companion_a", "stateful"].status == "migration_failed"
-    assert h._version("companion_a", "stateful")["data_version"] == 1
-    assert len(h.failed_state_status()["directories"]) == 1
+    assert await old.storage.get("value") == "fictional-upgraded"
+    assert h._version("companion_a", "stateful")["data_version"] == 2
+    assert not h.journals.path("companion_a", "stateful").exists()
+    assert h.runtimes["companion_a", "stateful"].status == "start_failed"
+    assert not h.failed_state_status()["directories"]
 
 
 async def test_shared_code_companions_migrate_and_recover_independently(tmp_path):

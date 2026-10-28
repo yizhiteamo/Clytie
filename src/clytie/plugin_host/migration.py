@@ -52,9 +52,13 @@ class MigrationMixin:
         atomic_write(self._versions_path(companion_id), canonical(versions))
 
     def _load_status(self, companion_id, manifest):
+        if self.journals.path(companion_id, manifest.id).exists():
+            return "recovery_incomplete", "resolve recovery journal before migration or loading"
         previous = self._version(companion_id, manifest.id)
         if previous is None:
             return None, None
+        if not self.snapshots.state_path(companion_id, manifest.id).is_dir():
+            return "private_state_missing", "existing version record forbids creating empty state"
         before, after = previous["data_version"], manifest.data.get("data", {}).get("version", 1)
         if before > after:
             return "data_newer_than_code", "update code or restore an upgrade snapshot"
@@ -69,6 +73,31 @@ class MigrationMixin:
             return ("missing_migration", missing) if missing else ("pending_migration", None)
         return None, None
 
+    def _before_load(self, cid, pid):
+        try:
+            record = self.journals.read(cid, pid)
+            if record is not None:
+                version = self._version(cid, pid)
+                current = version["data_version"] if version else None
+                if record["phase"] == "migrating" and current == record["to_version"]:
+                    self.journals.clear(record, "committed_journal_removed")
+                elif record["phase"] == "migrating" and current == record["from_version"]:
+                    self.journals.restore(record)
+                    return (
+                        "migration_failed",
+                        "interrupted migration restored; reload after checking code",
+                    )
+                else:
+                    return "recovery_incomplete", "user-confirmed recovery action required"
+            if self._version(cid, pid) and not self.snapshots.state_path(cid, pid).is_dir():
+                return (
+                    "private_state_missing",
+                    "existing version record forbids creating empty state",
+                )
+        except (OSError, ValueError) as exc:
+            return "recovery_incomplete", getattr(exc, "locations", type(exc).__name__)
+        return None, None
+
     def _migration_fingerprint(self, companion_id, plugin_id):
         manifest = self.manifests[plugin_id]
         return hashlib.sha256(
@@ -78,6 +107,8 @@ class MigrationMixin:
                     "state": self.snapshots._tree(
                         self.snapshots.state_path(companion_id, plugin_id)
                     ),
+                    "journal": self.journals.path(companion_id, plugin_id).exists(),
+                    "state_exists": self.snapshots.state_path(companion_id, plugin_id).is_dir(),
                     "versions": self._versions(companion_id),
                     "graph": self._fingerprint(companion_id),
                     "layouts": thaw(self.unit_configs.get((companion_id, plugin_id))),
@@ -121,7 +152,7 @@ class MigrationMixin:
         return plan
 
     async def apply_migration(self, plan_id, cancel=None):
-        from .host import PlanStale, PluginFailure, Runtime
+        from .host import PlanStale, Runtime
 
         cancel = cancel or CancelToken()
         async with self._lock:
@@ -142,7 +173,6 @@ class MigrationMixin:
                 raise PlanStale("plugin must not be running during migration")
             cancel.raise_if_cancelled()
             manifest = self.manifests[pid]
-            previous = self._versions(cid)
             snapshot = self.snapshots.create(
                 cid,
                 pid,
@@ -151,6 +181,7 @@ class MigrationMixin:
                 path=contained(self.home, self.home / plan.snapshot),
             )
             self._migration_plans.pop(plan_id)
+            record = self.journals.begin(plan)
             storage = self._storages.setdefault(
                 (cid, pid), FileStorage(self.snapshots.state_path(cid, pid), self.clock)
             )
@@ -169,6 +200,8 @@ class MigrationMixin:
                 )
                 for step in plan.scripts:
                     cancel.raise_if_cancelled()
+                    record["step"] = record["migration_step"] = step
+                    self.journals.save(record)
                     script = contained(manifest.path.parent, manifest.path.parent / step)
                     module = ModuleType("_clytie_migration")
                     exec(compile(script.read_bytes(), str(script), "exec"), module.__dict__)
@@ -178,20 +211,14 @@ class MigrationMixin:
                     with bind_scene():
                         await function(migration.ctx, cancel)
                     cancel.raise_if_cancelled()
-                step = "start"
-                self._record_version(cid, manifest)
-                if not await self._start(cid, manifest, version_check=False):
-                    raise PluginFailure("migrated plugin start failed")
-                cancel.raise_if_cancelled()
             except (Exception, asyncio.CancelledError) as exc:
-                # stop（包括启动后的取消）也处于恢复事务内；清理完成后才恢复状态。
+                # 仅提交前的失败恢复旧状态；恢复完成后才传播取消。
                 reason = type(exc).__name__
 
                 async def rollback():
                     current = self.runtimes.get((cid, pid))
                     if current and current.status == "active":
                         await self._stop(cid, pid, "migration_failed")
-                    atomic_write(self._versions_path(cid), canonical(previous))
                     migration.status = "migration_failed"
                     self.runtimes[cid, pid] = migration
                     self.states.setdefault(cid, {})[pid] = {
@@ -199,7 +226,13 @@ class MigrationMixin:
                         "step": step,
                         "reason": reason,
                     }
-                    return self.snapshots.restore(snapshot, cid, pid)
+                    record["error"] = reason
+                    try:
+                        return self.journals.restore(record)
+                    except (OSError, ValueError):
+                        migration.status = "recovery_incomplete"
+                        self.states[cid][pid]["status"] = "recovery_incomplete"
+                        raise
 
                 failed, cancelled_during_cleanup = await finish_cleanup(rollback())
                 self._failure(migration, step, exc)
@@ -216,12 +249,54 @@ class MigrationMixin:
                     "step": step,
                     "reason": type(exc).__name__,
                 }
+            # 脚本完成才提交；记录原子更新是唯一提交点。此后任何错误都不恢复旧数据。
+            try:
+                self._record_version(cid, manifest)
+                self.journals.clear(record, "migration_committed")
+            except (OSError, ValueError):
+                migration.status = "recovery_incomplete"
+                raise
             self.states.setdefault(cid, {}).pop(pid, None)
             base = contained(self.home, snapshot.parent)
             names = [p.name for p in base.glob("failed-*") if p.is_dir()]
             if names:
                 atomic_write(contained(base, base / "resolved.json"), canonical(sorted(names)))
-            return {"outcome": "migrated", "snapshot": plan.snapshot}
+            started = await self._start(cid, manifest, version_check=False)
+            return {"outcome": "migrated" if started else "start_failed", "snapshot": plan.snapshot}
+
+    def plan_recovery(self, companion_id, plugin_id, operation):
+        runtime = self.runtimes.get((companion_id, plugin_id))
+        if runtime and runtime.status in {"active", "starting", "stopping", "migrating"}:
+            raise ValueError("plugin must be stopped before recovery")
+        return self.journals.plan(companion_id, plugin_id, operation)
+
+    async def apply_recovery(self, plan_id):
+        from .host import PlanStale
+
+        async with self._lock:
+            plan = self.journals.plans.get(plan_id)
+            if plan is None:
+                raise PlanStale("unknown recovery plan")
+            runtime = self.runtimes.get((plan.companion_id, plan.plugin_id))
+            if runtime and runtime.status in {"active", "starting", "stopping", "migrating"}:
+                raise PlanStale("plugin must be stopped before recovery")
+            try:
+                result = self.journals.apply(plan_id)
+            except (OSError, ValueError) as exc:
+                if self.journals.path(plan.companion_id, plan.plugin_id).exists():
+                    if runtime:
+                        runtime.status = "recovery_incomplete"
+                    self.states.setdefault(plan.companion_id, {})[plan.plugin_id] = {
+                        "status": "recovery_incomplete",
+                        "reason": type(exc).__name__,
+                    }
+                raise
+            if runtime:
+                runtime.status = "migration_failed"
+            self.states.setdefault(plan.companion_id, {})[plan.plugin_id] = {
+                "status": "migration_failed"
+            }
+            return result
 
     def failed_state_status(self):
         return failed_status(self.home)

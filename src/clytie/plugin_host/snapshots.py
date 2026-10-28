@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from pathlib import Path, PurePosixPath
 
 from cryptography.exceptions import InvalidTag
@@ -47,8 +48,9 @@ def contained(root, path):
 def atomic_write(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".pending")
-    with temporary.open("xb") as handle:
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".pending", dir=path.parent)
+    temporary = Path(name)
+    with os.fdopen(descriptor, "wb") as handle:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())

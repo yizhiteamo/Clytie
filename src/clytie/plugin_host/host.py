@@ -32,6 +32,7 @@ from clytie.sdk.types import (
 
 from .context import BackendUnavailable, build_context
 from .dependencies import DependencyError, resolve
+from .journal import Journals
 from .manifests import discover
 from .memory import bind_scene
 from .migration import MigrationMixin
@@ -126,6 +127,7 @@ class PluginHost(MigrationMixin):
         self.unit_configs, self.identities = {}, {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
+        self.journals = Journals(self.snapshots)
         self._plans, self._cascades, self._storages = {}, {}, {}
         self._queue, self._dispatching = deque(), False
         self._serial = 0
@@ -427,6 +429,9 @@ class PluginHost(MigrationMixin):
         key = companion_id, plugin_id
         path = self.snapshots.state_path(*key)
         try:
+            status, detail = self._before_load(companion_id, manifest.id)
+            if status:
+                return await self._blocked_start(companion_id, manifest, status, detail)
             for dependency, spec in manifest.data.get("dependencies", {}).items():
                 if (
                     not dependency.startswith("x-")
@@ -442,25 +447,7 @@ class PluginHost(MigrationMixin):
             if version_check:
                 status, detail = self._load_status(companion_id, manifest)
                 if status:
-                    runtime = Runtime(
-                        companion_id, manifest, FileStorage(path, self.clock), manifest.priority
-                    )
-                    runtime.status = status
-                    self.runtimes[key] = runtime
-                    self.states.setdefault(companion_id, {})[plugin_id] = {
-                        "status": status,
-                        "detail": detail,
-                    }
-                    await self.emit(
-                        companion_id,
-                        "plugin.disabled",
-                        {
-                            "plugin_id": plugin_id,
-                            "companion_id": companion_id,
-                            "reason": status,
-                        },
-                    )
-                    return False
+                    return await self._blocked_start(companion_id, manifest, status, detail)
             storage = self._storages.setdefault(key, FileStorage(path, self.clock))
             priority = (
                 self.settings.get(companion_id, {})
@@ -517,28 +504,51 @@ class PluginHost(MigrationMixin):
             return True
         except (Exception, asyncio.CancelledError) as exc:
             if key not in self.runtimes:
-                self.runtimes[key] = Runtime(
-                    companion_id, manifest, FileStorage(path, self.clock), manifest.priority
-                )
+                self.runtimes[key] = Runtime(companion_id, manifest, None, manifest.priority)
             runtime = self.runtimes[key]
-            for unit in reversed(runtime.units or [runtime]):
-                if unit.plugin is None:
-                    continue
-                try:
-                    with bind_scene():
-                        await timed(unit.plugin.stop(), self.clock, 10)
-                except Exception as cleanup_error:
-                    self._failure(runtime, "start_cleanup", cleanup_error)
-            runtime.status, runtime.registrations = "start_failed", ()
+
+            async def cleanup_start():
+                for unit in reversed(runtime.units or [runtime]):
+                    if unit.plugin is None:
+                        continue
+                    try:
+                        with bind_scene():
+                            await timed(unit.plugin.stop(), self.clock, 10)
+                    except (Exception, asyncio.CancelledError) as cleanup_error:
+                        self._failure(runtime, "start_cleanup", cleanup_error)
+                runtime.status, runtime.registrations = "start_failed", ()
+                await self.emit(
+                    companion_id,
+                    "plugin.disabled",
+                    {
+                        "plugin_id": plugin_id,
+                        "companion_id": companion_id,
+                        "reason": "start_failed",
+                    },
+                )
+
+            _, cancelled_during_cleanup = await finish_cleanup(cleanup_start())
             self._failure(runtime, "start", exc)
-            await self.emit(
-                companion_id,
-                "plugin.disabled",
-                {"plugin_id": plugin_id, "companion_id": companion_id, "reason": "start_failed"},
-            )
+            if cancelled_during_cleanup:
+                raise asyncio.CancelledError
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return False
+
+    async def _blocked_start(self, companion_id, manifest, status, detail):
+        runtime = Runtime(companion_id, manifest, None, manifest.priority, status=status)
+        self.runtimes[companion_id, manifest.id] = runtime
+        self.states.setdefault(companion_id, {})[manifest.id] = {"status": status, "detail": detail}
+        await self.emit(
+            companion_id,
+            "plugin.disabled",
+            {
+                "plugin_id": manifest.id,
+                "companion_id": companion_id,
+                "reason": status,
+            },
+        )
+        return False
 
     def _failure(self, runtime, point, exc):
         failure = {

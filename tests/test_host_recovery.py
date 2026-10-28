@@ -48,11 +48,14 @@ def test_restore_preserves_entire_fault_tree_without_any_deletion(tmp_path, monk
     assert not any("removed" in entry[1] for entry in manager.log.entries)
 
 
-@pytest.mark.parametrize("stage", ["write", "verify", "move_failed", "move_restored"])
+@pytest.mark.parametrize("stage", ["decrypt", "write", "verify", "move_failed", "move_restored"])
 def test_restore_stops_at_each_failure_and_reports_all_locations(tmp_path, monkeypatch, stage):
     manager, state, snapshot = failed_tree(tmp_path)
     original = manager._tree(state)
     import clytie.plugin_host.recovery as recovery
+
+    if stage == "decrypt":
+        snapshot.write_bytes(b"fictional-corrupt-snapshot")
 
     rename, tree = Path.rename, manager._tree
 
@@ -88,8 +91,14 @@ def test_restore_stops_at_each_failure_and_reports_all_locations(tmp_path, monke
         assert tree(tmp_path / locations["failed"]) == original
     else:
         assert tree(state) == original
-    assert (tmp_path / locations["temporary"]).is_dir()
-    assert len(moves) == {"write": 0, "verify": 0, "move_failed": 1, "move_restored": 2}[stage]
+    if stage == "decrypt":
+        assert locations["temporary"] is None
+    else:
+        assert (tmp_path / locations["temporary"]).is_dir()
+    assert (
+        len(moves)
+        == {"decrypt": 0, "write": 0, "verify": 0, "move_failed": 1, "move_restored": 2}[stage]
+    )
 
 
 def test_cleanup_requires_exact_read_only_plan_and_records_each_deletion(tmp_path):
