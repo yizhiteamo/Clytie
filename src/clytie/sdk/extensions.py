@@ -5,11 +5,27 @@ from typing import Protocol, runtime_checkable
 from pydantic import JsonValue
 
 from .cancellation import CancelToken
-from .types import BusEvent, ContextRequest, ContextSection, Notice, Receipt, Tick
+from .types import (
+    ApiResponse,
+    BusEvent,
+    ContextRequest,
+    ContextSection,
+    JsonObject,
+    Notice,
+    Receipt,
+    Tick,
+)
 
 
 class ApiClient(Protocol):
-    """CLI 调用 API 的边界；具体操作在管理接口里程碑定义。"""
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: JsonObject | None = None,
+        query: dict[str, str] | None = None,
+    ) -> ApiResponse: ...
 
 
 @runtime_checkable

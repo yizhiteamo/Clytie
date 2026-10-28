@@ -147,6 +147,9 @@ repos:
               if any(pattern.search(line) for pattern in secret_patterns):
                   categories.add("possible-secret")
               for match in assignment_pattern.finditer(line):
+                  # 配置 Schema 的 secret 字段结构声明不包含凭据值；只允许这一行的起始花括号。
+                  if re.fullmatch(r"\s*\"secret\"\s*:\s*\{\s*", line):
+                      continue
                   value = match.group(1).strip(chr(34) + chr(39))
                   remainder = line[match.end():].strip()
                   complete_value = not remainder or remainder.startswith("#") or re.fullmatch(r"[,}\])]+", remainder)

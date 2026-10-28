@@ -1,33 +1,158 @@
-"""上下文基础协议；可选权限属性由 A2 宿主按授权动态提供。"""
+"""上下文方法协议；可选属性由宿主按权限提供，未授权时不存在。"""
 
+from pathlib import Path
 from random import Random
 from typing import Protocol
 
+from .cancellation import CancelToken
 from .clock import Clock
-from .types import JsonObject
+from .types import (
+    Actor,
+    AssetRef,
+    Conversation,
+    HttpResponse,
+    JsonObject,
+    JsonValue,
+    MemoryDraft,
+    MemoryRecord,
+    MessagePart,
+    ModelRequest,
+    ModelTurn,
+    ProcessResult,
+)
+
+
+class RevisionConflict(Exception):
+    """调用方修订号已过期。"""
+
+
+class ServiceUnavailable(Exception):
+    """服务当前不可用。"""
+
+
+class Logger(Protocol):
+    def debug(self, msg: str, **fields: JsonValue) -> None: ...
+    def info(self, msg: str, **fields: JsonValue) -> None: ...
+    def warning(self, msg: str, **fields: JsonValue) -> None: ...
+    def error(self, msg: str, **fields: JsonValue) -> None: ...
+
+
+class Storage(Protocol):
+    @property
+    def path(self) -> Path: ...
+    async def get(self, key: str) -> JsonValue | None: ...
+    async def set(self, key: str, value: JsonValue) -> None: ...
+    async def delete(self, key: str) -> None: ...
+    async def keys(self, prefix: str = "") -> list[str]: ...
+
+
+class Events(Protocol):
+    async def publish(self, name: str, payload: JsonObject) -> None: ...
+
+
+class State(Protocol):
+    async def set(self, payload: JsonObject) -> None: ...
+
+
+class Assets(Protocol):
+    async def info(self, asset_id: str) -> AssetRef: ...
+    async def read(self, asset_id: str) -> bytes: ...
+    async def path(self, asset_id: str) -> Path: ...
+
+
+class AssetWriter(Protocol):
+    async def put(self, data: bytes, media_type: str, origin: str) -> AssetRef: ...
+
+
+class MemoryView(Protocol):
+    async def search(self, text: str, *, scene: str, limit: int = 10) -> list[MemoryRecord]: ...
+    async def get(self, record_id: str) -> MemoryRecord | None: ...
+
+
+class WritableMemoryView(MemoryView, Protocol):
+    async def write(self, draft: MemoryDraft) -> MemoryRecord: ...
+    async def revise(
+        self, record_id: str, expected_revision: int, changes: JsonObject
+    ) -> MemoryRecord: ...
+    async def retract(self, record_id: str, expected_revision: int, reason: str) -> None: ...
+
+
+class ServiceProxy(Protocol):
+    async def call(self, method: str, args: JsonObject) -> JsonObject: ...
+
+
+class Services(Protocol):
+    def get(self, name: str) -> ServiceProxy | None: ...
+
+
+class Peer(Protocol):
+    async def send(self, companion_id: str, kind: str, payload: JsonObject) -> str: ...
+    async def request(
+        self, companion_id: str, kind: str, payload: JsonObject, timeout_s: float
+    ) -> JsonObject: ...
+
+
+class ModelInvoker(Protocol):
+    async def generate(
+        self, req: ModelRequest, cancel: CancelToken, *, purpose: str
+    ) -> ModelTurn: ...
+
+
+class Http(Protocol):
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        body: bytes | None = None,
+        timeout_s: float = 30,
+        max_bytes: int = 20 * 1024 * 1024,
+    ) -> HttpResponse: ...
+
+
+class Proactive(Protocol):
+    async def submit(
+        self, conversation_id: str, parts: list[MessagePart], *, reason: str
+    ) -> str: ...
+
+
+class Subprocess(Protocol):
+    async def run(
+        self,
+        args: list[str],
+        *,
+        timeout_s: float,
+        env: dict[str, str] | None = None,
+        max_output_bytes: int = 10 * 1024 * 1024,
+    ) -> ProcessResult: ...
+
+
+class Identity(Protocol):
+    def resolve_actor(self, account: str) -> Actor: ...
+    def resolve_conversation(self, kind: str, platform_id: str) -> Conversation: ...
+    def account_for(self, actor_id: str) -> str | None: ...
+    def platform_id_for(self, conversation_id: str) -> str | None: ...
 
 
 class PluginContext(Protocol):
     @property
     def plugin_id(self) -> str: ...
-
     @property
     def companion_id(self) -> str: ...
-
     @property
     def config(self) -> JsonObject: ...
-
     @property
-    def log(self) -> object: ...
-
+    def log(self) -> Logger: ...
     @property
     def clock(self) -> Clock: ...
-
     @property
     def random(self) -> Random: ...
-
     @property
-    def storage(self) -> object: ...
-
+    def storage(self) -> Storage: ...
     @property
-    def events(self) -> object: ...
+    def events(self) -> Events: ...
+    @property
+    def state(self) -> State: ...
+    @property
+    def assets(self) -> Assets: ...

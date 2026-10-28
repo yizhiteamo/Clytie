@@ -221,7 +221,60 @@
     },
     "boundary": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "refusal_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 5
+        },
+        "window_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 24
+        },
+        "categories": {
+          "type": "object",
+          "properties": {
+            "romance": {
+              "type": "boolean",
+              "default": true
+            },
+            "persona_change": {
+              "type": "boolean",
+              "default": true
+            },
+            "scripted_intimacy": {
+              "type": "boolean",
+              "default": true
+            },
+            "intimate_images": {
+              "type": "boolean",
+              "default": true
+            },
+            "owner_privacy": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "never_publish": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "notify_owner": {
+          "type": "boolean",
+          "default": true
+        }
+      },
       "patternProperties": {
         "^x-": {}
       },
@@ -229,7 +282,38 @@
     },
     "context": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "max_messages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 2e5,
+          "default": 2e4
+        },
+        "max_single_message_chars": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 2e4,
+          "default": 2000
+        },
+        "material_full_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1440,
+          "default": 15
+        },
+        "material_budget_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1e5,
+          "default": 6000
+        }
+      },
       "patternProperties": {
         "^x-": {}
       },

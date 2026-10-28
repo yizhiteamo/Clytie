@@ -64,6 +64,7 @@ from clytie.sdk.testing.samples import (
     sample_memory,
     sample_query,
     sample_request,
+    sample_task_summary,
 )
 from clytie.sdk.types import (
     BusEvent,
@@ -114,7 +115,7 @@ async def test_capability_contract(ctx):
 
 async def test_behavior_observer_contracts(ctx):
     await assert_message_received_contract(FakeMessageReceived(ctx), sample_event(ctx.clock))
-    await assert_task_completed_contract(FakeTaskCompleted(ctx), {"status": "ok"})
+    await assert_task_completed_contract(FakeTaskCompleted(ctx), sample_task_summary(ctx.clock))
 
 
 async def test_attention_behavior_contracts(ctx):
@@ -264,7 +265,7 @@ def test_fake_context_has_only_granted_fields_and_deeply_readonly_config():
         ctx.config["nested"]["items"].append("forbidden")
     for attribute in (
         "memory",
-        "assets",
+        "asset_writer",
         "services",
         "peer",
         "model",

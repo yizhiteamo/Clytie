@@ -10,7 +10,16 @@ from .types import MemoryHit, MemoryQuery, MemoryRecord
 
 
 class CandidateReader(Protocol):
-    """候选读取能力边界；具体读取方法尚未由规格定义。"""
+    def iter(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        scope: str | None = None,
+        updated_after: datetime | None = None,
+        batch: int = 200,
+    ) -> AsyncIterator[list[MemoryRecord]]: ...
+    async def get(self, record_ids: list[str]) -> list[MemoryRecord]: ...
+    async def count(self) -> int: ...
 
 
 @runtime_checkable

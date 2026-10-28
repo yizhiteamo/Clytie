@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
-from random import Random
-from typing import Any, Literal
+from typing import Literal
 
 from clytie.sdk.cancellation import CancelToken
-from clytie.sdk.clock import Clock
-from clytie.sdk.testing.clock import MockClock
 from clytie.sdk.testing.helpers import cancellable_wait
 from clytie.sdk.types import (
     QUOTA_UNKNOWN,
@@ -21,7 +17,6 @@ from clytie.sdk.types import (
     ContextSection,
     DeliveryIntent,
     EventEnvelope,
-    FrozenDict,
     Invocation,
     MemoryHit,
     MemoryQuery,
@@ -38,25 +33,9 @@ from clytie.sdk.types import (
     ToolResult,
 )
 
-
-@dataclass(frozen=True)
-class FakeContext:
-    """最小测试上下文；没有授权的可选属性不存在。
-
-    尚未规定签名的日志、存储和事件接口仅放置不透明对象，不制造本体 API。
-    """
-
-    plugin_id: str = "fake-plugin"
-    companion_id: str = "companion_a"
-    config: Mapping[str, Any] = field(default_factory=FrozenDict)
-    clock: Clock = field(default_factory=MockClock)
-    random: Random = field(default_factory=lambda: Random(0))
-    log: object = field(default_factory=object)
-    storage: object = field(default_factory=object)
-    events: object = field(default_factory=object)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "config", FrozenDict(self.config))
+from .context_fakes import FakeApiClient as FakeApiClient
+from .context_fakes import FakeCandidateReader as FakeCandidateReader
+from .context_fakes import FakeContext
 
 
 class FakeModel:
@@ -192,10 +171,6 @@ class FakeEventSubscriber:
         self.events.append(e)
 
 
-class FakeCandidateReader:
-    """尚未规定读取方法的协议占位；不模拟隐私投影 API。"""
-
-
 class FakeRetriever:
     def __init__(self, ctx: FakeContext | None = None) -> None:
         self.ctx = ctx or FakeContext()
@@ -204,8 +179,15 @@ class FakeRetriever:
         self, q: MemoryQuery, candidates: object, cancel: CancelToken
     ) -> list[MemoryHit]:
         await cancellable_wait(self.ctx.clock, 0, cancel)
-        # CandidateReader 的读取签名尚未规定；空结果不访问或泄露任何候选记录。
-        return []
+        hits = []
+        async for batch in candidates.iter(scope=q.scope):
+            cancel.raise_if_cancelled()
+            for record in batch:
+                if q.text in record.content:
+                    hits.append(
+                        MemoryHit(record_id=record.record_id, score=1, source="fake-retriever")
+                    )
+        return hits[: q.limit]
 
 
 class FakeImporter:
@@ -248,10 +230,7 @@ class FakeNotifier:
         return Receipt(intent_id="d" * 32, status="sent", at=self.ctx.clock.now())
 
 
-class FakeApiClient:
-    """尚未规定客户端方法；CLI 假实现不执行本体业务。"""
-
-
 class FakeCliCommand:
     async def run(self, args: dict, api: object) -> int:
-        return 0
+        response = await api.request("GET", "/api/v1/status")
+        return 0 if response.status == 200 else 1

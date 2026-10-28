@@ -124,3 +124,16 @@ def test_lock_metadata_has_narrow_allowance(monkeypatch, capsys):
 
 def test_lock_file_is_not_exempt_from_account_scan(monkeypatch, capsys):
     assert run_scan(monkeypatch, capsys, "account = " + "8" * 9, filename="uv.lock")[0] == 1
+
+
+def test_schema_secret_object_opening_contains_no_credential(monkeypatch, capsys):
+    key = "sec" + "ret"
+    declaration = f'"{key}": {{'
+    assert run_scan(monkeypatch, capsys, declaration)[0] == 0
+    assert run_scan(monkeypatch, capsys, declaration, private=True, denylist=key)[0] == 1
+
+
+@pytest.mark.parametrize("value", ['"unapproved-fictional-value"', '{"value": "unapproved"}'])
+def test_schema_structure_exception_does_not_allow_values(monkeypatch, capsys, value):
+    key = "sec" + "ret"
+    assert run_scan(monkeypatch, capsys, f'"{key}": {value}')[0] == 1

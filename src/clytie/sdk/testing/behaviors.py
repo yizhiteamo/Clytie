@@ -1,7 +1,14 @@
 """行为环节的中性假实现，不执行发送或账本操作。"""
 
 from clytie.sdk.behavior import Normal, Respond
-from clytie.sdk.types import CompanionState, DeliveryIntent, EventEnvelope, Message, ReplyDraft
+from clytie.sdk.types import (
+    CompanionState,
+    DeliveryIntent,
+    EventEnvelope,
+    Message,
+    ReplyDraft,
+    TaskSummary,
+)
 
 from .fakes import FakeContext
 
@@ -41,5 +48,5 @@ class FakeBeforeSend(_FakeBehavior):
 
 
 class FakeTaskCompleted(_FakeBehavior):
-    async def __call__(self, input: dict) -> None:
+    async def __call__(self, input: TaskSummary) -> None:
         await self.ctx.clock.sleep(0)

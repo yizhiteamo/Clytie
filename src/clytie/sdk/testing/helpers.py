@@ -6,8 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
-from clytie.sdk.cancellation import Cancelled, CancelToken
+from clytie.sdk.cancellation import CancelToken
 from clytie.sdk.clock import Clock
+from clytie.sdk.types import ToolResult
 
 T = TypeVar("T")
 
@@ -43,13 +44,39 @@ async def cancellable_wait(clock: Clock, seconds: float, cancel: CancelToken) ->
 
 async def assert_token_cancellation(
     operation: Callable[[CancelToken], Awaitable[T]],
+    *,
+    allow_cancelled_result: bool = False,
+    clock: Clock | None = None,
+    grace_s: float = 5,
 ) -> None:
-    """预先取消的令牌必须传播 SDK 的 Cancelled。"""
+    """预取消必须传播取消异常；能力也可返回已取消结果。"""
     cancel = CancelToken()
     cancel.cancel("contract-test")
+    from .clock import MockClock
+    from .lifecycle import with_clock_timeout
+
+    driver = None
+    if clock is None:
+        clock = MockClock()
+
+        async def advance_budget():
+            # 默认针对应立即响应预取消的实现；自定义耗时测试传入并驱动自己的时钟。
+            for _ in range(16):
+                await checkpoint()
+            clock.advance(grace_s)
+
+        driver = asyncio.create_task(advance_budget())
     try:
-        await operation(cancel)
-    except Cancelled:
+        result = await with_clock_timeout(operation(cancel), clock, grace_s)
+    except asyncio.CancelledError:
+        return
+    except TimeoutError as exc:
+        raise AssertionError("operation exceeded cancellation grace period") from exc
+    finally:
+        if driver is not None:
+            driver.cancel()
+            await asyncio.gather(driver, return_exceptions=True)
+    if allow_cancelled_result and isinstance(result, ToolResult) and result.status == "cancelled":
         return
     raise AssertionError("operation did not propagate Cancelled")
 
@@ -58,6 +85,7 @@ async def assert_task_cancellation(
     operation: Callable[[], Awaitable[T]],
     *,
     started: Awaitable[object] | None = None,
+    allow_cancelled_result: bool = False,
 ) -> None:
     """验证协程取消传播；可传 started 等待实现进入耗时步骤。"""
     task = asyncio.create_task(operation())
@@ -65,7 +93,9 @@ async def assert_task_cancellation(
         await started
     task.cancel()
     try:
-        await task
+        result = await task
     except asyncio.CancelledError:
+        return
+    if allow_cancelled_result and isinstance(result, ToolResult) and result.status == "cancelled":
         return
     raise AssertionError("operation swallowed asyncio.CancelledError")

@@ -102,7 +102,43 @@ def samples():
     query = t.MemoryQuery(
         text="fictional", scene="public_group", allowed_visibility=["public"], limit=3
     )
+    from clytie.sdk.testing import MockClock
+    from clytie.sdk.testing.samples import sample_task_summary
+
+    summary = sample_task_summary(MockClock())
+    new_models = [
+        t.ApiResponse(status=200, json={"nested": [True]}),
+        t.HttpResponse(
+            status=200, headers={"content-type": "application/octet-stream"}, body=b"\xfb\xff"
+        ),
+        t.ProcessResult(returncode=0, stdout=b"\xfb\xff", stderr=b"\xfe", truncated=False),
+        t.MemoryDraft(kind="fact", content="fictional", visibility="public", source_type="group"),
+        t.ConversationNotice(kind="recall", target=ref),
+        t.ConversationRequest(kind="friend", actor_id="owner", request_ref="fake-request"),
+        t.MessageReceivedPayload(
+            event_id=event.event_id,
+            trace_id="c" * 32,
+            conversation_id="test_group",
+            scene="public_group",
+            actor_id="owner",
+        ),
+        t.ReplySentPayload(trace_id="c" * 32, conversation_id="test_group", intent_ids=["b" * 32]),
+        t.TaskStartedPayload(
+            task_id="abcdabcd",
+            trace_id="c" * 32,
+            tool="fake-tool",
+            actor_id="owner",
+            conversation_id="test_group",
+        ),
+        summary,
+        t.CompanionStateChangedPayload(
+            companion_id="companion_a", plugin_id="fake-plugin", state={"ready": True}
+        ),
+        t.QuotaChangedPayload(model_plugin="fake-model", protection_mode=False),
+        t.PluginChangedPayload(plugin_id="fake-plugin", companion_id="companion_a"),
+    ]
     return [
+        *new_models,
         actor,
         conversation,
         ref,
@@ -150,12 +186,14 @@ def samples():
         t.CompanionState(companion_id="companion_a", states={"fake.state": {"ready": True}}),
         t.ContextRequest(scene="public_group", actor=actor, budget_chars=20),
         t.ContextSection(title="fictional context", text="fictional", priority=100),
-        t.ApiRouteDeclaration(method="GET", path="/plugins/fake-plugin/state"),
+        t.ApiRouteDeclaration(handler="on_status", method="GET", path="/plugins/fake-plugin/state"),
         t.WebuiPanelDeclaration(
             id="fake-panel", title="fictional", kind="kv", data_route="/plugins/fake-plugin/state"
         ),
-        t.ServiceDeclaration(name="fake.state", version="1.0", methods=["get"]),
-        t.ScheduleDeclaration(id="fake-tick", every="PT1M"),
+        t.ServiceDeclaration(
+            handler="on_service", name="fake.state", version="1.0", methods=["get"]
+        ),
+        t.ScheduleDeclaration(handler="on_tick", id="fake-tick", every="PT1M"),
     ]
 
 
@@ -281,14 +319,18 @@ def test_collection_defaults_do_not_use_none():
 
 def test_plugin_route_requires_audit_and_scoped_path():
     with pytest.raises(ValidationError, match="audit"):
-        t.ApiRouteDeclaration(method="POST", path="/plugins/fake-plugin/action")
+        t.ApiRouteDeclaration(
+            handler="on_status", method="POST", path="/plugins/fake-plugin/action"
+        )
     assert t.ApiRouteDeclaration(
-        method="POST", path="/plugins/fake-plugin/action", audit=True
+        handler="on_status", method="POST", path="/plugins/fake-plugin/action", audit=True
     ).audit
     with pytest.raises(ValidationError):
-        t.ApiRouteDeclaration(method="GET", path="/management/action")
+        t.ApiRouteDeclaration(handler="on_status", method="GET", path="/management/action")
     with pytest.raises(ValidationError):
-        t.ApiRouteDeclaration(method="GET", path="/plugins/fake-plugin/../../management")
+        t.ApiRouteDeclaration(
+            handler="on_status", method="GET", path="/plugins/fake-plugin/../../management"
+        )
 
 
 def test_declarative_panel_does_not_accept_scripts():
@@ -317,12 +359,12 @@ def test_declarative_panel_does_not_accept_scripts():
 )
 def test_schedule_rejects_ambiguous_or_invalid_time(fields):
     with pytest.raises(ValidationError):
-        t.ScheduleDeclaration(id="fake-tick", **fields)
+        t.ScheduleDeclaration(handler="on_tick", id="fake-tick", **fields)
 
 
 @pytest.mark.parametrize("duration", ["PT1M", "P1D", "P1W", "P1Y2M3DT4H5M6S", "PT0.5S"])
-def test_duration_forms_and_uninterpreted_days_roundtrip(duration):
-    value = t.ScheduleDeclaration(id="fake-tick", every=duration)
+def test_duration_forms_and_iso_days_roundtrip(duration):
+    value = t.ScheduleDeclaration(handler="on_tick", id="fake-tick", every=duration)
     assert t.ScheduleDeclaration.model_validate_json(value.model_dump_json()) == value
-    daily = t.ScheduleDeclaration(id="fake-daily", at="23:00", days=["uninterpreted", 1])
+    daily = t.ScheduleDeclaration(handler="on_tick", id="fake-daily", at="23:00", days=[1, 7])
     assert t.ScheduleDeclaration.model_validate_json(daily.model_dump_json()) == daily

@@ -297,7 +297,7 @@ def test_unresolvable_local_ref_is_an_error_not_traceback(tmp_path):
     assert any("schema" in error.expected for error in report.errors)
 
 
-def test_defaults_apply_to_inline_model_config_without_defining_new_precedence(tmp_path):
+def test_defaults_apply_to_inline_model_config(tmp_path):
     home, repository, _, _ = make_home(tmp_path)
     update_plugin(
         repository,

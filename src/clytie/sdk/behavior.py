@@ -17,6 +17,7 @@ from .types import (
     MessagePart,
     ReplyDraft,
     SDKModel,
+    TaskSummary,
     TextPart,
 )
 
@@ -87,7 +88,7 @@ class BeforeSendHandler(Protocol):
 
 
 class TaskCompletedHandler(Protocol):
-    async def __call__(self, input: JsonObject) -> None: ...
+    async def __call__(self, input: TaskSummary) -> None: ...
 
 
 def merge_before_attention(

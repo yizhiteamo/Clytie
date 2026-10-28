@@ -59,6 +59,7 @@ from clytie.sdk.types import (
     Receipt,
     ReplyDraft,
     SDKModel,
+    TaskSummary,
     Tick,
     ToolCall,
     ToolResult,
@@ -122,9 +123,19 @@ def assert_plugin_context_contract(context: Any, *, granted: Sequence[str] = ())
     assert isinstance(context.companion_id, str)
     assert isinstance(context.config, Mapping)
     _assert_readonly(context.config)
-    for name in ("log", "clock", "random", "storage", "events"):
+    for name in ("log", "clock", "random", "storage", "events", "state", "assets"):
         assert getattr(context, name) is not None
-    optional = ("memory", "assets", "services", "peer", "model", "http", "proactive", "subprocess")
+    optional = (
+        "memory",
+        "asset_writer",
+        "services",
+        "peer",
+        "model",
+        "http",
+        "proactive",
+        "subprocess",
+        "identity",
+    )
     for name in optional:
         assert hasattr(context, name) == (name in granted), (
             f"incorrect permission attribute: {name}"
@@ -220,8 +231,12 @@ async def assert_capability_contract(capability: Any, call: ToolCall, inv: Invoc
         assert isinstance(result, ToolResult)
         assert result.call_id == call.call_id
         assert_roundtrip(result)
-        await assert_token_cancellation(lambda cancel: capability.execute(prepared, inv, cancel))
-        await assert_task_cancellation(lambda: capability.execute(prepared, inv, CancelToken()))
+        await assert_token_cancellation(
+            lambda cancel: capability.execute(prepared, inv, cancel), allow_cancelled_result=True
+        )
+        await assert_task_cancellation(
+            lambda: capability.execute(prepared, inv, CancelToken()), allow_cancelled_result=True
+        )
     await assert_task_cancellation(lambda: capability.prepare(call, inv))
 
 
@@ -270,8 +285,9 @@ async def assert_before_send_contract(handler: Callable, intents: list[DeliveryI
         assert valid_before_send(original, result)
 
 
-async def assert_task_completed_contract(handler: Callable, summary: dict) -> None:
-    json.dumps(summary, allow_nan=False)
+async def assert_task_completed_contract(handler: Callable, summary: TaskSummary) -> None:
+    assert isinstance(summary, TaskSummary)
+    assert_roundtrip(summary)
     assert await _assert_handler(handler, summary, ()) is None
 
 

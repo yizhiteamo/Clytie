@@ -1,7 +1,8 @@
-"""SDK 0.1 的不可变、可序列化数据契约。"""
+"""SDK 0.2 的不可变、可序列化数据契约。"""
 
 from __future__ import annotations
 
+import base64
 import re
 from datetime import datetime, timezone
 from enum import Enum
@@ -10,14 +11,16 @@ from typing import Annotated, Literal
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
+    PlainSerializer,
     StringConstraints,
     model_validator,
 )
 
-from .immutable import FrozenDict, FrozenList
+from .immutable import FrozenDict, FrozenList, freeze, thaw
 
 
 def _utc(value: datetime) -> datetime:
@@ -31,12 +34,33 @@ TraceId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 TaskId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{8}$")]
 AssetId = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 JsonObject = FrozenDict[JsonValue]
+FrozenJson = Annotated[JsonValue, AfterValidator(freeze), PlainSerializer(thaw)]
+
+
+def _decode_bytes(value, info):
+    if info.mode == "json":
+        if not isinstance(value, str):
+            raise ValueError("JSON bytes must be a standard Base64 string")
+        return base64.b64decode(value, validate=True)
+    return value
+
+
+JsonBytes = Annotated[
+    bytes,
+    BeforeValidator(_decode_bytes),
+    PlainSerializer(
+        lambda value: base64.b64encode(value).decode("ascii"), return_type=str, when_used="json"
+    ),
+]
 QUOTA_UNKNOWN: Literal["unknown"] = "unknown"
 
 
 class SDKModel(BaseModel):
     model_config = ConfigDict(
-        frozen=True, extra="forbid", validate_default=True, allow_inf_nan=False
+        frozen=True,
+        extra="forbid",
+        validate_default=True,
+        allow_inf_nan=False,
     )
 
     def model_copy(self, *, update=None, deep=False):
@@ -168,6 +192,20 @@ class Message(SDKModel):
     reply_to: MessageRef | None = None
 
 
+class ConversationNotice(SDKModel):
+    kind: Literal["recall", "member_join", "member_leave", "poke", "other"]
+    actor_id: str | None = None
+    target: MessageRef | None = None
+    detail: str | None = None
+
+
+class ConversationRequest(SDKModel):
+    kind: Literal["friend", "group_invite"]
+    actor_id: str
+    comment: str | None = None
+    request_ref: str
+
+
 class EventEnvelope(SDKModel):
     event_id: str
     type: str
@@ -175,12 +213,18 @@ class EventEnvelope(SDKModel):
     channel_id: str
     conversation: Conversation
     message: Message | None = None
-    notice: JsonObject | None = None
+    notice: ConversationNotice | ConversationRequest | None = None
     received_at: UTCDateTime
     raw_ref: str | None = None
 
     @model_validator(mode="after")
     def check_message(self):
+        notice_type = {
+            "conversation.notice": ConversationNotice,
+            "conversation.request": ConversationRequest,
+        }.get(self.type)
+        if notice_type is not None and not isinstance(self.notice, notice_type):
+            raise ValueError(f"{self.type} requires {notice_type.__name__}")
         if not self.event_id.startswith(f"{self.channel_id}:"):
             raise ValueError("event_id must start with channel_id and a colon")
         if self.type == "conversation.message":
@@ -377,6 +421,13 @@ class BusEvent(SDKModel):
     at: UTCDateTime
     source: str
 
+    @model_validator(mode="after")
+    def check_core_payload(self):
+        payload_type = CORE_PAYLOAD_TYPES.get(self.name)
+        if payload_type is not None:
+            payload_type.model_validate(thaw(self.payload))
+        return self
+
 
 class Notice(SDKModel):
     level: Literal["info", "warn", "error"]
@@ -418,7 +469,7 @@ class ReplyDraft(SDKModel):
 
 class CompanionState(SDKModel):
     companion_id: str
-    states: JsonObject
+    states: FrozenDict[JsonObject]
 
 
 class ContextRequest(SDKModel):
@@ -437,6 +488,7 @@ class ApiRouteDeclaration(SDKModel):
     method: str
     path: Annotated[str, StringConstraints(pattern=r"^/plugins/[a-z][a-z0-9]*(?:-[a-z0-9]+)*/")]
     audit: bool | None = None
+    handler: str
 
     @model_validator(mode="after")
     def check_audit(self):
@@ -458,13 +510,17 @@ class ServiceDeclaration(SDKModel):
     name: str
     version: str
     methods: FrozenList[str] = Field(default_factory=FrozenList)
+    handler: str
 
 
 class ScheduleDeclaration(SDKModel):
     id: str
     every: str | None = None
     at: str | None = None
-    days: FrozenList[JsonValue] = Field(default_factory=FrozenList)
+    days: FrozenList[Annotated[int, Field(strict=True, ge=1, le=7)]] = Field(
+        default_factory=FrozenList
+    )
+    handler: str
 
     @model_validator(mode="after")
     def check_schedule(self):
@@ -483,3 +539,105 @@ class ScheduleDeclaration(SDKModel):
             if self.days:
                 raise ValueError("days belongs to an at schedule")
         return self
+
+
+class ApiResponse(SDKModel):
+    model_config = ConfigDict(serialize_by_alias=True)
+    status: int
+    json_value: FrozenJson | None = Field(default=None, alias="json")
+
+    @property
+    def json(self) -> FrozenJson | None:
+        return self.json_value
+
+
+class HttpResponse(SDKModel):
+    status: int
+    headers: FrozenDict[str]
+    body: JsonBytes
+
+
+class ProcessResult(SDKModel):
+    returncode: int
+    stdout: JsonBytes
+    stderr: JsonBytes
+    truncated: bool
+
+
+class MemoryDraft(SDKModel):
+    kind: Literal["fact", "preference", "event", "episode", "profile", "jargon"]
+    content: str
+    subject: str | None = None
+    visibility: Visibility
+    source_type: Literal["private", "group", "owner_group_interaction"]
+    source_ref: str | None = None
+    scope: str | None = None
+    tags: FrozenList[str] = Field(default_factory=FrozenList)
+
+
+class MessageReceivedPayload(SDKModel):
+    event_id: str
+    trace_id: TraceId
+    conversation_id: str
+    scene: str
+    actor_id: str
+
+
+class ReplySentPayload(SDKModel):
+    trace_id: TraceId
+    conversation_id: str
+    intent_ids: FrozenList[TraceId] = Field(default_factory=FrozenList)
+    task_id: TaskId | None = None
+
+
+class TaskStartedPayload(SDKModel):
+    task_id: TaskId
+    trace_id: TraceId
+    tool: str
+    actor_id: str
+    conversation_id: str
+
+
+class TaskSummary(SDKModel):
+    task_id: TaskId
+    trace_id: TraceId
+    tool: str
+    status: Literal["ok", "error", "denied", "cancelled"]
+    actor_id: str
+    conversation_id: str
+    scene: str
+    started_at: UTCDateTime
+    finished_at: UTCDateTime
+    asset_ids: FrozenList[AssetId] = Field(default_factory=FrozenList)
+    error_code: str | None = None
+
+
+class CompanionStateChangedPayload(SDKModel):
+    companion_id: str
+    plugin_id: str
+    state: JsonObject
+
+
+class QuotaChangedPayload(SDKModel):
+    model_plugin: str
+    snapshot: QuotaSnapshot | None = None
+    protection_mode: bool
+
+
+class PluginChangedPayload(SDKModel):
+    plugin_id: str
+    companion_id: str
+    reason: str | None = None
+
+
+CORE_PAYLOAD_TYPES = {
+    "message.received": MessageReceivedPayload,
+    "reply.sent": ReplySentPayload,
+    "task.started": TaskStartedPayload,
+    "task.completed": TaskSummary,
+    "task.failed": TaskSummary,
+    "companion.state_changed": CompanionStateChangedPayload,
+    "quota.changed": QuotaChangedPayload,
+    "plugin.enabled": PluginChangedPayload,
+    "plugin.disabled": PluginChangedPayload,
+}

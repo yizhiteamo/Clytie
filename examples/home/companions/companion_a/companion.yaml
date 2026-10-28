@@ -9,7 +9,7 @@ model:
   config: {}
 channels:
   - plugin: fake-channel
-    account: "1000000003"
+    account: example_bot
     config: {}
 persona:
   files:

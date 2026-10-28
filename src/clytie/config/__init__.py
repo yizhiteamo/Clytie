@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from string import Formatter
 from types import MappingProxyType
 from typing import Any
@@ -419,6 +419,32 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
     except (ZoneInfoNotFoundError, ValueError):
         reader.issue(instance_file, ("timezone",), "IANA timezone", timezone)
     people = _entries(instance.get("people"))
+    accounts = _entries(instance.get("accounts"))
+    account_users: dict[str, str] = {}
+    for account_ref, account in accounts.items():
+        if not isinstance(account, dict) or "secret" not in account:
+            continue
+        relative = account["secret"]
+        secret_root = (directory / "secrets").resolve()
+        valid = False
+        if isinstance(relative, str) and relative and not PureWindowsPath(relative).drive:
+            supplied = Path(relative.replace("\\", "/"))
+            try:
+                candidate = (secret_root / supplied).resolve()
+                valid = (
+                    not supplied.is_absolute()
+                    and candidate.is_relative_to(secret_root)
+                    and candidate.is_file()
+                )
+            except (OSError, RuntimeError, ValueError):
+                valid = False
+        if not valid:
+            reader.issue(
+                instance_file,
+                ("accounts", account_ref, "secret"),
+                "existing file relative to secrets",
+                relative,
+            )
     owners = [
         key
         for key, value in people.items()
@@ -566,6 +592,10 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             continue
         if data.get("id") != companion_id:
             reader.issue(file, ("id",), f"directory id {companion_id}", data.get("id"))
+        for section in ("boundary", "context"):
+            defaults, _ = _default_config(reader.schemas["companion"]["properties"][section], file)
+            if isinstance(data.get(section, {}), dict):
+                data[section] = thaw(deep_merge(defaults, data.get(section, {})))
         names = data.get("names") if isinstance(data.get("names"), dict) else {}
         if "forbidden_names" not in data and isinstance(names.get("internal"), str):
             data["forbidden_names"] = [names["internal"]]
@@ -630,19 +660,51 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             references.append((model.get("plugin"), ("model",), model.get("config"), "model"))
         channels = data.get("channels")
         if isinstance(channels, list):
+            for index, channel in enumerate(channels):
+                if not isinstance(channel, dict):
+                    continue
+                ref = channel.get("account")
+                account = accounts.get(ref) if isinstance(ref, str) else None
+                position = ("channels", index, "account")
+                if not isinstance(account, dict):
+                    reader.issue(file, position, "declared instance account reference", ref)
+                else:
+                    if account.get("channel") != channel.get("plugin"):
+                        reader.issue(file, position, "account channel matches channel plugin", ref)
+                    if ref in account_users and account_users[ref] != companion_id:
+                        reader.issue(file, position, "account used by only one companion", ref)
+                        for previous_index, previous in enumerate(statuses):
+                            if previous["id"] == account_users[ref]:
+                                statuses[previous_index] = freeze({**previous, "valid": False})
+                    account_users[ref] = companion_id
             references.extend(
                 (channel.get("plugin"), ("channels", index), channel.get("config"), "channels")
                 for index, channel in enumerate(channels)
                 if isinstance(channel, dict)
             )
         plugin_settings = _entries(data.get("plugins"))
+        role_plugins = {ref[0] for ref in references if isinstance(ref[0], str)}
         references.extend(
             (key, ("plugins", key), value.get("config"), "plugins")
             for key, value in plugin_settings.items()
             if isinstance(value, dict) and value.get("enabled") is True
         )
+        listed_plugins = {ref[0] for ref in references if ref[3] == "plugins"}
+        references.extend(
+            (key, ("plugins", key), {}, "plugins") for key in sorted(role_plugins - listed_plugins)
+        )
         merged_for_companion: dict[str, Any] = {}
+        model_config = None
+        channel_configs: dict[int, Any] = {}
         for plugin_id, position, inline, kind in references:
+            setting = plugin_settings.get(plugin_id, {}) if isinstance(plugin_id, str) else {}
+            if kind != "plugins" and isinstance(setting, dict) and setting.get("enabled") is False:
+                reader.issue(
+                    file,
+                    ("plugins", plugin_id, "enabled"),
+                    "referenced model/channel must be enabled",
+                    False,
+                )
             plugin, plugin_file, state = manifest(
                 plugin_id, file, position + (("plugin",) if kind != "plugins" else ())
             )
@@ -652,6 +714,9 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             else:
                 status[kind].append(item)
             if state != "found" or plugin is None:
+                continue
+            if kind == "plugins" and plugin_id in role_plugins:
+                # 同一模型/平台由各账号的第四层最终配置校验，不提前校验未完整的三层。
                 continue
             schema = plugin["config"]
             defaults, origins = _default_config(schema, plugin_file)
@@ -669,22 +734,25 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 overrides.append((instance_config, instance_file, ("plugins", plugin_id, "config")))
             if isinstance(companion_config, dict):
                 overrides.append((companion_config, file, ("plugins", plugin_id, "config")))
+            base_merged = deep_merge(defaults, *(layer for layer, _, _ in overrides))
+            merged_for_companion[plugin_id] = base_merged
+            if kind != "plugins" and isinstance(inline, dict):
+                overrides.append((inline, file, position + ("config",)))
             _merge_origins(overrides, origins)
             merged = deep_merge(*(layer for layer, _, _ in layers_to_merge + overrides))
             reader.validate(thaw(merged), schema, plugin_file, ("config", "default"), origins)
-            merged_for_companion[plugin_id] = merged
-            # Inline model/channel configuration has no specified precedence over plugins.<id>.
-            if kind != "plugins" and isinstance(inline, dict):
-                inline_defaults, inline_origins = _default_config(schema, plugin_file)
-                _merge_origins([(inline, file, position + ("config",))], inline_origins)
-                reader.validate(
-                    thaw(deep_merge(inline_defaults, inline)),
-                    schema,
-                    file,
-                    position + ("config",),
-                    inline_origins,
-                )
-        configurations[companion_id] = freeze({"config": data, "plugins": merged_for_companion})
+            if kind == "model":
+                model_config = merged
+            elif kind == "channels":
+                channel_configs[position[1]] = merged
+        configurations[companion_id] = freeze(
+            {
+                "config": data,
+                "plugins": merged_for_companion,
+                "model": model_config,
+                "channels": channel_configs,
+            }
+        )
         status["valid"] = (
             not instance_errors
             and len(reader.errors) == start

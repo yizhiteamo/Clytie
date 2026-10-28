@@ -190,6 +190,38 @@
         "type": "string",
         "minLength": 1
       }
+    },
+    "accounts": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {},
+        "^(?!x-).+$": {
+          "type": "object",
+          "properties": {
+            "channel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "account": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secret": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "channel",
+            "account"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   },
   "patternProperties": {

@@ -6,6 +6,10 @@ people:
     accounts:
       - channel: fake-channel
         account: "1000000001"
+accounts:
+  example_bot:
+    channel: fake-channel
+    account: "1000000003"
 conversations:
   test_group:
     channel: fake-channel

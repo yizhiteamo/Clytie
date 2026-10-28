@@ -123,3 +123,19 @@ def sample_query() -> MemoryQuery:
     return MemoryQuery(
         text="imaginary puzzles", scene="public_group", allowed_visibility=["public"], limit=3
     )
+
+
+def sample_task_summary(clock):
+    from clytie.sdk.types import TaskSummary
+
+    return TaskSummary(
+        task_id="abcdabcd",
+        trace_id=TRACE_ID,
+        tool="fake-tool",
+        status="ok",
+        actor_id="owner",
+        conversation_id="test_group",
+        scene="public_group",
+        started_at=clock.now(),
+        finished_at=clock.now(),
+    )
