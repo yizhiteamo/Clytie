@@ -1,0 +1,226 @@
+# 初始提交自足：扫描器只用 Python 标准库，后续文件也使用同一检查。
+# 安装：pre-commit install --install-hooks（同时安装提交文件和提交消息检查）。
+# CI：pre-commit run check-public-files --all-files；不得用 SKIP 绕过本机私有检查。
+# 虚构号码白名单只允许 1000000000–1000000099；邮箱仅允许保留示例域和 GitHub noreply。
+# 日期、语义版本、完整 SHA-1/SHA-256、UUID 和明确字数单位按格式识别，不按文件豁免。
+minimum_pre_commit_version: "3.2.0"
+default_install_hook_types: [pre-commit, commit-msg]
+repos:
+  - repo: local
+    hooks:
+      - id: check-public-files
+        name: public content safety
+        language: system
+        stages: [pre-commit]
+        types: []
+        always_run: true
+        require_serial: true
+        entry: &safety_scan |
+          python -c '
+          import argparse
+          import datetime
+          import os
+          import pathlib
+          import re
+          import sys
+          import unicodedata
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--private", action="store_true")
+          parser.add_argument("--message", action="store_true")
+          parser.add_argument("files", nargs="*")
+          args = parser.parse_args()
+          root = pathlib.Path.cwd()
+          failures = []
+
+          def report(category, filename, line=1):
+              failures.append((category, filename, line))
+
+          def normalized(value):
+              return unicodedata.normalize("NFKC", value).casefold()
+
+          denylist = []
+          if args.private:
+              configured = os.environ.get("CLYTIE_HOME")
+              home = pathlib.Path(configured).expanduser() if configured else root.parent / "Clytie-home"
+              try:
+                  raw_list = (home / "private-denylist.txt").read_text(encoding="utf-8-sig")
+                  denylist = [normalized(line.strip()) for line in raw_list.splitlines()
+                              if line.strip() and not line.lstrip().startswith("#")]
+                  if not denylist:
+                      raise ValueError("empty denylist")
+              except (OSError, UnicodeError, ValueError):
+                  print("private-scan-unavailable: configure CLYTIE_HOME or sibling Clytie-home and provide a nonempty UTF-8 private-denylist.txt; commit refused")
+                  sys.exit(1)
+
+          forbidden_extensions = {
+              ".db", ".db3", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".mdb", ".accdb",
+              ".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".lz4", ".clytie-memory",
+              ".wav", ".mp3", ".m4a", ".ogg", ".flac", ".aac", ".opus", ".wma",
+              ".mp4", ".webm", ".mkv", ".avi", ".mov", ".mpeg", ".mpg", ".wmv",
+              ".png", ".jpg", ".jpeg", ".gif", ".webp",
+              ".pt", ".pth", ".onnx", ".safetensors", ".ckpt", ".gguf", ".ggml", ".bin",
+              ".pkl", ".pickle", ".npy", ".npz", ".h5", ".hdf5",
+              ".pem", ".p12", ".pfx", ".key", ".log", ".pid", ".pyc", ".pyo", ".tmp", ".bak", ".swp"
+          }
+          forbidden_directories = {
+              ".git", ".venv", "venv", "__pycache__", ".cache", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".pre-commit-cache",
+              ".idea", ".vscode",
+              "node_modules", "secrets", "backups", "run", "logs", "plugin-data"
+          }
+          runtime_directories = {"memory", "ledger", "assets", "exports", "persona", "companions", "config", "data", "clytie-home", "build", "dist"}
+          private_filenames = {"agents.local.md", "private-denylist.txt"}
+          email_pattern = re.compile(r"(?<![\w.+-])[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}(?![\w.-])")
+          number_pattern = re.compile(r"(?<!\d)\d{5,}(?!\d)")
+          hash_pattern = re.compile(r"(?<![A-Za-z0-9_])(?:[a-fA-F0-9]{64}|[a-fA-F0-9]{40})(?![A-Za-z0-9_])")
+          uuid_pattern = re.compile(r"(?<![A-Za-z0-9_])[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}(?![A-Za-z0-9_])")
+          version_pattern = re.compile(r"(?<![\w.])v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?![\w.])")
+          character_count_pattern = re.compile(r"(?<!\d)\d+\s*(?:字符|字)(?![A-Za-z0-9_])")
+          secret_patterns = [
+              re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----"),
+              re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+              re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"),
+              re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+              re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+              re.compile(r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b")
+          ]
+          assignment_pattern = re.compile(
+              r"(?i)(?<!\w)(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|passwd|secret|client[_-]?secret|authorization|cookie|private[_-]?key)"
+              r"[\"\x27]?\s*[:=]\s*(\"[^\"]*\"|\x27[^\x27]*\x27|[^\s,#]+)"
+          )
+          harmless_values = {
+              "", "none", "null", "false", "true", "str", "string", "unknown", "redacted",
+              "replace_me", "placeholder", "test-token", "fake-token", "test-secret", "fake-secret", "example-key"
+          }
+
+          def allowed_email(value):
+              local, domain = value.rsplit("@", 1)
+              domain = domain.lower()
+              if domain in {"example.com", "example.org", "example.net"}:
+                  return True
+              if domain.endswith((".invalid", ".test", ".example")):
+                  return True
+              return domain == "users.noreply.github.com" and re.fullmatch(r"(?:\d+\+)?[A-Za-z0-9-]+", local) is not None
+
+          def allowed_number(value):
+              if len(value) == 10 and "1000000000" <= value <= "1000000099":
+                  return True
+              if len(value) == 8:
+                  try:
+                      parsed = datetime.datetime.strptime(value, "%Y%m%d")
+                      return 1900 <= parsed.year <= 2199 and parsed.strftime("%Y%m%d") == value
+                  except ValueError:
+                      pass
+              return False
+
+          def public_categories(line):
+              categories = set()
+              if any(pattern.search(line) for pattern in secret_patterns):
+                  categories.add("possible-secret")
+              for match in assignment_pattern.finditer(line):
+                  value = match.group(1).strip(chr(34) + chr(39))
+                  remainder = line[match.end():].strip()
+                  complete_value = not remainder or remainder.startswith("#") or re.fullmatch(r"[,}\])]+", remainder)
+                  if complete_value and value.casefold() in harmless_values:
+                      continue
+                  if complete_value and re.fullmatch(r"\$\{[A-Z_][A-Z0-9_]*\}", value):
+                      continue
+                  if complete_value and re.fullmatch(r"os\.environ\[[\"\x27][A-Z_][A-Z0-9_]*[\"\x27]\]", value):
+                      continue
+                  if complete_value and re.fullmatch(r"(?:os\.environ\.get|(?:os\.)?getenv)\([\"\x27][A-Z_][A-Z0-9_]*[\"\x27]\)", value):
+                      continue
+                  categories.add("possible-secret-assignment")
+              excluded_spans = []
+              for match in email_pattern.finditer(line):
+                  excluded_spans.append(match.span())
+                  if not allowed_email(match.group()):
+                      categories.add("possible-personal-email")
+              for pattern in (hash_pattern, uuid_pattern, version_pattern, character_count_pattern):
+                  excluded_spans.extend(match.span() for match in pattern.finditer(line))
+              for match in number_pattern.finditer(line):
+                  if any(start <= match.start() and match.end() <= end for start, end in excluded_spans):
+                      continue
+                  if not allowed_number(match.group()):
+                      categories.add("possible-account-number")
+              return categories
+
+          for supplied in args.files:
+              path = pathlib.Path(supplied)
+              display = path.as_posix()
+              private_path = args.private and any(term in normalized(display) for term in denylist)
+              public_path_categories = public_categories(display) if not args.private else set()
+              if private_path or public_path_categories:
+                  display = "<sensitive-path>"
+              if private_path:
+                  report("private-content", display)
+              for category in sorted(public_path_categories):
+                  report(category, display)
+              try:
+                  if path.is_symlink() or not path.is_file():
+                      report("unsupported-file", display)
+                      continue
+                  if not args.private:
+                      parts = tuple(part.lower() for part in path.parts)
+                      example = parts[:2] == ("examples", "home")
+                      if not args.message:
+                          if any(suffix.lower() in forbidden_extensions or suffix.lower().startswith(".sqlite") for suffix in path.suffixes):
+                              report("forbidden-file-type", display)
+                          if any(part in forbidden_directories for part in parts[:-1]):
+                              report("runtime-directory", display)
+                          if parts and parts[0] in runtime_directories:
+                              report("runtime-directory", display)
+                          if example and any(part in {"memory", "ledger", "assets", "exports"} for part in parts[2:-1]):
+                              report("runtime-directory", display)
+                          if path.name.lower() in private_filenames or (path.name.lower() in {"clytie.local.yaml", "companion.yaml"} and not example):
+                              report("deployment-file", display)
+                          if path.name.lower() == ".env" or (path.name.lower().startswith(".env.") and path.name.lower() != ".env.example"):
+                              report("secret-environment-file", display)
+                      if path.stat().st_size > 1024 * 1024:
+                          report("file-over-one-mib", display)
+                          continue
+                  content = path.read_text(encoding="utf-8-sig")
+                  if "\x00" in content:
+                      report("binary-content", display)
+                      continue
+              except (OSError, UnicodeError):
+                  report("unreadable-or-non-utf8", display)
+                  continue
+              for line_number, line in enumerate(content.splitlines(), 1):
+                  if args.private:
+                      if any(term in normalized(line) for term in denylist):
+                          report("private-content", display, line_number)
+                  else:
+                      for category in sorted(public_categories(line)):
+                          report(category, display, line_number)
+
+          for category, filename, line_number in sorted(set(failures)):
+              print(f"{filename}:{line_number}: {category}")
+          sys.exit(bool(failures))
+          '
+      - id: check-private-files
+        name: private denylist safety (required locally)
+        language: system
+        stages: [pre-commit]
+        types: []
+        always_run: true
+        require_serial: true
+        entry: *safety_scan
+        args: [--private]
+      - id: check-public-commit-message
+        name: public commit message safety
+        language: system
+        stages: [commit-msg]
+        types: []
+        always_run: true
+        require_serial: true
+        entry: *safety_scan
+        args: [--message]
+      - id: check-private-commit-message
+        name: private commit message safety (required locally)
+        language: system
+        stages: [commit-msg]
+        types: []
+        always_run: true
+        require_serial: true
+        entry: *safety_scan
+        args: [--private, --message]

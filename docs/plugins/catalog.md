@@ -1,0 +1,27 @@
+# 预设的官方插件
+
+**这里只是预设，不是承诺。** 架构阶段只要求扩展点能够承载这些插件；具体做哪些、什么时候做，在功能阶段再定。每个插件实现时在 `plugins/<id>/` 下有自己的清单、代码、测试和 README。
+
+## 架构阶段需要的参考插件
+
+用来验证扩展点设计，必须在架构阶段完成：
+
+| id | 扩展点 | 用途 |
+|---|---|---|
+| `fake-model` | `model` | 测试用假模型 |
+| `fake-channel` | `channel` | 测试用假平台 |
+| `echo-tool` | `tool` | 最小能力插件示例 |
+| `example-behavior` | `behavior.*`、`context_section`、`schedule`、`service` | 最小行为插件示例 |
+| `keyword-retriever` | `memory.retriever` | 最小记忆检索扩展 |
+| `desktop-notifier` | `notifier` | 最小通知渠道 |
+
+## 功能阶段的预设
+
+| 分类 | 预设插件 |
+|---|---|
+| 能力 | 画图（含继续修改）、读网页、搜索、游戏社区、插画站、阅读卡片、群历史与群媒体、视频与 GIF、看视频和听语音、新闻漫画、语音、唱歌、表情包、`recall-material` |
+| 行为 | 说话时机、长回复拆分与引用、黑话、主动私聊、伴侣协作与同群协调、睡眠作息（参考设计见 `sleep.md`）、情感、梦境 |
+| 平台 | QQ（OneBot v11 网关）、推特、B 站 |
+| 模型 | Codex CLI（Agent 类，通过 MCP 提供能力）、DeepSeek Harness、本机向量模型 |
+| 记忆 | 中文关键词检索、向量检索、经历整理、旧系统导入器 |
+| 通知 | 平台私聊通知、桌面通知 |
