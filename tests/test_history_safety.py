@@ -36,12 +36,13 @@ def run_history(
     metadata=SAFE_METADATA,
     repeat=False,
     current_mode=None,
+    denylist="private-example-token\n",
 ):
     original_read = Path.read_text
 
     def read_text(file, **kwargs):
         if file.name == "private-denylist.txt":
-            return "private-example-token\n"
+            return denylist
         assert file == ROOT / ".pre-commit-config.yaml"
         return original_read(file, **kwargs)
 
@@ -166,3 +167,75 @@ def test_historical_fictional_example_config_is_allowed(monkeypatch, capsys):
         content=b"account: 1000000001\n",
     )
     assert code == 0
+
+
+OFFICIAL_EMAIL = "@".join(("noreply", "github.com"))
+
+
+def official_metadata(
+    *,
+    author_name="fictional-author",
+    author_email="owner@example.invalid",
+    committer_name="GitHub",
+    committer_email=OFFICIAL_EMAIL,
+    message="fixture",
+):
+    return "\n".join(
+        (author_name, author_email, committer_name, committer_email, message, "")
+    ).encode()
+
+
+def test_exact_official_committer_is_allowed(monkeypatch, capsys):
+    code, output, _ = run_history(monkeypatch, capsys, metadata=official_metadata())
+    assert code == 0
+    assert "History scan passed" in output
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"committer_name": "github"},
+        {"committer_name": "GitHub "},
+        {"committer_name": "fictional-author"},
+        {"committer_email": OFFICIAL_EMAIL.upper()},
+        {"committer_email": "other-" + OFFICIAL_EMAIL},
+    ],
+)
+def test_official_committer_exception_requires_exact_name_and_email(monkeypatch, capsys, fields):
+    code, output, _ = run_history(monkeypatch, capsys, metadata=official_metadata(**fields))
+    assert code == 1
+    assert ":committer:2: possible-personal-email" in output
+
+
+def test_official_identity_in_author_field_is_not_exempt(monkeypatch, capsys):
+    code, output, _ = run_history(
+        monkeypatch,
+        capsys,
+        metadata=official_metadata(author_name="GitHub", author_email=OFFICIAL_EMAIL),
+    )
+    assert code == 1
+    assert ":author:2: possible-personal-email" in output
+    assert ":committer:2: possible-personal-email" not in output
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"metadata": official_metadata(message=OFFICIAL_EMAIL)},
+        {"content": OFFICIAL_EMAIL.encode()},
+        {"path": f"docs/{OFFICIAL_EMAIL}.txt".encode()},
+    ],
+)
+def test_official_email_outside_committer_field_is_not_exempt(monkeypatch, capsys, fields):
+    code, output, _ = run_history(monkeypatch, capsys, **fields)
+    assert code == 1
+    assert "possible-personal-email" in output
+
+
+def test_official_committer_still_receives_private_scan(monkeypatch, capsys):
+    code, output, _ = run_history(
+        monkeypatch, capsys, metadata=official_metadata(), denylist="noreply\n"
+    )
+    assert code == 1
+    assert ":committer:2: private-content" in output
+    assert "possible-personal-email" not in output
