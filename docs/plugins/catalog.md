@@ -13,7 +13,7 @@
 | `echo-tool` | `tool` | 最小能力插件示例 |
 | `example-behavior` | `behavior.*`、`context_section`、`schedule`、`service` | 最小行为插件示例 |
 | `keyword-retriever` | `memory.retriever` | 最小记忆检索扩展 |
-| `desktop-notifier` | `notifier` | 最小通知渠道 |
+| `desktop-notifier` | `notifier` | 最小通知渠道：按真实的 Windows 桌面通知设计，通过 `ctx.subprocess` 调用系统命令；通知标题和内容通过环境变量或标准输入传入，**不拼接进命令字符串**（防止命令注入）。架构阶段只用注入的假后端测试；第一次真实弹出桌面通知前需要用户同意 |
 
 ## 功能阶段的预设
 
