@@ -16,6 +16,9 @@ FORBIDDEN = {
     "datetime.datetime.today",
     "datetime.date.today",
     "asyncio.sleep",
+    "asyncio.timeout",
+    "asyncio.timeout_at",
+    "asyncio.wait_for",
 }
 
 

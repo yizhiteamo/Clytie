@@ -1,8 +1,14 @@
-# 更新记录
+# 变更记录
+
+## 0.3.0（A2）
+
+- 插件宿主、四个参考插件、确定的官方索引、加密升级快照。
+- **SDK 不兼容变更（用户确认）**：MemoryView.search 删除 scene 参数，场景由宿主绑定。新增仅写入的 MemoryWriter 协议；只有同时具备读写权限时才提供 revise/retract。私密读取遵循 memory.private_scenes。
+- SDK.testing 的假上下文和契约同步更新；参考插件声明兼容 `>=0.3,<0.4`。
 
 ## SDK 0.2.0
 
-本次为用户确认的 A1 规格补齐，尚未合并发布。
+以下为已由用户合并验收的 A1 规格补齐记录。
 
 - 插件改为无参数构造及 `start(ctx)` / `stop()`；通过清单中实例方法的 factory/handler 装配。参考插件和测试同步迁移。
 - 补全 CandidateReader、ApiClient、上下文服务协议及离线假实现、契约检查。资产读取始终存在，写入改为按权限出现的 `asset_writer`。

@@ -221,11 +221,11 @@ class FakeMemory:
             self._records.values(), allowed_visibility=visible, clock=self.clock
         )
 
-    async def search(self, text, *, scene, limit=10):
+    async def search(self, text, *, limit=10):
         if limit < 0:
             raise ValueError("limit must be nonnegative")
         return [
-            r async for batch in self._reader(scene).iter() for r in batch if text in r.content
+            r async for batch in self._reader(self.scene).iter() for r in batch if text in r.content
         ][:limit]
 
     async def get(self, record_id):
@@ -233,7 +233,11 @@ class FakeMemory:
         return records[0] if records else None
 
 
-class FakeWritableMemory(FakeMemory):
+class FakeWriteOnlyMemory:
+    def __init__(self, clock, records=(), **kwargs):
+        self.clock = clock
+        self._records = {r.record_id: r for r in records}
+
     async def write(self, draft: MemoryDraft):
         await self.clock.sleep(0)
         index = len(self._records) + 1
@@ -252,9 +256,13 @@ class FakeWritableMemory(FakeMemory):
         self._records[record.record_id] = record
         return record
 
+
+class FakeWritableMemory(FakeMemory, FakeWriteOnlyMemory):
     async def revise(self, record_id, expected_revision, changes):
         await self.clock.sleep(0)
-        record = self._records[record_id]
+        record = await self.get(record_id)
+        if record is None:
+            raise KeyError("record unavailable")
         if record.revision != expected_revision:
             raise RevisionConflict(record_id)
         values = {
@@ -454,7 +462,14 @@ class FakeContext:
         if "assets.write" in permissions:
             self.asset_writer = FakeAssetWriter(self.assets)
         if any(p.startswith("memory.") for p in permissions):
-            cls = FakeWritableMemory if "memory.write" in permissions else FakeMemory
+            readable = any(p.startswith("memory.read.") for p in permissions)
+            cls = (
+                FakeWritableMemory
+                if readable and "memory.write" in permissions
+                else FakeMemory
+                if readable
+                else FakeWriteOnlyMemory
+            )
             self.memory = cls(
                 self.clock, records, private="memory.read.private" in permissions, scene=scene
             )

@@ -318,6 +318,26 @@
         "^x-": {}
       },
       "additionalProperties": false
+    },
+    "memory": {
+      "type": "object",
+      "properties": {
+        "private_scenes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": [
+            "owner_private"
+          ]
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
     }
   },
   "patternProperties": {

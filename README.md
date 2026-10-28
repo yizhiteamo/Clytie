@@ -2,7 +2,7 @@
 
 Clytie 是可复用的 AI 伴侣框架：本体提供事件、账本、记忆、边界、插件宿主和守护进程；模型、平台、能力和行为通过插件接入。每个伴侣使用独立的配置、人设与记忆。
 
-项目当前实现 A1（工程与 SDK，SDK 0.2.0）：不可变 SDK 数据、取消和时钟协议、可复用契约测试、假模型与假平台、配置校验和离线状态命令。范围与验收标准见 [路线图](docs/roadmap.md)，架构入口见 [架构总览](docs/architecture/overview.md)。本体执行、真实平台与模型接入属于后续里程碑。
+项目当前实现 A2（插件宿主，SDK 0.3.0）：在 A1 的不可变 SDK、取消/时钟协议、契约测试和配置校验基础上，增加插件发现、依赖计划、按伴侣装配、权限裁剪、行为分发、热加载和加密升级快照。范围与验收标准见 [路线图](docs/roadmap.md)，架构入口见 [架构总览](docs/architecture/overview.md)。本体账本、记忆存储、真实平台与模型接入属于后续里程碑。
 
 ## 安装与离线验证
 
@@ -17,6 +17,7 @@ uv run --no-sync pytest
 uv run --no-sync ruff check .
 uv run --no-sync ruff format --check .
 uv run --no-sync python scripts/check_architecture.py
+uv run --no-sync python scripts/build_catalog.py --check
 ```
 
 `status` 只读配置、插件清单和人设文件存在状态，不导入插件、不读取人设内容、不连接平台或模型。退出码为：有效 `0`，配置错误 `1`，实例目录不存在 `2`。实例目录优先级为 `--home`、`CLYTIE_HOME`、仓库同级目录。
@@ -45,9 +46,11 @@ uv run --no-sync python scripts/audit_history.py
 
 示例账号预留 `1000000000` 至 `1000000099`，只用于手写虚构数据；真实配置即使使用同样的格式，也必须留在实例目录。通用规则允许保留的示例邮箱域和 GitHub noreply 邮箱，私有名单仍会独立检查这些内容。
 
-## A1 实现边界
+## 实现边界
 
-已定义协议的契约测试与假实现可离线运行。插件宿主、真实权限裁剪、隐私投影、数据库、网络管理 API 尚未实现。v0.2 已补齐生命周期、候选读取、上下文方法、事件负载及四层配置；假插件经清单启动并装配，详见 [A1 实现说明](docs/implementation/a1.md)。
+SDK 契约与四层配置见 [A1 实现说明](docs/implementation/a1.md)。A2 宿主使用显式注入的时钟和后端，只在测试临时目录验证状态与升级；不会自行连接真实平台、调用模型或弹出通知。参考插件包括 echo-tool、example-behavior、keyword-retriever、desktop-notifier，验收方法见 [A2 实现说明](docs/implementation/a2.md)。
+
+记忆方法的存在性和调用场景过滤已在宿主实现；持久记忆、账本、边界流程和真实调度器属于 A3，本机管理 API 与备份 CLI 属于 A4。官方插件同进程运行，ctx 是能力接口裁剪，不能作为运行任意不可信 Python 代码的安全沙箱。
 
 ## 许可证
 

@@ -20,6 +20,7 @@ SPEC.loader.exec_module(CHECKS)
         "from datetime import datetime as dt\ndt.now()",
         "import time as t\nt.sleep(1)",
         "from asyncio import sleep as pause\nawait pause(1)",
+        "from asyncio import wait_for as wait\nawait wait(operation(), 2)",
         "from random import choice as choose\nchoose([1])",
     ],
 )

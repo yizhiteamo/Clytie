@@ -34,6 +34,8 @@ jobs:
         run: uv run --no-sync ruff format --check .
       - name: SDK boundary and clock checks
         run: uv run --no-sync python scripts/check_architecture.py
+      - name: Official plugin catalog
+        run: uv run --no-sync python scripts/build_catalog.py --check
       - name: Offline tests
         run: uv run --no-sync pytest
       - name: Validate fictional home
