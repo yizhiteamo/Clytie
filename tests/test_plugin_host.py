@@ -38,6 +38,10 @@ async def test_cascade_plan_is_read_only_confirmed_stale_and_restorable(tmp_path
     await h.apply(together.plan_id)
     with pytest.raises(PlanStale):
         await h.apply(alone.plan_id)
+    await h.apply(h.plan_disable("companion_a", "target").plan_id)
+    await enable(h, "target")
+    await h.apply(h.plan_disable("companion_a", "target").plan_id)
+    assert h.plan_enable("companion_a", "target").previously_cascaded == ()
     await h.close()
 
 

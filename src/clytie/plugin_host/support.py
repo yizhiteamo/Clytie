@@ -42,6 +42,18 @@ def _consume(task):
         task.exception()
 
 
+async def finish_cleanup(operation):
+    """即使调用方再次取消也先完成清理，调用方随后传播取消。"""
+    task = asyncio.create_task(operation)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return task.result(), cancelled
+
+
 async def timed(operation, clock, seconds):
     task = asyncio.ensure_future(operation)
     timer = asyncio.create_task(clock.sleep(seconds))

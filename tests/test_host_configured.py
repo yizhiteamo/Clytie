@@ -6,6 +6,7 @@ from clytie.sdk.testing import MockClock
 
 from .host_helpers import SOURCE
 from .test_config import make_home, update_plugin, write_yaml
+from .test_host_upgrades import MIGRATE, update
 
 
 async def test_validated_fourth_layer_per_channel_unit_and_primary_contributions(tmp_path):
@@ -83,6 +84,16 @@ async def test_validated_fourth_layer_per_channel_unit_and_primary_contributions
     write_yaml(home / "companions/companion_a/companion.yaml", companion)
     h.configure_report(load_home(home, repo_root=repo))
     assert (await h.reconfigure("companion_a", "fake-channel"))["outcome"] == "applied"
+    assert [
+        u.ctx.config["required_inline"] for u in h.runtimes["companion_a", "fake-channel"].units
+    ] == [5, 8]
+    # 平台和模型迁移都只得到始终属性，且保留第四层必填配置。
+    for pid, value in (("fake-model", 4), ("fake-channel", 5)):
+        await h.apply(h.plan_disable("companion_a", pid).plan_id)
+        path = repo / "plugins" / pid / "plugin.json"
+        update(path, script=MIGRATE + f'    assert ctx.config["required_inline"] == {value}\n')
+        plan = h.plan_migration("companion_a", pid)
+        assert (await h.apply_migration(plan.plan_id))["outcome"] == "migrated"
     assert [
         u.ctx.config["required_inline"] for u in h.runtimes["companion_a", "fake-channel"].units
     ] == [5, 8]

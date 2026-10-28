@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from pathlib import Path, PurePosixPath
 
 from cryptography.exceptions import InvalidTag
@@ -32,10 +33,14 @@ def contained(root, path):
     if not path.resolve().is_relative_to(root):
         raise SnapshotError("path escapes permitted directory")
     for parent in (path, *path.parents):
+        if parent.is_symlink() or (
+            parent.exists()
+            and getattr(parent.lstat(), "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise SnapshotError("symlinks are not supported in private state")
         if parent == root:
             break
-        if parent.is_symlink():
-            raise SnapshotError("symlinks are not supported in private state")
     return path
 
 
@@ -107,7 +112,22 @@ class UpgradeSnapshots:
                 raise SnapshotError("unsupported private state entry")
         return {"files": files, "directories": directories}
 
-    def create(self, companion_id, plugin_id, old_version, new_version):
+    def planned_path(self, companion_id, plugin_id, old_version, new_version):
+        timestamp = self.clock.now().strftime("%Y%m%dT%H%M%S%fZ")
+        filename = f"{old_version}-to-{new_version}-{timestamp}.enc"
+        if not re.fullmatch(r"[A-Za-z0-9.+_-]+\.enc", filename):
+            raise SnapshotError("invalid snapshot version")
+        return contained(
+            self.home,
+            self.home
+            / "backups"
+            / "plugin-upgrades"
+            / identifier(companion_id)
+            / identifier(plugin_id)
+            / filename,
+        )
+
+    def create(self, companion_id, plugin_id, old_version, new_version, *, path=None):
         directory = self.state_path(companion_id, plugin_id)
         directory.mkdir(parents=True, exist_ok=True)
         value = self._key(create=True)
@@ -128,13 +148,10 @@ class UpgradeSnapshots:
             "nonce": base64.b64encode(nonce).decode("ascii"),
             "ciphertext": base64.b64encode(encrypted).decode("ascii"),
         }
-        timestamp = self.clock.now().strftime("%Y%m%dT%H%M%S%fZ")
-        filename = f"{old_version}-to-{new_version}-{timestamp}.enc"
-        if not re.fullmatch(r"[A-Za-z0-9.+_-]+\.enc", filename):
-            raise SnapshotError("invalid snapshot version")
-        path = contained(
-            self.home,
-            self.home / "backups" / "plugin-upgrades" / companion_id / plugin_id / filename,
+        path = (
+            contained(self.home, path)
+            if path
+            else self.planned_path(companion_id, plugin_id, old_version, new_version)
         )
         if path.exists():
             raise SnapshotError("snapshot timestamp collision; existing snapshot preserved")
@@ -185,24 +202,6 @@ class UpgradeSnapshots:
             raise SnapshotError("invalid or unreadable encrypted snapshot") from exc
 
     def restore(self, path, companion_id, plugin_id):
-        # 完整解密和校验成功之前不改动目标；每项删除都限制到本插件目录并记录。
-        payload = self.read(path, companion_id, plugin_id)
-        directory = self.state_path(companion_id, plugin_id)
-        current = list(directory.rglob("*"))
-        for file in current:
-            contained(directory, file)
-        for file in sorted(current, key=lambda p: len(p.parts), reverse=True):
-            name = file.relative_to(directory).as_posix()
-            if file.is_file() and (name not in payload["files"]):
-                file.unlink()
-                self.log.info("plugin.restore_removed_file", path=name)
-            elif file.is_dir() and name not in payload["directories"]:
-                file.rmdir()
-                self.log.info("plugin.restore_removed_directory", path=name)
-        for name in payload["directories"]:
-            contained(directory, directory / name).mkdir(parents=True, exist_ok=True)
-        for name, entry in payload["files"].items():
-            atomic_write(contained(directory, directory / name), base64.b64decode(entry["data"]))
-        if self._tree(directory) != payload:
-            raise SnapshotError("restored private state verification failed")
-        self.log.info("plugin.snapshot_restored", plugin_id=plugin_id, companion_id=companion_id)
+        from .recovery import restore_preserving
+
+        return restore_preserving(self, path, companion_id, plugin_id)

@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-import shutil
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -14,7 +13,6 @@ from pathlib import Path
 from types import ModuleType
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
-from clytie.sdk import CancelToken
 from clytie.sdk.behavior import (
     collect_context_sections,
     merge_attention,
@@ -34,11 +32,12 @@ from clytie.sdk.types import (
 
 from .context import BackendUnavailable, build_context
 from .dependencies import DependencyError, resolve
-from .manifests import discover, read_manifest
+from .manifests import discover
 from .memory import bind_scene
+from .migration import MigrationMixin
 from .registry import assemble, validate_result
 from .snapshots import UpgradeSnapshots, atomic_write, canonical, contained, identifier
-from .support import FileStorage, HostLog, json_copy, timed
+from .support import FileStorage, HostLog, finish_cleanup, json_copy, timed
 
 CORE_MODULES = frozenset(
     {
@@ -97,12 +96,13 @@ class Runtime:
     status: str = "starting"
     module_name: str = ""
     calls: set = field(default_factory=set)
+    feeds: set = field(default_factory=set)
     units: list = field(default_factory=list)
     unit_role: str | None = None
     account_ref: str | None = None
 
 
-class PluginHost:
+class PluginHost(MigrationMixin):
     failure_type = PluginFailure
 
     def __init__(self, repo_root, home, *, clock, backends=None, log=None, seed=0):
@@ -217,7 +217,9 @@ class PluginHost:
         records = [r for r in self._history(companion_id) if r["target"] == target]
         if not records:
             return ()
-        group = records[-1]["operation"]
+        latest_file = self._metadata(companion_id, "last-disable.json")
+        latest = json.loads(latest_file.read_bytes()) if latest_file.exists() else {}
+        group = latest.get(target, records[-1]["operation"])
         return tuple(r["plugin"] for r in records if r["operation"] == group)
 
     def _fingerprint(self, companion_id):
@@ -265,7 +267,7 @@ class PluginHost:
                 errors.append("plugin active in another companion; confirm its disable plan first")
             active = self._active(companion_id)
             depths = {target: 0}
-            for _ in range(len(active)):
+            for _ in range(len(active) + 1):
                 changed = False
                 for pid in active:
                     deps = self.runtimes[companion_id, pid].manifest.data.get("dependencies", {})
@@ -366,6 +368,11 @@ class PluginHost:
                             self._metadata(plan.companion_id, "cascades.json"), canonical(history)
                         )
                         self.log.info("plugin.cascade_stopped", **record)
+            if plan.operation in {"disable", "uninstall"}:
+                latest_file = self._metadata(plan.companion_id, "last-disable.json")
+                latest = json.loads(latest_file.read_bytes()) if latest_file.exists() else {}
+                latest[plan.target] = plan_id
+                atomic_write(latest_file, canonical(latest))
             if plan.operation == "uninstall":
                 self._excluded.add(plan.target)
                 atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
@@ -415,18 +422,6 @@ class PluginHost:
         exec(compile(source.read_bytes(), str(source), "exec"), module.__dict__)
         return getattr(module, class_name), namespace
 
-    def _record_version(self, companion_id, manifest):
-        atomic_write(
-            self._metadata(companion_id, manifest.id + ".json"),
-            canonical(
-                {
-                    "plugin_id": manifest.id,
-                    "data_version": manifest.data.get("data", {}).get("version", 1),
-                    "plugin_version": manifest.data["version"],
-                }
-            ),
-        )
-
     async def _start(self, companion_id, manifest, *, cls=None, override=None, version_check=True):
         plugin_id = manifest.id
         key = companion_id, plugin_id
@@ -438,19 +433,34 @@ class PluginHost:
                     and not spec.get("optional", False)
                     and not self.is_active(companion_id, dependency)
                 ):
+                    self.states.setdefault(companion_id, {})[plugin_id] = {
+                        "status": "dependency_unavailable",
+                        "dependency": dependency,
+                    }
                     raise ValueError("dependency_unavailable")
-            record = self._metadata(companion_id, plugin_id + ".json")
-            data_version = manifest.data.get("data", {}).get("version", 1)
+            version = self._version(companion_id, plugin_id)
             if version_check:
-                if record.exists():
-                    version = json.loads(record.read_text(encoding="utf-8"))
-                    if (
-                        version["data_version"] != data_version
-                        or version.get("plugin_version") != manifest.data["version"]
-                    ):
-                        raise ValueError("data_version_changed: use explicit upgrade")
-                elif path.exists() and any(path.iterdir()):
-                    raise ValueError("data_version_unknown")
+                status, detail = self._load_status(companion_id, manifest)
+                if status:
+                    runtime = Runtime(
+                        companion_id, manifest, FileStorage(path, self.clock), manifest.priority
+                    )
+                    runtime.status = status
+                    self.runtimes[key] = runtime
+                    self.states.setdefault(companion_id, {})[plugin_id] = {
+                        "status": status,
+                        "detail": detail,
+                    }
+                    await self.emit(
+                        companion_id,
+                        "plugin.disabled",
+                        {
+                            "plugin_id": plugin_id,
+                            "companion_id": companion_id,
+                            "reason": status,
+                        },
+                    )
+                    return False
             storage = self._storages.setdefault(key, FileStorage(path, self.clock))
             priority = (
                 self.settings.get(companion_id, {})
@@ -489,13 +499,23 @@ class PluginHost:
             runtime.status = "active"
             if version_check:
                 self._record_version(companion_id, manifest)
+                if version and version["plugin_version"] != manifest.data["version"]:
+                    await self.emit(
+                        companion_id,
+                        "plugin.updated",
+                        {
+                            "plugin_id": plugin_id,
+                            "from": version["plugin_version"],
+                            "to": manifest.data["version"],
+                        },
+                    )
             await self.emit(
                 companion_id,
                 "plugin.enabled",
                 {"plugin_id": plugin_id, "companion_id": companion_id},
             )
             return True
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             if key not in self.runtimes:
                 self.runtimes[key] = Runtime(
                     companion_id, manifest, FileStorage(path, self.clock), manifest.priority
@@ -516,6 +536,8 @@ class PluginHost:
                 "plugin.disabled",
                 {"plugin_id": plugin_id, "companion_id": companion_id, "reason": "start_failed"},
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return False
 
     def _failure(self, runtime, point, exc):
@@ -535,6 +557,12 @@ class PluginHost:
         runtime = self.runtimes.get((companion_id, plugin_id))
         if runtime is None or runtime.status not in {"active", "quiescing"}:
             return
+        _, cancelled = await finish_cleanup(self._stop_runtime(runtime, reason))
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _stop_runtime(self, runtime, reason):
+        companion_id, plugin_id = runtime.companion_id, runtime.manifest.id
         runtime.status = "stopping"
         await self.emit(
             companion_id,
@@ -542,10 +570,21 @@ class PluginHost:
             {"plugin_id": plugin_id, "companion_id": companion_id, "reason": reason},
         )
         try:
-            if runtime.calls:
-                await timed(
-                    asyncio.gather(*tuple(runtime.calls), return_exceptions=True), self.clock, 10
-                )
+            # 入站流没有自然结束点，只取消宿主持有的本次取数操作。
+            for task in tuple(runtime.feeds):
+                task.cancel()
+            try:
+                if runtime.calls:
+                    await timed(
+                        asyncio.gather(*tuple(runtime.calls), return_exceptions=True),
+                        self.clock,
+                        10,
+                    )
+            except Exception as exc:
+                self._failure(runtime, "drain", exc)
+            finally:
+                for task in tuple(runtime.calls):
+                    task.cancel()
             for unit in reversed(runtime.units or [runtime]):
                 try:
                     with bind_scene():
@@ -613,8 +652,14 @@ class PluginHost:
             raise PluginFailure("not_assembled")
         if point == "channel" and method == "events":
             return self._event_feed(runtime, registration)
-        task = asyncio.current_task()
+        task = asyncio.create_task(self._invoke(runtime, registration, point, args, method, scene))
         runtime.calls.add(task)
+        try:
+            return await task
+        finally:
+            runtime.calls.discard(task)
+
+    async def _invoke(self, runtime, registration, point, args, method, scene):
         if point in {"service", "schedule", "event_subscriber"}:
             scene = "public_group"
         try:
@@ -663,27 +708,40 @@ class PluginHost:
                 )
                 return Receipt(intent_id=intent_id, status="unknown", at=self.clock.now())
             raise PluginFailure(type(exc).__name__) from exc
-        finally:
-            runtime.calls.discard(task)
 
     async def _event_feed(self, runtime, registration):
         from clytie.sdk.types import EventEnvelope
 
-        task = asyncio.current_task()
-        runtime.calls.add(task)
         feed = registration.implementation.events()
-        try:
+
+        async def take():
             with bind_scene():
-                async for event in feed:
-                    if not isinstance(event, EventEnvelope):
-                        raise TypeError("channel yielded an invalid event")
-                    yield event
+                return await feed.__anext__()
+
+        try:
+            while runtime.status == "active":
+                task = asyncio.create_task(take())
+                runtime.calls.add(task)
+                runtime.feeds.add(task)
+                try:
+                    event = await task
+                except StopAsyncIteration:
+                    return
+                except asyncio.CancelledError:
+                    if runtime.status != "active":
+                        return
+                    raise
+                finally:
+                    runtime.calls.discard(task)
+                    runtime.feeds.discard(task)
+                if not isinstance(event, EventEnvelope):
+                    raise TypeError("channel yielded an invalid event")
+                yield event
         except Exception as exc:
             self._failure(runtime, "channel.events", exc)
         finally:
             if hasattr(feed, "aclose"):
                 await feed.aclose()
-            runtime.calls.discard(task)
 
     async def behavior(self, companion_id, phase, input, *, mentioned=False, scene=None):
         point = "behavior." + phase
@@ -797,9 +855,10 @@ class PluginHost:
         return CompanionState(companion_id=companion_id, states=self.states.get(companion_id, {}))
 
     async def reconfigure(self, companion_id, plugin_id, config=None):
-        runtime = self.runtimes[companion_id, plugin_id]
-        manifest = runtime.manifest
+        self.refresh()
+        manifest = self.manifests[plugin_id]
         try:
+            resolve(self.manifests, [plugin_id], active=self._active(companion_id))
             if (companion_id, plugin_id) in self.unit_configs:
                 if config is not None:
                     return {"outcome": "rejected", "reason": "validated_report_required"}
@@ -825,162 +884,26 @@ class PluginHost:
         )
         self.manifests = {pid: m for pid, m in self.manifests.items() if pid not in self._excluded}
 
-    def install(self, manifest_path):
-        manifest = read_manifest(Path(manifest_path), repo_root=self.repo_root)
+    def restore_available(self, plugin_id):
+        """撤销装配排除标记；仅读取已由外部放置的包，不安装代码。"""
         available = discover(
             self.repo_root / "plugins", self.home / "plugins", repo_root=self.repo_root
         )
-        if manifest.id in available:
-            if manifest.path != available[manifest.id].path:
-                raise ValueError("duplicate plugin id; use upgrade for an existing package")
-        else:
-            destination = contained(self.home, self.home / "plugins" / manifest.id)
-            for entry in manifest.path.parent.rglob("*"):
-                contained(manifest.path.parent, entry)
-            shutil.copytree(manifest.path.parent, destination)
-        self._excluded.discard(manifest.id)
+        if plugin_id not in available:
+            raise ValueError("plugin code unavailable; update it externally")
+        self._excluded.discard(plugin_id)
         atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
         self.refresh()
-        return self.manifests[manifest.id]
+        return self.manifests[plugin_id]
 
     async def dispatch_tick(self, companion_id, plugin_id, schedule_id, tick):
         if tick.schedule_id != schedule_id:
             raise ValueError("tick does not match schedule id")
         return await self.invoke(companion_id, plugin_id, "schedule", schedule_id, tick)
 
-    async def upgrade(self, companion_id, plugin_id, manifest_path, cancel=None):
-        cancel = cancel or CancelToken()
-        async with self._lock:
-            cancel.raise_if_cancelled()
-            old = self.runtimes[companion_id, plugin_id]
-            if old.status != "active":
-                raise ValueError("plugin must be active before explicit upgrade")
-            candidate = read_manifest(Path(manifest_path), repo_root=self.repo_root)
-            if candidate.id != plugin_id:
-                raise ValueError("upgrade plugin id mismatch")
-            if candidate.path.parent == old.manifest.path.parent:
-                raise ValueError("stage the upgrade in a separate package directory")
-            old_data = old.manifest.data.get("data", {}).get("version", 1)
-            new_data = candidate.data.get("data", {}).get("version", 1)
-            if new_data < old_data or candidate.version < old.manifest.version:
-                raise ValueError("data_downgrade: refusing an upgrade to an older version")
-            scripts = []
-            for version in range(old_data + 1, new_data + 1):
-                path = contained(
-                    candidate.path.parent, candidate.path.parent / "migrations" / f"to_{version}.py"
-                )
-                if not path.is_file():
-                    raise ValueError(f"missing migration to_{version}.py")
-                scripts.append(path)
-            for layout in self.unit_configs.get((companion_id, plugin_id), [{"config": None}]):
-                self._config(companion_id, candidate, layout["config"])
-            proposed = dict(self.manifests)
-            proposed[plugin_id] = candidate
-            resolve(proposed, self._active(companion_id))
-            old_class, old_config = type(old.plugin), old.ctx.config
-            previous_layouts = [
-                {"role": u.unit_role, "account": u.account_ref, "config": u.ctx.config}
-                for u in old.units or [old]
-            ]
-            old.status = "quiescing"
-            try:
-                if old.calls:
-                    await timed(
-                        asyncio.gather(*tuple(old.calls), return_exceptions=True), self.clock, 10
-                    )
-                snapshot = self.snapshots.create(
-                    companion_id, plugin_id, str(old.manifest.version), str(candidate.version)
-                )
-            except BaseException:
-                old.status = "active"
-                raise
-            await self._stop(companion_id, plugin_id, "upgrading")
-            migration = Runtime(companion_id, candidate, old.storage, old.priority)
-            previous_source = None
-            installed_source = old.manifest.path.parent
-            try:
-                migration.ctx = build_context(
-                    self, migration, self._config(companion_id, candidate), {}, permissions=()
-                )
-                for script in scripts:
-                    cancel.raise_if_cancelled()
-                    module = ModuleType("_clytie_migration")
-                    exec(compile(script.read_bytes(), str(script), "exec"), module.__dict__)
-                    function = getattr(module, "migrate")
-                    if not inspect.iscoroutinefunction(function):
-                        raise TypeError("migration must be asynchronous")
-                    with bind_scene():
-                        await function(migration.ctx, cancel)
-                    cancel.raise_if_cancelled()
-                if candidate.path.parent != installed_source:
-                    expected = [
-                        self.repo_root / "plugins" / plugin_id,
-                        self.home / "plugins" / plugin_id,
-                    ]
-                    if installed_source not in expected:
-                        raise ValueError("installed package must remain in a plugin root")
-                    for entry in candidate.path.parent.rglob("*"):
-                        contained(candidate.path.parent, entry)
-                    staging = contained(
-                        self.home, self.home / "plugins" / ".host" / f"upgrade-{self._serial}"
-                    )
-                    staging.mkdir(parents=True, exist_ok=False)
-                    copied = staging / "new"
-                    shutil.copytree(candidate.path.parent, copied)
-                    # 两个移动目标均先校验在已知插件根/本次 staging 内。
-                    permitted = (
-                        self.repo_root
-                        if installed_source.is_relative_to(self.repo_root)
-                        else self.home
-                    )
-                    contained(permitted, installed_source)
-                    previous_source = contained(staging, staging / "previous")
-                    installed_source.rename(previous_source)
-                    try:
-                        contained(staging, copied).rename(installed_source)
-                    except BaseException:
-                        previous_source.rename(installed_source)
-                        previous_source = None
-                        raise
-                    candidate = read_manifest(
-                        installed_source / "plugin.json", repo_root=self.repo_root
-                    )
-                if not await self._start(companion_id, candidate, version_check=False):
-                    raise PluginFailure("upgraded plugin start failed")
-                self._record_version(companion_id, candidate)
-                self.manifests[plugin_id] = candidate
-                return {"outcome": "upgraded", "snapshot": str(snapshot)}
-            except (Exception, asyncio.CancelledError) as exc:
-                await self._stop(companion_id, plugin_id, "upgrade_failed")
-                if previous_source is not None:
-                    failed_source = contained(
-                        previous_source.parent, previous_source.parent / "failed"
-                    )
-                    contained(
-                        self.repo_root
-                        if installed_source.is_relative_to(self.repo_root)
-                        else self.home,
-                        installed_source,
-                    )
-                    installed_source.rename(failed_source)
-                    contained(previous_source.parent, previous_source).rename(installed_source)
-                self.snapshots.restore(snapshot, companion_id, plugin_id)
-                self._record_version(companion_id, old.manifest)
-                self.manifests[plugin_id] = old.manifest
-                self.unit_configs[companion_id, plugin_id] = previous_layouts
-                restored = await self._start(
-                    companion_id, old.manifest, cls=old_class, override=old_config
-                )
-                self._failure(old, "migration", exc)
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-                return {
-                    "outcome": "restored" if restored else "restore_start_failed",
-                    "snapshot": str(snapshot),
-                }
-
     async def close(self):
         for cid in sorted({key[0] for key in self.runtimes}):
             active = self._active(cid)
-            for pid in reversed(resolve(self.manifests, active).order) if active else ():
+            loaded = {pid: self.runtimes[cid, pid].manifest for pid in active}
+            for pid in reversed(resolve(loaded, active).order) if active else ():
                 await self._stop(cid, pid, "shutdown")

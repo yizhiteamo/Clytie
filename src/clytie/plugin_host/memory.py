@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from clytie.sdk.types import MemoryRecord
 
+from .surface import surface
+
 
 @dataclass
 class _Scope:
@@ -96,4 +98,7 @@ def memory_view(backend, permissions, private_scenes=("owner_private",)):
     readable = any(p in permissions for p in ("memory.read.public", "memory.read.private"))
     writable = "memory.write" in permissions
     cls = ReadWriteMemory if readable and writable else ReadMemory if readable else WriteMemory
-    return cls(backend, permissions, private_scenes)
+    methods = (["search", "get"] if readable else []) + (["write"] if writable else [])
+    if readable and writable:
+        methods += ["revise", "retract"]
+    return surface(cls(backend, permissions, private_scenes), methods)

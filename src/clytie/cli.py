@@ -33,4 +33,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         for error in report.errors:
             actual = json.dumps(error.to_dict()["actual"], ensure_ascii=False)
             print(f"{error.file}#{error.pointer}：期望 {error.expected}；实际 {actual}")
+        retained = result["failed_plugin_state"]
+        for entry in retained.get("directories", []):
+            hint = "问题已解决，可以清理" if entry["resolved"] else "故障状态保留，等待确认清理"
+            print(f"{hint}：{entry['path']}；大小 {entry['bytes']} bytes")
+            if entry["error"]:
+                print(f"  {entry['error']}")
+        if retained.get("directories"):
+            print(
+                f"故障目录总占用：{retained['total_bytes']} bytes；统计完整：{retained['size_complete']}"
+            )
     return report.exit_code

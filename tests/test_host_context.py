@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from clytie.sdk.testing import FakeContext, MockClock, assert_plugin_context_contract
 from clytie.sdk.testing import context_contracts as checks
 from clytie.sdk.testing.samples import sample_memory, sample_request
@@ -95,6 +97,9 @@ async def test_host_context_contracts_with_injected_backends_only(tmp_path):
         ),
     )
     checks.assert_logger_contract(ctx.log)
+    from clytie.sdk.testing import assert_clock_contract
+
+    await assert_clock_contract(ctx.clock)
     await checks.assert_storage_contract(ctx.storage)
     await checks.assert_events_contract(ctx.events, ctx.plugin_id)
     await checks.assert_state_contract(
@@ -114,4 +119,25 @@ async def test_host_context_contracts_with_injected_backends_only(tmp_path):
     await checks.assert_proactive_contract(ctx.proactive, [TextPart(text="fictional")])
     await checks.assert_subprocess_contract(ctx.subprocess)
     assert not hasattr(ctx.assets, "put") and not hasattr(ctx, "identity")
+    # F5：公开对象不能泄漏整个宿主、原始记忆、全局日志或可修改的属性字典。
+    for target in (
+        ctx,
+        ctx.events,
+        ctx.state,
+        ctx.services,
+        ctx.memory,
+        ctx.log,
+        ctx.storage,
+        ctx.assets,
+        ctx.http,
+        ctx.subprocess,
+        ctx.services.get("example.state"),
+    ):
+        for attribute in ("_host", "_backend", "entries", "__dict__", "_proxies"):
+            with pytest.raises(AttributeError):
+                getattr(target, attribute)
+    assert not hasattr(ctx.events.publish, "__self__")
+    with pytest.raises(AttributeError):
+        ctx.memory._backend = fake.memory
+    assert await ctx.memory.get(private.record_id) is None
     await h.close()

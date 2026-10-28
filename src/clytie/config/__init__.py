@@ -91,6 +91,7 @@ class HomeReport:
     errors: tuple[ConfigIssue, ...] = ()
     instance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     plugin_configs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    failed_plugin_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def valid(self) -> bool:
@@ -107,6 +108,7 @@ class HomeReport:
             "valid": self.valid,
             "companions": thaw(self.companions),
             "errors": [error.to_dict() for error in self.errors],
+            "failed_plugin_state": thaw(self.failed_plugin_state),
         }
 
 

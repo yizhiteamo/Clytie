@@ -9,6 +9,7 @@ from clytie.sdk.types import AssetRef, HttpResponse, ModelTurn, ProcessResult
 
 from .memory import memory_view
 from .support import json_copy, timed
+from .surface import surface
 
 
 class BackendUnavailable(ValueError):
@@ -154,7 +155,7 @@ class Services:
         proxy = self._proxies.get(name)
         if proxy is None or not self._host.is_active(self._companion, proxy._provider):
             return None
-        return proxy
+        return surface(proxy, ("call",))
 
 
 class Subprocess:
@@ -233,7 +234,7 @@ class Model:
         return ModelTurn.model_validate(await self._backend.generate(req, cancel, purpose=purpose))
 
 
-def build_context(host, runtime, config, backends, *, permissions=None):
+def build_context(host, runtime, config, backends, *, permissions=None, migration=False):
     manifest = runtime.manifest
     declared = frozenset(manifest.data["permissions"])
     granted = declared if permissions is None else declared & frozenset(permissions)
@@ -295,10 +296,33 @@ def build_context(host, runtime, config, backends, *, permissions=None):
         if provider is not None:
             for declaration in provider.data["contributes"].get("services", ()):
                 services[declaration["name"]] = (dependency, declaration["methods"])
-    if services:
+    if services and not migration:
         values["services"] = Services(host, runtime.companion_id, services)
-    if "channel" in manifest.data["contributes"] and runtime.unit_role in {None, "channel"}:
+    if (
+        not migration
+        and "channel" in manifest.data["contributes"]
+        and runtime.unit_role in {None, "channel"}
+    ):
         if "identity" not in backends:
             raise BackendUnavailable("identity")
         values["identity"] = backends["identity"]
-    return Context(**values)
+    exposed = {
+        "log": ("debug", "info", "warning", "error"),
+        "clock": ("now", "monotonic", "sleep", "sleep_until", "local_tz"),
+        "storage": ("path", "get", "set", "delete", "keys"),
+        "events": ("publish",),
+        "state": ("set",),
+        "assets": ("info", "read", "path"),
+        "services": ("get",),
+        "subprocess": ("run",),
+        "http": ("request",),
+        "model": ("generate",),
+        "asset_writer": ("put",),
+        "peer": ("send", "request"),
+        "proactive": ("submit",),
+        "identity": ("resolve_actor", "resolve_conversation", "account_for", "platform_id_for"),
+    }
+    for name, members in exposed.items():
+        if name in values:
+            values[name] = surface(values[name], members)
+    return surface(Context(**values), values)
