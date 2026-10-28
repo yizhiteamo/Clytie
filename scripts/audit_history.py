@@ -12,6 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 REGULAR_FILE_MODES = {format(0o100_644, "o"), format(0o100_755, "o")}
+GITHUB_WEB_COMMITTER = ("GitHub", "@".join(("noreply", "github.com")))
 
 
 def git(*args: str) -> bytes:
@@ -38,10 +39,15 @@ def main() -> int:
     seen = set()
     failures = 0
 
-    def scan(text: str, label: str, *, lock: bool = False) -> None:
+    def scan(
+        text: str, label: str, *, lock: bool = False, official_committer: bool = False
+    ) -> None:
         nonlocal failures
         for number, line in enumerate(text.splitlines(), 1):
             categories = public(line, lock_metadata=lock)
+            # 只豁免精确官方提交者的邮箱字段；私有扫描和其他告警仍执行。
+            if official_committer and number == 2:
+                categories.discard("possible-personal-email")
             if any(term in normalize(line) for term in terms):
                 categories.add("private-content")
             for category in sorted(categories):
@@ -50,7 +56,18 @@ def main() -> int:
 
     for commit in commits:
         metadata = git("show", "-s", "--format=%an%n%ae%n%cn%n%ce%n%B", commit).decode("utf-8")
-        scan(metadata, f"commit:{commit}")
+        fields = metadata.split("\n", 4)
+        if len(fields) == 5:
+            author_name, author_email, committer_name, committer_email, message = fields
+            scan(f"{author_name}\n{author_email}", f"commit:{commit}:author")
+            scan(
+                f"{committer_name}\n{committer_email}",
+                f"commit:{commit}:committer",
+                official_committer=(committer_name, committer_email) == GITHUB_WEB_COMMITTER,
+            )
+            scan(message, f"commit:{commit}:message")
+        else:
+            scan(metadata, f"commit:{commit}:malformed-metadata")
         entries = git("ls-tree", "-r", "-z", commit).split(b"\0")
         for entry in entries:
             if not entry:
