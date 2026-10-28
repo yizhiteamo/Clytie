@@ -1,0 +1,23 @@
+schema_version: 1
+timezone: Asia/Shanghai
+people:
+  owner:
+    role: owner
+    accounts:
+      - channel: fake-channel
+        account: "1000000001"
+accounts:
+  example_bot:
+    channel: fake-channel
+    account: "1000000003"
+conversations:
+  test_group:
+    channel: fake-channel
+    platform_id: "1000000002"
+    kind: group
+    scene: public_group
+    members_expected: [owner, companion_a]
+scenes: [owner_private, public_group, stranger_private]
+test_conversation: test_group
+companions: [companion_a]
+plugins: {}

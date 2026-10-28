@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "instance",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "timezone": {
+      "type": "string",
+      "minLength": 1
+    },
+    "people": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "enum": [
+              "owner",
+              "member"
+            ]
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false,
+              "required": [
+                "channel",
+                "account"
+              ]
+            }
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "accounts"
+        ]
+      }
+    },
+    "conversations": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "private",
+              "group"
+            ]
+          },
+          "scene": {
+            "type": "string",
+            "minLength": 1
+          },
+          "members_expected": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "required": [
+          "channel",
+          "platform_id",
+          "kind",
+          "scene"
+        ]
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "allOf": [
+        {
+          "contains": {
+            "const": "owner_private"
+          }
+        },
+        {
+          "contains": {
+            "const": "public_group"
+          }
+        },
+        {
+          "contains": {
+            "const": "stranger_private"
+          }
+        }
+      ]
+    },
+    "test_conversation": {
+      "type": "string",
+      "minLength": 1
+    },
+    "companions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "plugins": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "type": "object"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "required": [
+          "config"
+        ]
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "port"
+      ]
+    },
+    "paths": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "accounts": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {},
+        "^(?!x-).+$": {
+          "type": "object",
+          "properties": {
+            "channel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "account": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secret": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "channel",
+            "account"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "patternProperties": {
+    "^x-": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "timezone",
+    "people",
+    "scenes",
+    "companions"
+  ]
+}

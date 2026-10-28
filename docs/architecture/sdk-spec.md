@@ -305,6 +305,142 @@ A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3
 - 不能改变文字内容，只能改变形式（拆分、卡片、引用、发送时间）。本体比较处理前后去掉空白后的全部文字，不一致则丢弃该插件的修改并记录警告。
 - `before_send` 不能新增或删除交付意图，不能修改 `parts`。
 
-**context_section**：全部收集，按 `priority` 排序，超出总预算时从优先级最低的开始舍弃，单段超过自身预算时截断。
+**context_section**：全部收集，按 `priority` 升序排列（数字越小越重要，与插件 `priority` 的约定一致），先把每段截断到自身预算，超出总预算时从排在最后的段落开始整段舍弃。
 
 插件出错或超时（默认 2 秒，可在清单中声明更长，上限 10 秒）时视为返回 `None`，并采用清单中的 `failure_default`。
+
+## 7. v0.2 补充（A1 验收时补齐，对应 Issue #1）
+
+### 7.1 插件入口与生命周期
+
+```
+class Plugin(Protocol):
+    def __init__(self) -> None            # 无参数构造
+    async def start(self, ctx: PluginContext) -> None
+    async def stop(self) -> None
+```
+
+- 清单 `entry` 指向插件类。宿主构造实例 → `await start(ctx)`（超时 10 秒）→ 按清单装配扩展点 → 运行 → `await stop()`（超时 10 秒）。
+- 清单中的 `handler` 和 `factory` 都是**插件实例上的属性名**：
+  - `handler`：一个异步方法（行为环节、上下文段落、定时、事件、服务、CLI、API 路由）。
+  - `factory`：一个无参数方法，在 `start` 之后调用，返回实现对应协议的对象（channel、model、embedder、tool、memory.*、notifier）。
+- `start` 失败：该插件在这个伴侣上标记为"启动失败"，不装配任何扩展点，报告原因；依赖它的插件按缺少依赖处理。`stop` 的异常只记录日志。
+
+### 7.2 CandidateReader（检索器读取候选记录）
+
+```
+async iter(*, kinds: list[str] | None = None, scope: str | None = None,
+           updated_after: datetime | None = None, batch: int = 200)
+    -> AsyncIterator[list[MemoryRecord]]
+async get(record_ids: list[str]) -> list[MemoryRecord]
+async count() -> int
+```
+
+只返回：可见等级在 `allowed_visibility` 内、未撤销、未冻结的记录。`get` 对不在范围内的 ID 静默跳过（不报错，避免泄露"这条记录存在"）。
+
+### 7.3 ApiClient（CLI 扩展使用）
+
+```
+async request(method: str, path: str, *, json: JsonObject | None = None,
+              query: dict[str, str] | None = None) -> ApiResponse
+```
+`ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单在 A4 定义。A1 只需要协议和一个假实现。
+
+### 7.4 通知与事件负载
+
+**`EventEnvelope.notice`** 的结构按事件类型：
+
+| type | 字段 |
+|---|---|
+| `conversation.notice` | `kind: recall \| member_join \| member_leave \| poke \| other`、`actor_id?`、`target?: MessageRef`、`detail?: str` |
+| `conversation.request` | `kind: friend \| group_invite`、`actor_id`、`comment?: str`、`request_ref: str` |
+
+**本体事件负载**（都定义为 SDK 数据类型；负载中不包含消息正文）：
+
+| 事件 | 负载 |
+|---|---|
+| `message.received` | `event_id`、`trace_id`、`conversation_id`、`scene`、`actor_id` |
+| `reply.sent` | `trace_id`、`conversation_id`、`intent_ids: list`、`task_id?` |
+| `task.started` | `task_id`、`trace_id`、`tool`、`actor_id`、`conversation_id` |
+| `task.completed` / `task.failed` | `TaskSummary`（下表） |
+| `companion.state_changed` | `companion_id`、`plugin_id`、`state: JsonObject` |
+| `quota.changed` | `model_plugin`、`snapshot: QuotaSnapshot?`、`protection_mode: bool` |
+| `plugin.enabled` / `plugin.disabled` | `plugin_id`、`companion_id`、`reason?` |
+
+**TaskSummary**：`task_id`、`trace_id`、`tool`、`status: ok|error|denied|cancelled`、`actor_id`、`conversation_id`、`scene`、`started_at`、`finished_at`、`asset_ids: list`、`error_code?`。`task_completed` 环节的输入就是 `TaskSummary`。
+
+**CompanionState**：`companion_id`、`states: dict[plugin_id, JsonObject]`。`states` 的内容来自各插件通过 `ctx.state.set()` 公布的最新状态（见 7.5），只读。
+
+### 7.5 插件上下文的方法
+
+始终存在：
+
+| 属性 | 方法 |
+|---|---|
+| `log` | `debug/info/warning/error(msg: str, **fields)`；`fields` 必须可序列化。约定：不记录消息正文 |
+| `storage` | `path: Path`（插件私有目录，已创建）；`async get(key) -> JsonValue \| None`、`async set(key, value)`、`async delete(key)`、`async keys(prefix="") -> list[str]`。键 ≤200 字符，单个值序列化后 ≤1 MB |
+| `events` | `async publish(name, payload: JsonObject)`；`name` 不以 `<plugin_id>.` 开头时抛 `ValueError` |
+| `state` | `async set(payload: JsonObject)`：更新本插件在 `CompanionState.states` 中的状态，并发布 `companion.state_changed` |
+| `assets` | **只读**：`async info(asset_id) -> AssetRef`、`async read(asset_id) -> bytes`、`async path(asset_id) -> Path`（返回的文件只读） |
+
+按权限出现（未授权时属性不存在）：
+
+| 属性 | 权限 | 方法 |
+|---|---|---|
+| `asset_writer` | `assets.write` | `async put(data: bytes, media_type, origin) -> AssetRef` |
+| `memory` | 任一 `memory.*` | `async search(text, *, scene, limit=10) -> list[MemoryRecord]`、`async get(record_id) -> MemoryRecord \| None`；有 `memory.write` 时另有 `async write(draft: MemoryDraft) -> MemoryRecord`、`async revise(record_id, expected_revision, changes: JsonObject) -> MemoryRecord`、`async retract(record_id, expected_revision, reason)` |
+| `services` | 声明了服务依赖 | `get(name) -> ServiceProxy \| None`（可选依赖不可用时为 `None`）；`ServiceProxy.call(method, args) -> JsonObject`，不可用时抛 `ServiceUnavailable` |
+| `peer` | `peer` | `async send(companion_id, kind, payload) -> str`、`async request(companion_id, kind, payload, timeout_s) -> JsonObject` |
+| `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
+| `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
+| `proactive` | `message.proactive` | `async submit(conversation_id, parts, *, reason: str) -> str`（返回 `intent_id`；仍经过边界和出站检查，可能被拒绝） |
+| `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
+| `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`；映射来自实例配置 |
+
+- `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
+- `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
+- `memory.search` 的 `scene` 由调用方传入，宿主按场景和权限共同决定可见等级：只有 `memory.read.private` 且 `scene == owner_private` 时才包含私密记录。
+- **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
+- `revise` / `retract` 的 `expected_revision` 与当前修订号不一致时抛 `RevisionConflict`。
+
+### 7.6 取消的责任划分
+
+- **插件内部**：收到取消后，要么抛出 `Cancelled` / `asyncio.CancelledError`，要么尽快返回 `ToolResult(status="cancelled")`（适用于需要附带部分产物的情况）。不允许捕获取消后继续执行。
+- **宿主**：当它持有的令牌已被取消、而插件抛出了取消异常时，宿主把它转换为 `ToolResult(status="cancelled")`；令牌原因为 `deadline` 时，`error.code = "deadline"`。宿主自己的令牌**没有**被取消、却收到 `asyncio.CancelledError` 时（例如进程正在关闭），不转换，继续向上传播。
+- 宽限期、截止时间触发、写入账本都是宿主的职责（A3 实现）。
+- 契约测试：对一个已取消的令牌调用 `execute`，插件必须在宽限期内抛出取消异常或返回 `cancelled`；两种都算通过。
+
+### 7.7 清单中的扩展点编码
+
+```json
+"contributes": {
+  "channel":  {"factory": "create_channel", "platform": "onebot-v11"},
+  "model":    {"factory": "create_model"},
+  "embedder": {"factory": "create_embedder", "dimension": 512},
+  "tools": [{"factory": "create_draw", "name": "draw", "description": "…", "when_not_to_use": "…",
+             "examples": [], "parameters": {}, "audience": ["owner", "member"],
+             "heavy": true, "risk": "low", "delivery": "image"}],
+  "memory": {
+    "retriever":    {"factory": "create_retriever"},
+    "importer":     {"factory": "create_importer", "formats": ["…"]},
+    "consolidator": {"factory": "create_consolidator"}
+  },
+  "notifier": {"factory": "create_notifier"},
+  "behavior": {"before_attention": {"handler": "on_before_attention", "timeout_s": 2}},
+  "context_section": {"handler": "contribute", "budget_chars": 300},
+  "schedule": [{"id": "tick", "every": "PT1M", "handler": "on_tick"},
+               {"id": "morning", "at": "09:00", "days": [1, 2, 3, 4, 5], "handler": "on_morning"}],
+  "services": [{"name": "example.state", "version": "1.0", "methods": ["get"], "handler": "on_service"}],
+  "events": {"subscribe": ["task.completed"], "publish": ["example.changed"], "handler": "on_event"},
+  "cli_commands": [{"name": "example", "help": "…", "args": {}, "handler": "on_cli"}],
+  "api_routes": [{"method": "GET", "path": "/plugins/example/status", "handler": "on_status", "audit": false}],
+  "webui_panels": [{"id": "status", "title": "…", "kind": "kv", "data_route": "/plugins/example/status"}]
+}
+```
+
+- `channel`、`model`、`embedder`、`notifier` 每个插件最多一个；`tools` 可以有多个。
+- `audience` 取值 `owner`、`peer`、`member`、`stranger`；`risk` 取值 `low`、`medium`、`high`；`delivery` 取值 `text`、`image`、`audio`、`video`、`file`、`card`。
+- `schedule.days`：ISO 星期编号，1 = 星期一 … 7 = 星期日；省略表示每天。`at` 按实例配置的时区解释。节假日判断不属于调度器，由需要的插件自己处理。
+- `services[].handler` 签名：`async (method: str, args: JsonObject) -> JsonObject`。
+- `api_routes` 和 `webui_panels` 在 A1–A3 只做声明和校验，A4 才真正提供服务。
+- 假插件的清单要改为使用上述编码（`fake-model` 声明 `model`，`fake-channel` 声明 `channel`），契约测试通过宿主同样的装配路径（读清单 → 构造 → `start` → `factory`）获得实现对象。

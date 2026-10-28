@@ -1,0 +1,336 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "companion",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "names": {
+      "type": "object",
+      "properties": {
+        "internal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "external": {
+          "type": "object",
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "internal"
+      ]
+    },
+    "forbidden_names": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "plugin": {
+          "type": "string",
+          "minLength": 1
+        },
+        "config": {
+          "type": "object"
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "plugin",
+        "config"
+      ]
+    },
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "plugin": {
+            "type": "string",
+            "minLength": 1
+          },
+          "account": {
+            "type": "string",
+            "minLength": 1
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "required": [
+          "plugin",
+          "account",
+          "config"
+        ]
+      }
+    },
+    "persona": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "object",
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "scenes": {
+          "type": "object",
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "files",
+        "scenes"
+      ]
+    },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "peer": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "member": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "stranger": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "plugins": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "config"
+        ]
+      }
+    },
+    "task_card": {
+      "type": "object",
+      "properties": {
+        "internal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "external": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "internal",
+        "external"
+      ]
+    },
+    "boundary": {
+      "type": "object",
+      "properties": {
+        "refusal_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 5
+        },
+        "window_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 24
+        },
+        "categories": {
+          "type": "object",
+          "properties": {
+            "romance": {
+              "type": "boolean",
+              "default": true
+            },
+            "persona_change": {
+              "type": "boolean",
+              "default": true
+            },
+            "scripted_intimacy": {
+              "type": "boolean",
+              "default": true
+            },
+            "intimate_images": {
+              "type": "boolean",
+              "default": true
+            },
+            "owner_privacy": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "never_publish": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "notify_owner": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "max_messages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 2e5,
+          "default": 2e4
+        },
+        "max_single_message_chars": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 2e4,
+          "default": 2000
+        },
+        "material_full_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1440,
+          "default": 15
+        },
+        "material_budget_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1e5,
+          "default": 6000
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    }
+  },
+  "patternProperties": {
+    "^x-": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "names",
+    "model",
+    "channels",
+    "persona",
+    "permissions"
+  ]
+}

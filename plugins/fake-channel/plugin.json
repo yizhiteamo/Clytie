@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "fake-channel",
+  "name": "离线假平台",
+  "summary": "使用手写虚构事件验证平台协议，不连接真实账号。",
+  "category": "channel",
+  "version": "0.2.0",
+  "requires": {
+    "sdk": ">=0.2,<0.3"
+  },
+  "dependencies": {},
+  "conflicts": [],
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "contributes": {
+    "channel": {
+      "factory": "create_channel",
+      "platform": "fictional"
+    }
+  },
+  "permissions": [],
+  "config": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}

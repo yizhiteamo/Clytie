@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clytie"
+version = "0.2.0"
+description = "A reusable, offline-testable companion framework and plugin SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+  "pydantic>=2.12,<3",
+  "PyYAML>=6.0.3,<7",
+  "jsonschema>=4.25,<5",
+  "packaging>=25,<27",
+  "tzdata>=2025.2",
+]
+
+[dependency-groups]
+dev = [
+  "hatchling==1.33.0",
+  "pre-commit==4.3.0",
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.2,<2",
+  "ruff>=0.14,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clytie"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "clytie/schemas"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "plugins/*/tests"]
+addopts = "--import-mode=importlib -ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "plugins"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"time.time".msg = "Use ctx.clock.now()."
+"time.sleep".msg = "Use await ctx.clock.sleep()."
+"time.monotonic".msg = "Use ctx.clock.monotonic()."
+"time.perf_counter".msg = "Use ctx.clock.monotonic()."
+"datetime.datetime.now".msg = "Use ctx.clock.now()."
+"datetime.datetime.utcnow".msg = "Use ctx.clock.now()."
+"datetime.date.today".msg = "Use ctx.clock.now()."
+"asyncio.sleep".msg = "Use await ctx.clock.sleep()."
+"random.random".msg = "Use ctx.random."
+"random.randint".msg = "Use ctx.random."
+"random.randrange".msg = "Use ctx.random."
+"random.choice".msg = "Use ctx.random."
+"random.choices".msg = "Use ctx.random."
+"random.sample".msg = "Use ctx.random."
+"random.shuffle".msg = "Use ctx.random."
+"random.uniform".msg = "Use ctx.random."
+"random.seed".msg = "Seed a Random instance and inject it through ctx.random."

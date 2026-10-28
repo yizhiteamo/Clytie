@@ -1,0 +1,35 @@
+schema_version: 1
+id: companion_a
+names:
+  internal: companion_a
+  external:
+    public_group: example_companion
+model:
+  plugin: fake-model
+  config: {}
+channels:
+  - plugin: fake-channel
+    account: example_bot
+    config: {}
+persona:
+  files:
+    base: base.md
+  scenes:
+    owner_private: [base]
+    public_group: [base]
+    stranger_private: [base]
+permissions:
+  owner: ["*"]
+  peer: []
+  member: []
+  stranger: []
+plugins:
+  fake-model:
+    enabled: true
+    config: {}
+  fake-channel:
+    enabled: true
+    config: {}
+task_card:
+  internal: "{label} {id} · {name} · {helper} · {duration}"
+  external: "{label} {id} · {name} · {helper} · {duration}"
