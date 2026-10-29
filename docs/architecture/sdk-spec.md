@@ -99,6 +99,8 @@
 
 平台插件只有在确定"没有发出"时才能返回 `failed`；超时、断线等不确定情况必须返回 `unknown`。
 
+临时性失败的 `error.code` 约定为 `rate_limited` / `transient`（有限重发规则见 `kernel-spec.md` 第 6 节）。
+
 ### 1.5 模型
 
 **ChatMessage**：`role: system|user|assistant|tool`、`parts: list[MessagePart]`、`tool_calls: list[ToolCall]`（仅 assistant）、`tool_call_id: str?`（仅 tool）。
