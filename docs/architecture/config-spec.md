@@ -27,6 +27,7 @@
 | `plugins` | 否 | `{plugin_id: {config: {...}}}`：实例级的插件配置（所有伴侣共用的默认值） |
 | `api` | 否 | `{port: int}`；只监听 127.0.0.1，不提供修改地址的选项 |
 | `paths` | 否 | `{name: 相对或绝对路径}`：导入器等需要的外部路径（例如旧系统数据位置） |
+| `limits.max_task_seconds` | 否 | 任务截止时间上限，默认 3600 秒；范围未规定（见 `kernel-spec.md` 第 8 节） |
 
 平台账号（`account`、`platform_id`）在这里是真实值，这个文件只存在于实例目录。
 
@@ -47,6 +48,22 @@
 | `boundary` | 否 | 关系边界设置，子字段见下 |
 | `context` | 否 | 上下文预算，子字段见下 |
 | `memory` | 否 | 记忆设置，子字段见下 |
+| `delivery` | 否 | 交付重发设置，子字段见下 |
+| `tasks` | 否 | 任务取消、截止时间与并发设置，子字段见下 |
+| `ledger` | 否 | 账本内容保留设置，子字段见下 |
+
+**A3.1 新配置**（按 `kernel-spec.md` 第 6、8、11、13 节同步）：
+
+| 字段 | 默认值 | 范围与约定 |
+|---|---|---|
+| `delivery.retry.max_attempts` | `3` | 1–5；包括首发 |
+| `delivery.retry.backoff_seconds` | `[2, 5]` | 范围及列表长度约束未规定 |
+| `tasks.cancel_grace_seconds` | `5` | 秒；范围未规定 |
+| `tasks.default_deadline_seconds` | `600` | 秒；范围未规定。插件清单中工具声明的截止时间优先，但不能超过实例配置 `limits.max_task_seconds` |
+| `tasks.max_concurrent` | `2` | 每个伴侣同时执行的任务数；范围未规定 |
+| `ledger.content_retention_days` | 不限期 | 范围及“不限期”的配置编码未规定；到期只清除原文、参数和结果，骨架（状态、耗时、收据、编号）保留 |
+
+本表不补充源规格未定义的范围、类型或编码；这些缺口须在实现前补齐。
 
 **`channels[].account`**：实例配置 `accounts` 中的一个键。校验：键必须存在；对应条目的 `channel` 必须等于 `channels[].plugin`；同一个 `account_ref` 不能被两个伴侣同时使用。`secret` 只检查文件是否存在，不读取内容。
 
