@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import threading
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -117,6 +117,12 @@ def file_lock(path, owner, log=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
         os.set_inheritable(descriptor, False)
+        if os.fstat(descriptor).st_size == 0:
+            try:
+                os.write(descriptor, b"\0")
+            except OSError:
+                if os.fstat(descriptor).st_size == 0:
+                    raise
         try:
             _os_lock(descriptor, True)
         except OSError:
@@ -147,8 +153,8 @@ def file_lock(path, owner, log=None):
 
 
 class Operations:
-    def __init__(self, home, log):
-        self.home, self.log = home, log
+    def __init__(self, home, log, clock):
+        self.home, self.log, self.clock = home, log, clock
         self.executor = process_identity()
         self.owners = {}
 
@@ -176,14 +182,12 @@ class Operations:
         if self.owners.get((cid, pid)) != _task():
             raise RuntimeError("plugin operation requires its lock")
 
-    @contextmanager
-    def metadata(self, cid):
+    @asynccontextmanager
+    async def metadata(self, cid):
         path = contained(
             self.home, self.home / "companions" / identifier(cid) / "plugin-versions.lock"
         )
-        # 有上限的轮询等待；版本读改写不跨 await，进程内不会等待同任务释放。
-        # Event.wait 使用 OS 等待原语，不使用应用时间或 time.sleep。
-        wake = threading.Event()
+        # 只在锁外异步等待；拿锁后的版本读改写不跨 await。
         for attempt in range(501):
             manager = file_lock(path, {**self.executor, "operation": "version_record"}, self.log)
             try:
@@ -193,7 +197,7 @@ class Operations:
                     raise MetadataLockTimeout(
                         "plugin version record write lock timed out"
                     ) from None
-                wake.wait(0.01)
+                await self.clock.sleep(0.01)
             else:
                 try:
                     yield

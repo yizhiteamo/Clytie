@@ -222,6 +222,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "max_task_seconds": {
+          "type": "integer",
+          "default": 3600,
+          "minimum": 60,
+          "maximum": 8.64e4
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
     }
   },
   "patternProperties": {

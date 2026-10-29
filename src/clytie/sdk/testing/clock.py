@@ -86,3 +86,20 @@ class MockClock:
     async def sleep_until(self, value: datetime) -> None:
         seconds = (self._utc(value) - self._now).total_seconds()
         await self.sleep(max(0.0, seconds))
+
+    async def drain(self, turns: int = 32) -> None:
+        """让有界的测试协程链注册下一批等待；不推进应用时间。"""
+        for _ in range(turns):
+            await self.sleep(0)
+
+    async def advance_and_drain(self, seconds: float) -> None:
+        """逐个到期点推进，让唤醒者先注册后续等待，再到目标时间。"""
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("clock advancement must be finite and nonnegative")
+        target = self._monotonic + seconds
+        await self.drain()
+        while self._sleepers and self._sleepers[0][0] <= target:
+            self.advance(max(0, self._sleepers[0][0] - self._monotonic))
+            await self.drain()
+        self.advance(max(0, target - self._monotonic))
+        await self.drain()

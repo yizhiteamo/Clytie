@@ -29,6 +29,10 @@ def hold_metadata(path, pipe):
         pipe.send(True)
         assert pipe.recv() == "release"
         threading.Event().wait(0.2)
+    try:
+        pipe.send("released")
+    except BrokenPipeError:
+        pass
 
 
 @contextmanager
@@ -64,9 +68,10 @@ async def test_migration_commit_waits_for_other_process_and_never_rolls_back(tmp
         assert h._version("companion_a", "stateful")["data_version"] == 1
         write = h._record_version
 
-        def release_then_write(*args):
+        async def release_then_write(*args):
             pipe.send("release")
-            write(*args)
+            assert pipe.recv() == "released"
+            await write(*args)
 
         monkeypatch.setattr(h, "_record_version", release_then_write)
         h.clock.advance(100)
@@ -88,9 +93,10 @@ async def test_start_read_write_competition_without_journal(tmp_path, monkeypatc
             assert h._before_load("companion_a", "stateful") == (None, None)
         write = h._record_version
 
-        def release_then_write(*args):
+        async def release_then_write(*args):
             pipe.send("release")
-            write(*args)
+            assert pipe.recv() == "released"
+            await write(*args)
 
         monkeypatch.setattr(h, "_record_version", release_then_write)
         assert (await enable(h, "stateful")).status == "active"
@@ -264,7 +270,7 @@ async def test_atomic_version_reads_allow_concurrent_replacements(tmp_path):
         assert ready.wait(5)
         try:
             for n in range(20):
-                h._write_version(
+                await h._write_version(
                     "companion_a",
                     "stateful",
                     {"plugin_version": "1.0.0", "data_version": 1 + n % 2},
@@ -281,8 +287,8 @@ async def test_error_after_version_commit_never_promises_or_performs_rollback(
     update(path, script=MIGRATE)
     write = h._record_version
 
-    def fail_after_write(*args):
-        write(*args)
+    async def fail_after_write(*args):
+        await write(*args)
         raise OSError("fictional unlock diagnostic failure")
 
     monkeypatch.setattr(h, "_record_version", fail_after_write)

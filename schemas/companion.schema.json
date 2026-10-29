@@ -208,16 +208,31 @@
         "external": {
           "type": "string",
           "minLength": 1
+        },
+        "label": {
+          "type": "object",
+          "properties": {
+            "internal": {
+              "type": "string",
+              "minLength": 1,
+              "default": "任务"
+            },
+            "external": {
+              "type": "string",
+              "minLength": 1,
+              "default": "任务"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
         }
       },
       "patternProperties": {
         "^x-": {}
       },
-      "additionalProperties": false,
-      "required": [
-        "internal",
-        "external"
-      ]
+      "additionalProperties": false
     },
     "boundary": {
       "type": "object",
@@ -332,6 +347,153 @@
           "default": [
             "owner_private"
           ]
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "delivery": {
+      "type": "object",
+      "properties": {
+        "retry": {
+          "type": "object",
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "default": 3,
+              "minimum": 1,
+              "maximum": 5
+            },
+            "backoff_seconds": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0.5,
+                "maximum": 60
+              },
+              "maxItems": 4,
+              "default": [
+                2,
+                5
+              ]
+            },
+            "window_seconds": {
+              "type": "integer",
+              "default": 60,
+              "minimum": 10,
+              "maximum": 600
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "group_max_seconds": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 10,
+          "maximum": 300
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "tasks": {
+      "type": "object",
+      "properties": {
+        "cancel_grace_seconds": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60
+        },
+        "default_deadline_seconds": {
+          "type": "integer",
+          "default": 600,
+          "minimum": 10
+        },
+        "max_concurrent": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 8
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "ledger": {
+      "type": "object",
+      "properties": {
+        "content_retention_days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "minimum": 1
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "task_reactions": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "audience": {
+          "enum": [
+            "all",
+            "owner"
+          ],
+          "default": "all"
+        },
+        "emojis": {
+          "type": "object",
+          "properties": {
+            "accepted": {
+              "type": "string",
+              "minLength": 1,
+              "default": "👌"
+            },
+            "running": {
+              "type": "string",
+              "minLength": 1,
+              "default": "⏳"
+            },
+            "done": {
+              "type": "string",
+              "minLength": 1,
+              "default": "✅"
+            },
+            "failed": {
+              "type": "string",
+              "minLength": 1,
+              "default": "❌"
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "min_interval_seconds": {
+          "type": "integer",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 30
         }
       },
       "patternProperties": {

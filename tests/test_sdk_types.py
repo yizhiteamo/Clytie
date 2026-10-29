@@ -177,7 +177,7 @@ def samples():
             supports_react=True,
             supports_quote=True,
             supports_card=True,
-            media_limits={"image": {"size": 20}},
+            media_limits={"image": {"max_bytes": 20, "formats": ["image/png"]}},
         ),
         t.ModelFeatures(
             supports_tools=True, supports_images=False, context_chars=300, agent_type=False
@@ -362,7 +362,7 @@ def test_schedule_rejects_ambiguous_or_invalid_time(fields):
         t.ScheduleDeclaration(handler="on_tick", id="fake-tick", **fields)
 
 
-@pytest.mark.parametrize("duration", ["PT1M", "P1D", "P1W", "P1Y2M3DT4H5M6S", "PT0.5S"])
+@pytest.mark.parametrize("duration", ["PT1M", "P1D", "P1W", "P3DT4H5M6S", "PT0.5S"])
 def test_duration_forms_and_iso_days_roundtrip(duration):
     value = t.ScheduleDeclaration(handler="on_tick", id="fake-tick", every=duration)
     assert t.ScheduleDeclaration.model_validate_json(value.model_dump_json()) == value

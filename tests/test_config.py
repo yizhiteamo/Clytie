@@ -386,7 +386,7 @@ def test_plugin_semantic_version_format_is_validated_by_status(tmp_path, version
     ("duration", "valid"),
     [
         ("PT1M", True),
-        ("P1Y2M3DT4H5M6S", True),
+        ("P1Y2M3DT4H5M6S", False),
         ("P1W", True),
         ("PT0.5S", True),
         ("PT0,5S", True),

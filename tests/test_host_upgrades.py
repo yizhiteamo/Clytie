@@ -154,7 +154,7 @@ async def test_missing_step_downgrade_and_verification_failure(tmp_path, monkeyp
     with pytest.raises(ValueError, match="verification"):
         await h.apply_migration(plan.plan_id)
     assert await old.storage.get("value") == "fictional-original"
-    h._record_version("companion_a", h.manifests["stateful"])
+    await h._record_version("companion_a", h.manifests["stateful"])
     update(path, version="1.0.0", data_version=1)
     await h.apply(h.plan_enable("companion_a", "stateful").plan_id)
     assert h.runtimes["companion_a", "stateful"].status == "data_newer_than_code"

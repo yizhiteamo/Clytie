@@ -17,10 +17,12 @@ from pydantic import (
     JsonValue,
     PlainSerializer,
     StringConstraints,
+    model_serializer,
     model_validator,
 )
 
 from .immutable import FrozenDict, FrozenList, freeze, thaw
+from .schedule import duration_seconds
 
 
 def _utc(value: datetime) -> datetime:
@@ -208,6 +210,7 @@ class ConversationRequest(SDKModel):
 
 class EventEnvelope(SDKModel):
     event_id: str
+    dedupable: bool = True
     type: str
     companion_id: str
     channel_id: str
@@ -250,6 +253,7 @@ class DeliveryIntent(SDKModel):
     kind: Literal["reply", "proactive", "react"]
     parts: FrozenList[MessagePart] = Field(default_factory=FrozenList)
     emoji: str | None = None
+    replaces_emoji: str | None = None
     target: MessageRef | None = None
     task_id: TaskId | None = None
     trace_id: TraceId
@@ -260,6 +264,8 @@ class DeliveryIntent(SDKModel):
     def check_reaction(self):
         if self.kind == "react" and (self.emoji is None or self.parts):
             raise ValueError("react requires emoji and empty parts")
+        if self.replaces_emoji is not None and self.kind != "react":
+            raise ValueError("replaces_emoji belongs to react intents")
         return self
 
 
@@ -446,9 +452,23 @@ class Tick(SDKModel):
 class ChannelFeatures(SDKModel):
     max_text_chars: int
     supports_react: bool
+    supports_react_remove: bool = False
     supports_quote: bool
     supports_card: bool
     media_limits: JsonObject
+
+    @model_validator(mode="after")
+    def check_media_limits(self):
+        for kind, value in self.media_limits.items():
+            if kind not in {"image", "audio", "video", "file"} or not isinstance(value, FrozenDict):
+                raise ValueError("media_limits requires image/audio/video/file objects")
+            if set(value) != {"max_bytes", "formats"} or type(value["max_bytes"]) is not int:
+                raise ValueError("media limit requires integer max_bytes and formats")
+            if not isinstance(value["formats"], (list, tuple)) or not all(
+                isinstance(v, str) for v in value["formats"]
+            ):
+                raise ValueError("media formats must be a string list")
+        return self
 
 
 class ModelFeatures(SDKModel):
@@ -529,16 +549,20 @@ class ScheduleDeclaration(SDKModel):
         if self.at is not None and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", self.at):
             raise ValueError("at must be HH:MM")
         if self.every is not None:
-            number = r"\d+(?:[.,]\d+)?"
-            duration = (
-                rf"P(?=\d|T\d)(?:{number}W|(?:{number}Y)?(?:{number}M)?(?:{number}D)?"
-                rf"(?:T(?=\d)(?:{number}H)?(?:{number}M)?(?:{number}S)?)?)"
-            )
-            if not re.fullmatch(duration, self.every):
-                raise ValueError("every must be an ISO 8601 duration")
-            if self.days:
+            duration_seconds(self.every)
+            if "days" in self.model_fields_set:
                 raise ValueError("days belongs to an at schedule")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_schedule(self, handler):
+        result = handler(self)
+        if self.every is not None:
+            result.pop("days", None)
+            result.pop("at", None)
+        else:
+            result.pop("every", None)
+        return result
 
 
 class ApiResponse(SDKModel):

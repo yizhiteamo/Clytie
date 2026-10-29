@@ -19,7 +19,7 @@ def make_manifest(root, plugin_id, **overrides):
         "summary": "手写虚构插件",
         "category": "example",
         "version": "1.0.0",
-        "requires": {"sdk": ">=0.3,<0.4"},
+        "requires": {"sdk": ">=0.4,<0.5"},
         "entry": "plugin:Plugin",
         "contributes": {},
         "permissions": [],
