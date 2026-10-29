@@ -157,7 +157,14 @@ async def test_private_memory_requires_both_permission_and_private_scene(tmp_pat
             continue
         assert not hasattr(ctx.memory, "write")
         for scene in ("owner_private", "public_group", "stranger_private"):
-            results = await ctx.memory.search("", scene=scene)
+            ctx = FakeContext(
+                root=tmp_path,
+                clock=clock,
+                records=records(clock),
+                permissions=permissions,
+                scene=scene,
+            )
+            results = await ctx.memory.search("")
             expected = "memory.read.private" in permissions and scene == "owner_private"
             assert any(r.visibility == "private" for r in results) == expected
 
@@ -288,6 +295,7 @@ def test_context_protocol_inventory_is_covered():
         "Assets": "assets",
         "AssetWriter": "asset_writer",
         "MemoryView": "memory_view",
+        "MemoryWriter": "memory_insert",
         "WritableMemoryView": "memory_writer",
         "ServiceProxy": "service_proxy",
         "Services": "services",
@@ -341,6 +349,7 @@ async def test_running_context_operations_propagate_cancellation(tmp_path, opera
         clock=clock,
         permissions=[
             "memory.write",
+            "memory.read.public",
             "peer",
             "model.invoke",
             "network",

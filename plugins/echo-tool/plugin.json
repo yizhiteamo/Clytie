@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "echo-tool",
+  "name": "echo-tool",
+  "summary": "仅使用虚构数据验证扩展点的参考插件",
+  "category": "tool",
+  "version": "0.2.0",
+  "requires": {
+    "sdk": ">=0.3,<0.4"
+  },
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": [],
+  "permissions": [],
+  "contributes": {
+    "tools": [
+      {
+        "name": "echo",
+        "factory": "create_echo",
+        "description": "回显明确请求的文字",
+        "when_not_to_use": "否定、转述或讨论回显功能时不用",
+        "examples": [
+          {
+            "input": "请回显示例文字",
+            "call": true
+          },
+          {
+            "input": "不要回显",
+            "call": false,
+            "note": "否定"
+          },
+          {
+            "input": "有人让我回显文字",
+            "call": false,
+            "note": "转述"
+          },
+          {
+            "input": "讨论一下回显的用途",
+            "call": false,
+            "note": "讨论"
+          }
+        ],
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        "audience": [
+          "owner",
+          "member"
+        ],
+        "heavy": false,
+        "risk": "low",
+        "delivery": "text"
+      }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}

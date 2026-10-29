@@ -109,6 +109,7 @@ claude -p "<验收指令>" --allowedTools "Read(./**)" --disallowedTools "Bash" 
 | `docs/architecture/sdk-spec.md` | SDK 实现规格：字段、取消与时钟协议、扩展点签名、合并规则 |
 | `docs/architecture/config-spec.md` | 配置文件、Schema、分层合并、错误报告、A1 的 status 命令 |
 | `docs/architecture/plugins.md` | 插件包、清单、扩展点、权限、依赖、生命周期、创意工坊格式 |
+| `docs/architecture/plugin-host-spec.md` | A2 宿主内部计划、装配、持久化和索引技术约定 |
 | `docs/architecture/data-and-backup.md` | 实例目录、记忆导入导出、备份与保留策略 |
 | `docs/architecture/repository.md` | 公开仓库的内容规则与自动检查 |
 | `docs/design/kernel.md` | 统一账本、防重、交付、任务编号、表情回应规则、日志 |

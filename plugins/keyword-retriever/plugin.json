@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "keyword-retriever",
+  "name": "keyword-retriever",
+  "summary": "仅使用虚构数据验证扩展点的参考插件",
+  "category": "memory",
+  "version": "0.2.0",
+  "requires": {
+    "sdk": ">=0.3,<0.4"
+  },
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": [],
+  "permissions": [],
+  "contributes": {
+    "memory": {
+      "retriever": {
+        "factory": "create_retriever"
+      }
+    }
+  },
+  "config": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}

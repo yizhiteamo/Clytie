@@ -144,12 +144,19 @@ async def assert_api_client_contract(api):
 
 
 async def assert_memory_view_contract(memory, *, record, hidden_id):
-    results = await memory.search("", scene="public_group")
+    results = await memory.search("")
     assert all(isinstance(r, MemoryRecord) and r.visibility != "private" for r in results)
     assert await memory.get(hidden_id) is None
     assert await memory.get(record.record_id) == record
-    await assert_task_cancellation(lambda: memory.search("", scene="public_group"))
+    await assert_task_cancellation(lambda: memory.search(""))
     await assert_task_cancellation(lambda: memory.get(record.record_id))
+
+
+async def assert_memory_insert_contract(memory, draft):
+    assert not any(hasattr(memory, name) for name in ("search", "get", "revise", "retract"))
+    record = await memory.write(draft)
+    assert record.write_mode == "auto"
+    await assert_task_cancellation(lambda: memory.write(draft))
 
 
 async def assert_memory_writer_contract(memory, draft):

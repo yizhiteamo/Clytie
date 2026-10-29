@@ -65,12 +65,15 @@ class AssetWriter(Protocol):
 
 
 class MemoryView(Protocol):
-    async def search(self, text: str, *, scene: str, limit: int = 10) -> list[MemoryRecord]: ...
+    async def search(self, text: str, *, limit: int = 10) -> list[MemoryRecord]: ...
     async def get(self, record_id: str) -> MemoryRecord | None: ...
 
 
-class WritableMemoryView(MemoryView, Protocol):
+class MemoryWriter(Protocol):
     async def write(self, draft: MemoryDraft) -> MemoryRecord: ...
+
+
+class WritableMemoryView(MemoryView, MemoryWriter, Protocol):
     async def revise(
         self, record_id: str, expected_revision: int, changes: JsonObject
     ) -> MemoryRecord: ...

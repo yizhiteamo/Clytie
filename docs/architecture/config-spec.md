@@ -46,6 +46,7 @@
 | `task_card` | 否 | 任务单模板，按场景：`{internal: str, external: str}`；可用变量 `{label} {id} {name} {helper} {duration}` |
 | `boundary` | 否 | 关系边界设置，子字段见下 |
 | `context` | 否 | 上下文预算，子字段见下 |
+| `memory` | 否 | 记忆设置，子字段见下 |
 
 **`channels[].account`**：实例配置 `accounts` 中的一个键。校验：键必须存在；对应条目的 `channel` 必须等于 `channels[].plugin`；同一个 `account_ref` 不能被两个伴侣同时使用。`secret` 只检查文件是否存在，不读取内容。
 
@@ -57,6 +58,16 @@
 | `categories` | `{romance, persona_change, scripted_intimacy, intimate_images, owner_privacy}`，各为布尔值（全部 `true`） |
 | `never_publish` | 字符串列表（空）：对外场景中不允许出现的词句 |
 | `notify_owner` | 布尔值（`true`） |
+
+**`memory`**（全部可选，括号内为默认值）：
+| 字段 | 类型 |
+|---|---|
+| `private_scenes` | 场景名列表（`[owner_private]`）：哪些场景可以读取私密记忆 |
+
+`private_scenes` 的校验规则（不满足时配置无效）：
+- `public_group`、`stranger_private` 永远不能加入。
+- 加入的其他场景，实例配置中映射到该场景的每个会话都必须声明 `members_expected`，并且成员只能是主人和本部署的伴侣。也就是说，只有"在场的都是自己人"的场景才能开启私密记忆。
+- 这个设置只放宽"能读到私密记忆"，不影响出站检查：对外场景仍然拦截私密内容。
 
 **`context`**（全部可选，括号内为默认值）：
 | 字段 | 类型 |

@@ -824,6 +824,10 @@
         "^x-": {}
       },
       "additionalProperties": false
+    },
+    "hot_reload": {
+      "type": "boolean",
+      "default": false
     }
   },
   "patternProperties": {

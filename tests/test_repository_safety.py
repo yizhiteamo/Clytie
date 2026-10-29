@@ -109,6 +109,22 @@ def test_accepts_documented_fictional_data_and_source(monkeypatch, capsys):
     assert run_scan(monkeypatch, capsys, content, filename="src/clytie/memory/core.py")[0] == 0
 
 
+@pytest.mark.parametrize("suffix", ["", "a", "F", "abc" * 11])
+def test_short_hex_hash_with_letters_is_not_account_number(monkeypatch, capsys, suffix):
+    value = "c" + "1" * 6 + suffix
+    assert run_scan(monkeypatch, capsys, "commit `" + value + "`")[0] == 0
+
+
+@pytest.mark.parametrize("value", ["1" * 7, "c" + "1" * 5, "c" + "1" * 40, "g" + "1" * 7])
+def test_hash_exception_does_not_hide_plain_or_non_hash_numbers(monkeypatch, capsys, value):
+    assert run_scan(monkeypatch, capsys, value)[0] == 1
+
+
+def test_short_hash_still_checked_by_private_list(monkeypatch, capsys):
+    value = "c" + "1" * 6
+    assert run_scan(monkeypatch, capsys, value, private=True, denylist=value)[0] == 1
+
+
 def test_lock_metadata_has_narrow_allowance(monkeypatch, capsys):
     content = (
         'sdist = { url = "https://files.pythonhosted.org/packages/aa/bb/'

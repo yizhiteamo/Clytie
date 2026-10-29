@@ -388,7 +388,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | 属性 | 权限 | 方法 |
 |---|---|---|
 | `asset_writer` | `assets.write` | `async put(data: bytes, media_type, origin) -> AssetRef` |
-| `memory` | 任一 `memory.*` | `async search(text, *, scene, limit=10) -> list[MemoryRecord]`、`async get(record_id) -> MemoryRecord \| None`；有 `memory.write` 时另有 `async write(draft: MemoryDraft) -> MemoryRecord`、`async revise(record_id, expected_revision, changes: JsonObject) -> MemoryRecord`、`async retract(record_id, expected_revision, reason)` |
+| `memory` | 任一 `memory.*` | 有 `memory.read.public` 或 `memory.read.private` 时：`async search(text, *, limit=10) -> list[MemoryRecord]`、`async get(record_id) -> MemoryRecord \| None`。有 `memory.write` 时：`async write(draft: MemoryDraft) -> MemoryRecord`；同时具有写权限和读权限时另有 `async revise(record_id, expected_revision, changes: JsonObject) -> MemoryRecord`、`async retract(record_id, expected_revision, reason)`。没有的方法在对象上不存在 |
 | `services` | 声明了服务依赖 | `get(name) -> ServiceProxy \| None`（可选依赖不可用时为 `None`）；`ServiceProxy.call(method, args) -> JsonObject`，不可用时抛 `ServiceUnavailable` |
 | `peer` | `peer` | `async send(companion_id, kind, payload) -> str`、`async request(companion_id, kind, payload, timeout_s) -> JsonObject` |
 | `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
@@ -399,7 +399,13 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 
 - `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
 - `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
-- `memory.search` 的 `scene` 由调用方传入，宿主按场景和权限共同决定可见等级：只有 `memory.read.private` 且 `scene == owner_private` 时才包含私密记录。
+- **记忆权限规则**（宿主负责裁剪，插件无法改变）：
+  1. 只有 `memory.write`：只能写入新记录，不能 `search`、`get`、`revise`、`retract`。`revise` / `retract` 只能作用于当前场景下读得到的记录。
+  2. 场景**由宿主绑定**，插件不能传入或修改。宿主在调用环节、工具、上下文段落等处理某条事件时，把该事件的场景绑定到这次调用；`search`、`get`、`revise`、`retract` 都按绑定的场景过滤。
+  3. 没有绑定场景的调用（定时任务、事件订阅、其他插件的服务调用、启动和停止）一律按 `public_group` 处理：只能读到 `public` 和 `relationship` 等级。
+  4. 私密记录只在**同时满足**以下条件时可读：插件有 `memory.read.private`，并且绑定的场景在伴侣配置 `memory.private_scenes` 中（默认只有 `owner_private`）。可以加入哪些场景、有什么限制，见 `config-spec.md` 第 3 节。
+  5. 只有 `memory.read.public` 的插件，在任何场景都读不到私密记录。
+  6. `get` 对当前场景读不到的记录返回 `None`，和"记录不存在"无法区分。
 - **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
 - `revise` / `retract` 的 `expected_revision` 与当前修订号不一致时抛 `RevisionConflict`。
 

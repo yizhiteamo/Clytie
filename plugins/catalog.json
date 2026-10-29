@@ -1,0 +1,103 @@
+{
+  "plugins": [
+    {
+      "category": "notifier",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "desktop-notifier",
+      "name": "desktop-notifier",
+      "permissions": [
+        "subprocess"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "仅使用虚构数据验证扩展点的参考插件",
+      "version": "0.2.0"
+    },
+    {
+      "category": "tool",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "echo-tool",
+      "name": "echo-tool",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "仅使用虚构数据验证扩展点的参考插件",
+      "version": "0.2.0"
+    },
+    {
+      "category": "behavior",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "example-behavior",
+      "name": "example-behavior",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "仅使用虚构数据验证扩展点的参考插件",
+      "version": "0.2.0"
+    },
+    {
+      "category": "channel",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "fake-channel",
+      "name": "离线假平台",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "使用手写虚构事件验证平台协议，不连接真实账号。",
+      "version": "0.2.0"
+    },
+    {
+      "category": "model",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "fake-model",
+      "name": "离线假模型",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "使用手写虚构数据验证模型协议，不调用线上模型。",
+      "version": "0.2.0"
+    },
+    {
+      "category": "memory",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "keyword-retriever",
+      "name": "keyword-retriever",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "仅使用虚构数据验证扩展点的参考插件",
+      "version": "0.2.0"
+    }
+  ],
+  "schema_version": 1
+}

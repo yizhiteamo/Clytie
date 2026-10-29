@@ -91,6 +91,7 @@ class HomeReport:
     errors: tuple[ConfigIssue, ...] = ()
     instance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     plugin_configs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    failed_plugin_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     @property
     def valid(self) -> bool:
@@ -107,6 +108,7 @@ class HomeReport:
             "valid": self.valid,
             "companions": thaw(self.companions),
             "errors": [error.to_dict() for error in self.errors],
+            "failed_plugin_state": thaw(self.failed_plugin_state),
         }
 
 
@@ -592,10 +594,37 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             continue
         if data.get("id") != companion_id:
             reader.issue(file, ("id",), f"directory id {companion_id}", data.get("id"))
-        for section in ("boundary", "context"):
+        for section in ("boundary", "context", "memory"):
             defaults, _ = _default_config(reader.schemas["companion"]["properties"][section], file)
             if isinstance(data.get(section, {}), dict):
                 data[section] = thaw(deep_merge(defaults, data.get(section, {})))
+        memory = data.get("memory", {})
+        private_scenes = memory.get("private_scenes", []) if isinstance(memory, dict) else []
+        for index, scene in enumerate(private_scenes if isinstance(private_scenes, list) else []):
+            position = ("memory", "private_scenes", index)
+            if (
+                not isinstance(scene, str)
+                or scene not in scenes
+                or scene in {"public_group", "stranger_private"}
+            ):
+                reader.issue(file, position, "declared private-capable scene", scene)
+                continue
+            if scene == "owner_private":
+                continue
+            trusted = set(owners) | set(companion_ids)
+            for conversation in conversations.values():
+                if not isinstance(conversation, dict) or conversation.get("scene") != scene:
+                    continue
+                members = conversation.get("members_expected")
+                if not isinstance(members, list) or any(
+                    member not in trusted for member in members
+                ):
+                    reader.issue(
+                        file,
+                        position,
+                        "every conversation declares members_expected containing only owner/companions",
+                        scene,
+                    )
         names = data.get("names") if isinstance(data.get("names"), dict) else {}
         if "forbidden_names" not in data and isinstance(names.get("internal"), str):
             data["forbidden_names"] = [names["internal"]]

@@ -73,6 +73,7 @@ repos:
           email_pattern = re.compile(r"(?<![\w.+-])[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}(?![\w.-])")
           number_pattern = re.compile(r"(?<!\d)\d{5,}(?!\d)")
           hash_pattern = re.compile(r"(?<![A-Za-z0-9_])(?:[a-fA-F0-9]{64}|[a-fA-F0-9]{40})(?![A-Za-z0-9_])")
+          short_hash_pattern = re.compile(r"(?<![A-Za-z0-9_])[a-fA-F0-9]{7,40}(?![A-Za-z0-9_])")
           uuid_pattern = re.compile(r"(?<![A-Za-z0-9_])[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}(?![A-Za-z0-9_])")
           version_pattern = re.compile(r"(?<![\w.])v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?![\w.])")
           character_count_pattern = re.compile(r"(?<!\d)\d+\s*(?:字符|字)(?![A-Za-z0-9_])")
@@ -173,6 +174,9 @@ repos:
                       categories.add("possible-personal-email")
               for pattern in (hash_pattern, uuid_pattern, version_pattern, character_count_pattern, standard_identifier_pattern):
                   excluded_spans.extend(match.span() for match in pattern.finditer(line))
+              for match in short_hash_pattern.finditer(line):
+                  if re.search(r"[a-fA-F]", match.group()):
+                      excluded_spans.append(match.span())
               for match in number_pattern.finditer(line):
                   if any(start <= match.start() and match.end() <= end for start, end in excluded_spans):
                       continue
