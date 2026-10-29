@@ -283,7 +283,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | 扩展点 | 签名 |
 |---|---|
 | `context_section` | `async contribute(req: ContextRequest) -> ContextSection?`；`ContextRequest`：`scene`、`actor`、`budget_chars`；`ContextSection`：`title`、`text`、`priority: int` |
-| `schedule` | 清单声明 `{id, every: ISO 8601 时长}` 或 `{id, at: "HH:MM", days: [...]}`；处理函数 `async on_tick(tick: Tick)` |
+| `schedule` | 清单声明 `{id, every: ISO 8601 固定时长}` 或 `{id, at: "HH:MM", days: [...]}`；处理函数 `async on_tick(tick: Tick)`；`every` 的范围见 §7.7，按 kernel-spec §9 执行 |
 | `service` | 清单声明 `{name, version, methods: [...]}`；`async call(method: str, args: dict) -> dict`。使用方通过 `ctx.services.get(name).call(...)` 调用，参数和返回值都必须可序列化 |
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
 | `memory.retriever` | `async search(q: MemoryQuery, candidates: CandidateReader, cancel) -> list[MemoryHit]`；`CandidateReader` 只返回 `q.allowed_visibility` 内的记录 |
@@ -454,7 +454,8 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 - 工具清单新增可选字段 `timeout_s`（正整数，秒）；截止时间计算与实例上限见 `kernel-spec.md` 第 8 节。
 - 工具参数 Schema 支持 `"x-clytie-sensitive": true` 注解：带注解的属性写入账本前替换为 `"[redacted]"`；适用于任意层级，包括 `properties`、`items` 和嵌套对象；`oneOf` / `anyOf` / `allOf` 的任一分支把某属性标为敏感，就按敏感处理（见 `kernel-spec.md` 第 13.2 节）。
 - `audience` 取值 `owner`、`peer`、`member`、`stranger`；`risk` 取值 `low`、`medium`、`high`；`delivery` 取值 `text`、`image`、`audio`、`video`、`file`、`card`。
-- `schedule.days`：ISO 星期编号，1 = 星期一 … 7 = 星期日；省略表示每天。`at` 按实例配置的时区解释。节假日判断不属于调度器，由需要的插件自己处理。
+- `schedule.every`：只接受能换算成固定秒数的 ISO 8601 时长，即周、日、时、分、秒（`W`、`D`、`H`、`M`（时间部分）、`S`）。一天严格按 24 小时、一周按 7 天，在 UTC 上换算，不随夏令时变化。带年（`Y`）或月（日期部分的 `M`）的一律拒绝，包括混合形式（如 `P1M1D`）和小数形式（如 `P0.5Y`）；总时长为零（如 `PT0S`）的一律拒绝。清单校验和 SDK 类型校验结果必须一致（kernel-spec §9，用户已确认）。
+- `schedule.days`：ISO 星期编号，1 = 星期一 … 7 = 星期日；只属于 `at`。`every` 与 `days` 同时出现（包括 `days: []`）时，清单校验和 SDK 校验都拒绝。`at` 省略 `days` 或给出空列表都表示每天，按实例配置的时区解释。节假日判断不属于调度器，由需要的插件自己处理。
 - `services[].handler` 签名：`async (method: str, args: JsonObject) -> JsonObject`。
 - `api_routes` 和 `webui_panels` 在 A1–A3 只做声明和校验，A4 才真正提供服务。
 - 假插件的清单要改为使用上述编码（`fake-model` 声明 `model`，`fake-channel` 声明 `channel`），契约测试通过宿主同样的装配路径（读清单 → 构造 → `start` → `factory`）获得实现对象。

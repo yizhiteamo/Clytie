@@ -2,6 +2,7 @@
 
 ## SDK 0.x 次版本变更（A3.1 规格，尚未实现或发布）
 
+- **SDK 不兼容变更（Issue #17，用户确认）**：`schedule.every` 仅接受周、日、时、分、秒的固定时长，拒绝月、年（包括混合和小数形式）以及总时长为零的值。一天按 24 小时、一周按 7 天在 UTC 上换算。`every` 与 `days` 同时出现时一律拒绝（包括空列表）；`at` 省略 `days` 或给出空列表都表示每天。清单和 SDK 校验保持一致，依据 kernel-spec §9。
 - `EventEnvelope` 新增 `dedupable: bool`，默认 `true`；不可防重事件只能观察，不触发任务或回复。
 - 工具清单新增可选正整数秒 `timeout_s`，参数 Schema 支持 `x-clytie-sensitive` 注解。
 - 明确 `ChannelFeatures.media_limits` 的媒体类型、`max_bytes`、`formats` 编码，未列出的类型视为不支持。
