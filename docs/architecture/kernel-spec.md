@@ -381,6 +381,7 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 | sdk-spec ChannelFeatures | `media_limits` 的键：`{image\|audio\|video\|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持 |
 | plugins.md 能力插件规范 | 不把凭据写进 `ToolResult.data` 和收据的 `error.message` |
 | config-spec §3 | 新增或更新下表字段 |
+| plugins.md §3 / sdk-spec §5.5 | `dedupable = false` 的事件经过过滤但不经过防重，可能重复到达，仅供 `message_received` 观察，不触发任务或回复 |
 | data-and-backup §1 目录树 | 加入 `backups/ledger/<cid>/`（账本迁移快照）和 `companions/<cid>/ledger/.migration.json` |
 | data-and-backup §4 | 写明账本迁移快照的加密、存放位置和保留规则（第 14 节），并注明它不参与常规备份的保留规则 |
 | data-and-backup §4 / §4.1 | 加入失败现场 `backups/ledger/<cid>/failed-…/` 的加密与保留（第 14 节）；§4.1 的密钥适用范围列出账本迁移快照和失败现场；删除 §4 中照抄带来的自引用"见 data-and-backup §4" |
