@@ -369,3 +369,9 @@ async submit(conversation_id, *, topic: str | None = None, material: JsonObject 
 - 主动消息不经过入站流程和行为环节 `before_attention` / `attention`；时机由提交它的插件负责（例如睡眠插件在她"睡着"时不提交）。
 - 直接发送的内容只做 kernel-spec §11 的格式和大小检查。
 - 主动消息不是任务：不分配任务编号，不加任务状态回应，不附任务单。
+
+### 15.4 实现技术澄清（只读询问 Claude 后采用）
+
+- `ContextRequest.actor` 为 `Actor | None = None`，主动话题传 `None`，普通回复显式传发送者；不伪造主人或收件人的身份。属于 SDK 0.x 次版本变更。
+- 主动生成的插件段落由本体按配置中目标会话的场景绑定；提交者的定时、事件、服务或生命周期调用仍遵循无场景时 `public_group` 的既定规则，不因提交而取得目标场景权限。
+- 生成过程只向提交者返回 `trace_id`，上下文段落和生成文字不回传，不写入日志或事件。每次插件调用显式绑定相应场景，不继承提交者的场景。
