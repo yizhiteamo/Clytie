@@ -21,7 +21,11 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
             try:
                 state = json.loads(path.read_text(encoding="utf-8"))
                 for warning in state.get("warnings", []):
-                    if warning in {"boundary_notifier_unavailable", "task_card_private_name"}:
+                    if warning in {
+                        "boundary_notifier_unavailable",
+                        "boundary_notification_failed",
+                        "task_card_private_name",
+                    }:
                         notices.append({"companion_id": companion["id"], "code": warning})
             except (OSError, ValueError, AttributeError):
                 notices.append(

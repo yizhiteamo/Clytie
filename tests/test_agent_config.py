@@ -79,3 +79,26 @@ def test_reserved_core_tool_name_rejected_by_manifest_schema():
     manifest["contributes"]["tools"][0]["name"] = "core_fictional"
     errors = list(Draft202012Validator(schema).iter_errors(manifest))
     assert any(list(e.absolute_path)[-1] == "name" for e in errors)
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["boundary_notifier_unavailable", "boundary_notification_failed", "task_card_private_name"],
+)
+def test_status_exposes_each_dialogue_warning(tmp_path, code):
+    import json
+
+    from clytie.api import local_status
+
+    home, repo, _, _ = make_home(tmp_path)
+    state = home / "companions/companion_a/boundary/state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps({"warnings": [code, "fictional_unknown_code"], "actors": {}, "records": []}),
+        encoding="utf-8",
+    )
+    report = local_status(home, repo_root=repo)
+    assert report.valid
+    expected = {"companion_id": "companion_a", "code": code}
+    assert report.dialogue_notices == (expected,)
+    assert report.to_dict()["dialogue_notices"] == [expected]

@@ -204,3 +204,69 @@ async def test_agent_model_type_rejected(tmp_path):
     with pytest.raises(ValueError, match="unsupported_model_type"):
         await agent.start()
     await finish(agent)
+
+
+async def test_private_proactive_model_failure_never_falls_back(tmp_path):
+    agent, channel, _ = await make_agent(tmp_path, {"finish": "error"})
+    trace = await agent.submit("owner_private", topic="fictional topic", reason="fictional timer")
+    await agent.drain()
+    assert agent.ledger.get("record", trace)["exec_status"] == "error"
+    assert not channel.sent and not channel.reacts
+    await finish(agent)
+
+
+async def test_tool_not_offered_stays_denied_after_quota_recovers(tmp_path):
+    from clytie.sdk.types import QuotaSnapshot
+
+    from .test_agent_acceptance import ECHO
+
+    agent, channel, model = await make_agent(tmp_path)
+    original = agent.declarations
+
+    def declarations():
+        values = original()
+        pid, declaration = values["echo"]
+        values["echo"] = (pid, {**declaration, "heavy": True})
+        return values
+
+    agent.declarations = declarations
+    agent.protection.update(
+        QuotaSnapshot(
+            windows=[{"name": "window", "remaining_ratio": 0.1}],
+            observed_at=agent.clock.now(),
+            source="fake",
+        )
+    )
+    model.turns.extend(
+        [
+            {
+                **ECHO,
+                "quota": {
+                    "windows": [{"name": "window", "remaining_ratio": 0.8}],
+                    "observed_at": agent.clock.now(),
+                    "source": "fake",
+                },
+            },
+            REFUSAL,
+        ]
+    )
+    trace = await agent.receive(event(agent, role="member", scene="public_group", mention=True))
+    await agent.drain()
+    assert "echo" not in [tool.name for tool in model.requests[0].tools]
+    assert not agent.protection.active
+    assert not agent.ledger.rows("invocation")
+    assert [m.parts[0].text for m in model.requests[1].messages if m.role == "tool"] == [
+        "unknown_tool"
+    ]
+    assert agent.ledger.get("record", trace)["exec_status"] == "ok"
+    assert channel.sent[0].parts[0].text == "fictional refusal"
+    await finish(agent)
+
+
+async def test_unavailable_notifier_warning_is_deduplicated(tmp_path):
+    agent, _, _ = await make_agent(tmp_path, changes={"boundary": {"refusal_threshold": 1}})
+    for actor in ["member_a", "member_b"]:
+        member = event(agent, role="member", actor=actor).message.sender
+        await agent.boundary.report(uuid4().hex, member, "romance", CancelToken())
+    assert agent.boundary.warnings == ["boundary_notifier_unavailable"]
+    await finish(agent)

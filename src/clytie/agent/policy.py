@@ -136,7 +136,8 @@ class Boundary:
         self.save()
         if notify:
             if self.notifier is None:
-                self.warnings.append("boundary_notifier_unavailable")
+                if "boundary_notifier_unavailable" not in self.warnings:
+                    self.warnings.append("boundary_notifier_unavailable")
                 self.save()
                 self.log.warning("boundary.notifier_unavailable")
             else:

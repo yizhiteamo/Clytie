@@ -610,6 +610,7 @@ class Agent:
                 if call.tool in self.declarations()
                 else "unknown_tool"
             )
+            reason = reason or "unknown_tool"
             return ToolResult(
                 data={},
                 call_id=call.call_id,
