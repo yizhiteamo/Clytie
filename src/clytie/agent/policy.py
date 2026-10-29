@@ -1,11 +1,15 @@
 """对话本体的过滤、边界持久化与额度状态；时间仅来自注入时钟。"""
 
+import asyncio
 import json
-import re
 import unicodedata
 from datetime import datetime, timedelta
 
+from clytie.config import compile_input_pattern
+from clytie.kernel.events import background
 from clytie.plugin_host.snapshots import atomic_write, canonical
+from clytie.plugin_host.support import timed
+from clytie.sdk import CancelToken
 from clytie.sdk.types import Notice
 
 STYLE_WORDS = ("作为一个 AI 语言模型", "工具调用", "函数调用", "系统提示", "tool_call")
@@ -64,6 +68,11 @@ class Boundary:
     def __init__(self, path, config, clock, ledger, log, notifier=None):
         self.path, self.config, self.clock, self.ledger, self.log = path, config, clock, ledger, log
         self.notifier = notifier
+        self.notifications = set()
+        self.notification_timeout = 2
+        self.patterns = [
+            compile_input_pattern(p) for p in config.get("input_filter", {}).get("patterns", [])
+        ]
         self.warnings = []
         self.state = (
             json.loads(path.read_text(encoding="utf-8"))
@@ -85,7 +94,7 @@ class Boundary:
         rules = self.config.get("input_filter", {})
         value = normalized("".join(p.text for p in event.message.parts if p.type == "text"))
         return any(normalized(w) in value for w in rules.get("words", [])) or any(
-            re.search(normalized(p), value) for p in rules.get("patterns", [])
+            p.search(value) for p in self.patterns
         )
 
     def paused(self, actor):
@@ -131,21 +140,43 @@ class Boundary:
                 self.save()
                 self.log.warning("boundary.notifier_unavailable")
             else:
-                await self.notifier.notify(
-                    Notice(
-                        level="warn",
-                        title="边界暂停提醒",
-                        body=f"{actor.actor_id}（昵称：{actor.display_name or ''}） {category} {row['until']}",
-                        dedupe_key=f"boundary:{actor.actor_id}:{now.isoformat()}",
-                    ),
-                    cancel,
+                task = background(
+                    self.notify(
+                        Notice(
+                            level="warn",
+                            title="边界暂停提醒",
+                            body=f"{actor.actor_id}（昵称：{actor.display_name or ''}） {category} {row['until']}",
+                            dedupe_key=f"boundary:{actor.actor_id}:{now.isoformat()}",
+                        ),
+                    )
                 )
+                self.notifications.add(task)
+                task.add_done_callback(self.notifications.discard)
         return "已记录"
+
+    async def notify(self, notice):
+        token = CancelToken()
+        try:
+            await timed(self.notifier.notify(notice, token), self.clock, self.notification_timeout)
+        except (Exception, asyncio.CancelledError):
+            if "boundary_notification_failed" not in self.warnings:
+                self.warnings.append("boundary_notification_failed")
+            self.save()
+            self.log.warning("boundary.notification_failed")
+        finally:
+            token.cancel("notification_finished")
+
+    async def drain_notifications(self):
+        while self.notifications:
+            await asyncio.gather(*tuple(self.notifications))
 
     def release(self, companion_id, actor_id):
         if companion_id != self.ledger.companion_id:
             raise ValueError("wrong companion")
-        self.state["actors"].pop(actor_id, None)
+        row = self.state["actors"].get(actor_id)
+        if row is not None:
+            row["counts"] = {}
+            row.pop("until", None)
         self.save()
         self.audit("boundary.released", actor_id=actor_id)
 

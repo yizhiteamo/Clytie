@@ -21,6 +21,12 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from referencing import Registry
 from referencing.exceptions import NoSuchResource, Unresolvable
 
+
+def compile_input_pattern(pattern):
+    """Preserve regex escapes; match normalized input case-insensitively."""
+    return re.compile(pattern, re.IGNORECASE)
+
+
 _MISSING = object()
 
 
@@ -696,7 +702,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         for index, pattern in enumerate(patterns if isinstance(patterns, list) else []):
             if isinstance(pattern, str):
                 try:
-                    re.compile(pattern)
+                    compile_input_pattern(pattern)
                 except re.error:
                     reader.issue(
                         file,

@@ -167,9 +167,11 @@ async def test_notifications_roll_24_hours_and_owner_peer_exempt(tmp_path):
     )
     for _ in range(2):
         await agent.boundary.report(uuid4().hex, actor, "romance", CancelToken())
+    await agent.boundary.drain_notifications()
     assert len(notices) == 1
     agent.clock.advance(24 * 3600)
     await agent.boundary.report(uuid4().hex, actor, "romance", CancelToken())
+    await agent.boundary.drain_notifications()
     assert len(notices) == 2
     for role in ["owner", "peer"]:
         exempt = actor.model_copy(update={"role": role})

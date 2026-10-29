@@ -263,6 +263,9 @@ async def test_style_rewrite_still_hit_allowed_and_reformats(tmp_path):
     await agent.drain()
     assert len(model.requests) == 2 and len(channel.sent) == 1
     assert phases.count("after_generation") == 2
+    assert any(
+        level == "info" and message == "outbound.style" for level, message, _ in agent.log.entries
+    )
     await finish(agent)
 
 

@@ -56,3 +56,26 @@ def test_agent_config_accepts_empty_fallback_and_distinct_ratios(tmp_path):
     write_yaml(home / "companions/companion_a/companion.yaml", companion)
     report = load_home(home, repo_root=repo)
     assert report.valid, report.to_dict()
+
+
+@pytest.mark.parametrize("pattern", [r"^\S+$", r"spam\Z", "SPAM"])
+def test_filter_patterns_validate_with_runtime_compiler(tmp_path, pattern):
+    home, repo, _, companion = make_home(tmp_path)
+    companion["boundary"] = {"input_filter": {"patterns": [pattern]}}
+    write_yaml(home / "companions/companion_a/companion.yaml", companion)
+    report = load_home(home, repo_root=repo)
+    assert report.valid, report.to_dict()
+
+
+def test_reserved_core_tool_name_rejected_by_manifest_schema():
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+
+    root = Path(__file__).resolve().parents[1]
+    schema = json.loads((root / "schemas/plugin.schema.json").read_text(encoding="utf-8"))
+    manifest = json.loads((root / "plugins/echo-tool/plugin.json").read_text(encoding="utf-8"))
+    manifest["contributes"]["tools"][0]["name"] = "core_fictional"
+    errors = list(Draft202012Validator(schema).iter_errors(manifest))
+    assert any(list(e.absolute_path)[-1] == "name" for e in errors)
