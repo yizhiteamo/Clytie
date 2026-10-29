@@ -169,3 +169,29 @@ async def test_asset_rejected_before_attempt_and_mismatched_receipt_warns(tmp_pa
     assert any(e[1] == "delivery.receipt_mismatch" for e in kernel.log.entries)
     await settle(kernel)
     kernel.ledger.close()
+
+
+async def test_receipt_message_retention_clears_summary_copy_too(tmp_path):
+    kernel, channel, clock = setup(tmp_path)
+    r, _, intents = await task_with_intents(kernel)
+
+    async def fail(intent, cancel):
+        return Receipt(
+            intent_id=intent.intent_id,
+            status="failed",
+            at=clock.now(),
+            error={"code": "permanent", "message": "fictional detail"},
+        )
+
+    channel.send = fail
+    await kernel.delivery.deliver(r["trace_id"])
+    await settle(kernel)
+    clock.advance(24 * 60 * 60)
+    kernel.ledger.expire_content(1)
+    row = kernel.ledger.get("intent", intents[0].intent_id)
+    assert row["error"] == {"code": "permanent", "message": None}
+    attempt = next(
+        a for a in kernel.ledger.rows("attempt") if a["intent_id"] == intents[0].intent_id
+    )
+    assert attempt["receipt"]["error"]["message"] is None
+    kernel.ledger.close()

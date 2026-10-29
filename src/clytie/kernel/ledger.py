@@ -384,6 +384,7 @@ class Ledger:
                 intent["error"] = (
                     value.get("error") if value else {"code": "mismatched_receipt", "message": ""}
                 )
+                intent["error_written_at"] = self.now()
                 self.put("intent", intent_id, intent)
                 self._aggregate(intent["trace_id"])
             if late:
@@ -475,8 +476,18 @@ class Ledger:
                     self.put("inbound", event["event_id"], event)
                     changed += 1
             for intent in self.rows("intent"):
+                dirty = False
                 if expired(intent["created_at"]) and intent["parts"] is not None:
                     intent["parts"] = None
+                    dirty = True
+                if (
+                    expired(intent.get("error_written_at"))
+                    and intent["error"]
+                    and intent["error"].get("message") is not None
+                ):
+                    intent["error"]["message"] = None
+                    dirty = True
+                if dirty:
                     self.put("intent", intent["intent_id"], intent)
                     changed += 1
             for inv in self.rows("invocation"):
@@ -507,9 +518,11 @@ class Ledger:
                     continue
                 if audit["kind"] == "late_result":
                     audit["content"] = None
-                elif audit["kind"] in {"late_receipt", "conflicting_receipt"} and audit[
-                    "content"
-                ].get("error"):
+                elif (
+                    audit["kind"] in {"late_receipt", "conflicting_receipt"}
+                    and audit["content"].get("error")
+                    and audit["content"]["error"].get("message") is not None
+                ):
                     audit["content"]["error"]["message"] = None
                 else:
                     continue
