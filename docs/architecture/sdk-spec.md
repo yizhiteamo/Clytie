@@ -420,7 +420,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
   5. 只有 `memory.read.public` 的插件，在任何场景都读不到私密记录。
   6. `get` 对当前场景读不到的记录返回 `None`，和"记录不存在"无法区分。
 - A3.3 的记忆视图由本体存储支持，所有读取按 `memory-spec.md` §3 同时裁剪可见等级和来源会话；宿主绑定场景与会话，插件不能指定可信来源。
-- 写入入口忽略外部传入的 basis、write_mode、origin_conversation_id；插件写入 basis 一律为 observed，source_type 由宿主填写。插件 source_ref/scope 仅作说明，投影不信任。新建、去重与可信程度只升不降按 memory-spec §1.3；插件不能修订或撤销 owner_confirmed 记录，返回与找不到记录相同的错误。
+- 写入入口忽略外部传入的 basis、write_mode、origin_conversation_id；插件写入 basis 一律为 observed，source_type 由宿主填写。插件 source_ref/scope 仅作说明，投影不信任。新建、去重与可信程度只升不降按 memory-spec §1.3；插件只能修订或撤销 basis=observed 的记录；owner_confirmed、owner_stated 只读，修订或撤销返回与找不到记录相同的错误。聊天和插件操作不降低可信程度；用户确认的导入 restore、撤销导入及冲突选择可按目标版本恢复 basis，降低项在计划中单独列出。已校验本系统导出包是忽略外部可信字段的唯一例外，由本体保留或规范化，导入器不能自称可信包。
 - **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
 - `revise` / `retract` 的 `expected_revision` 与当前修订号不一致时抛 `RevisionConflict`。
 

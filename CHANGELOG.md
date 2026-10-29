@@ -2,7 +2,10 @@
 
 ## A3.3（开发中）
 
-- MemoryRecord 新增本体填写的 basis、origin_conversation_id；旧格式读取按 write_mode 推导可信程度，未知来源为 null。写入忽略外部可信字段，插件不能修改或撤销 owner_confirmed 记录。
+- 记忆库使用不可变 companion_uid 区分身份；空库导入需明确选择搬家继续或新的伴侣。外来主人映射需确认，未知来源仅对内可见。
+- 用户确认的 restore、撤销导入及冲突选择可恢复目标可信程度，计划单列降低项；聊天和插件操作只升不降。
+
+- MemoryRecord 新增本体填写的 basis、origin_conversation_id；旧格式读取按 write_mode 推导可信程度，未知来源为 null。写入忽略外部可信字段，插件只能修改或撤销 observed 记录；owner_confirmed、owner_stated 只读。
 - 新增兼容扩展 memory.reranker，候选由本体投影后传入。
 - 新增 memory 的核心/检索预算、召回条数、重排候选数、写入次数、泄漏片段阈值、embedder/reranker 配置。契约见 memory-spec §10。
 - A3.3 覆盖当场记、存储与投影、检索、加密导入导出；回想、群友印象和软遗忘等拆至 A3.4。
