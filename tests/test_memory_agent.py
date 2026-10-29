@@ -78,6 +78,7 @@ async def test_memory_tools_audience_proactive_and_empty_context(tmp_path):
     write(agent, "毫不相关的虚构事实")
     messages = await agent.memory.build("test", incoming.conversation, "完全不同的查询")
     assert all("你们之间还没有记住的事" not in text_parts(m.parts) for m in messages)
+    assert "毫不相关的虚构事实" not in str(messages)
     stranger = event(agent, role="stranger", scene="stranger_private")
     assert await agent.memory.build("stranger", stranger.conversation, "事实") == []
     await finish(agent)
@@ -149,8 +150,11 @@ async def test_replaces_forget_conflict_and_shared_write_limit(tmp_path):
 @pytest.mark.parametrize("case", ["absent", "found", "private", "retracted"])
 async def test_l6_evidence_from_agent_tool_result(tmp_path, case, semantic):
     agent, _, model = await make_agent(
-        tmp_path, tool("core_recall", query="画猫"), {"finish": "stop", "text": "照回想结果回复"}
+        tmp_path,
+        tool("core_recall", query="你上次答应给我画猫"),
+        {"finish": "stop", "text": "照回想结果回复"},
     )
+    write(agent, "我喜欢虚构的蓝色雨伞")
     if case != "absent":
         record = write(
             agent, "答应在虚构画板上画猫", visibility="private" if case == "private" else "public"
@@ -263,6 +267,8 @@ async def test_recall_uses_old_visible_tasks_and_limits_calls(tmp_path):
     results = [text_parts(m.parts) for m in model.requests[-1].messages if m.role == "tool"]
     assert any(task_id in text and "remembered" in text for text in results)
     incoming = event(agent)
+    for query in ("status", "2000", "exec_status"):
+        assert agent.memory.task_recall(query, incoming.conversation) == []
     for _ in range(4):
         result = await agent.memory.execute(
             "limited",

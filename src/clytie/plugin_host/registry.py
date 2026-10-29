@@ -187,6 +187,7 @@ def validate_result(point, method, result):
         if not all(isinstance(item, EventEnvelope) for item in result):
             raise TypeError("invalid inbound event")
     if point == "memory.importer" and method == "read":
+        # 宿主已经在取消/超时边界内消费 SDK 的异步迭代器；这里只校验收集结果。
         from clytie.sdk.types import ImportCandidate
 
         if not isinstance(result, list) or not all(isinstance(r, ImportCandidate) for r in result):

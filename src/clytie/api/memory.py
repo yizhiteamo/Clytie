@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,11 +14,82 @@ from clytie.memory.transfer import Transfers
 from clytie.plugin_host.snapshots import contained, identifier
 
 
+class HostedImporter:
+    def __init__(self, host, companion_id, registration):
+        self.host, self.cid, self.reg = host, companion_id, registration
+
+    async def detect(self, source):
+        return await self.host.invoke(
+            self.cid, self.reg.plugin_id, self.reg.point, self.reg.key, source, method="detect"
+        )
+
+    async def read(self, source, cancel):
+        rows = await self.host.invoke(
+            self.cid,
+            self.reg.plugin_id,
+            self.reg.point,
+            self.reg.key,
+            source,
+            cancel,
+            method="read",
+        )
+        for row in rows:
+            cancel.raise_if_cancelled()
+            yield row
+
+
 class MemoryAPI:
     def __init__(self, home=None, *, repo_root=None, clock=None, importers=None):
         self.home = Path(resolve_home(home)).resolve()
         self.repo_root, self.clock = repo_root, clock or SystemClock()
         self.importers = importers or {}
+
+    @asynccontextmanager
+    async def importer_scope(self, companion_id, selected):
+        if selected is None or selected in self.importers:
+            yield self.importers
+            return
+        from clytie.plugin_host import PluginHost
+        from clytie.plugin_host.host import PluginFailure
+
+        report = load_home(self.home, repo_root=self.repo_root)
+        if not report.valid or companion_id not in report.plugin_configs:
+            raise ValueError("实例配置无效或伴侣不存在")
+        config = thaw(report.plugin_configs[companion_id]["config"])
+        plugins = config.get("plugins", {})
+        if not plugins.get(selected, {}).get("enabled", False):
+            raise ValueError("导入器未启用")
+        host = PluginHost(
+            self.repo_root or Path(__file__).resolve().parents[3], self.home, clock=self.clock
+        )
+        # 独立管理调用仅启动所选导入器及其必需依赖，不启动伴侣、平台或模型配置。
+        host.configure(
+            companion_id, plugins=plugins, instance_plugins=thaw(report.instance.get("plugins", {}))
+        )
+        try:
+            plan = host.plan_enable(companion_id, selected)
+            if not plan.ok or any(
+                not plugins.get(pid, {}).get("enabled", False) for pid in plan.steps
+            ):
+                raise ValueError("导入器或必需依赖不可用，请先检查启用配置")
+            result = await host.apply(plan.plan_id)
+            if result.get("failed") or not host.is_active(companion_id, selected):
+                raise ValueError("导入器启动失败")
+            reg = next(
+                (
+                    r
+                    for r in host.registrations(companion_id, "memory.importer")
+                    if r.plugin_id == selected
+                ),
+                None,
+            )
+            if reg is None:
+                raise ValueError("所选插件未声明导入器")
+            yield {selected: HostedImporter(host, companion_id, reg)}
+        except PluginFailure as exc:
+            raise ValueError("导入器调用失败，未写入记忆") from exc
+        finally:
+            await host.close()
 
     @contextmanager
     def open(self, companion_id, *, readonly=False):
@@ -60,26 +131,29 @@ class MemoryAPI:
             return Exports(store, self.home, companion_id).rotate_recovery(confirmed=confirmed)
 
     async def plan(self, companion_id, source, **options):
-        with self.open(companion_id, readonly=True) as store:
-            return await Transfers(store, self.home, companion_id, importers=self.importers).plan(
-                source, **options
-            )
+        async with self.importer_scope(companion_id, options.get("importer")) as importers:
+            with self.open(companion_id, readonly=True) as store:
+                return await Transfers(store, self.home, companion_id, importers=importers).plan(
+                    source, **options
+                )
 
     async def apply(self, plan_id, **options):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
             raise ValueError("invalid plan id")
         path = contained(self.home, self.home / "run" / "memory-plans" / f"{plan_id}.json")
         plan = json.loads(path.read_bytes())
-        with self.open(plan["companion_id"]) as store:
-            return await Transfers(
-                store, self.home, plan["companion_id"], importers=self.importers
-            ).apply(plan_id, **options)
+        async with self.importer_scope(plan["companion_id"], plan.get("importer")) as importers:
+            with self.open(plan["companion_id"]) as store:
+                return await Transfers(
+                    store, self.home, plan["companion_id"], importers=importers
+                ).apply(plan_id, **options)
 
     def plan_kind(self, plan_id):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
             raise ValueError("invalid plan id")
         path = contained(self.home, self.home / "run" / "memory-plans" / f"{plan_id}.json")
-        return json.loads(path.read_bytes())["kind"]
+        plan = json.loads(path.read_bytes())
+        return "importer" if plan.get("importer") else plan["kind"]
 
     def undo(self, companion_id, import_id, **options):
         if companion_id is None:

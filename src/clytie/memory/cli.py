@@ -30,6 +30,8 @@ def add_parser(commands):
     plan.add_argument("--show-content", action="store_true")
     plan.add_argument("--confirm-identity", action="store_true")
     plan.add_argument("--choice", action="append", default=[])
+    plan.add_argument("--importer")
+    plan.add_argument("--approve-proposals", action="store_true")
     apply = imports.add_parser("apply")
     apply.add_argument("plan_id")
     apply.add_argument("--home")
@@ -84,7 +86,9 @@ def run(arguments):
                     choices=choices(arguments.choice),
                     confirm_identity=arguments.confirm_identity,
                     show_content=arguments.show_content,
-                    **private_text(arguments.recovery_code),
+                    importer=arguments.importer,
+                    approve_proposals=arguments.approve_proposals,
+                    **({} if arguments.importer else private_text(arguments.recovery_code)),
                 )
             )
         elif arguments.import_action == "undo":
@@ -97,7 +101,7 @@ def run(arguments):
         else:
             options = (
                 {}
-                if api.plan_kind(arguments.plan_id) == "undo"
+                if api.plan_kind(arguments.plan_id) in {"undo", "importer"}
                 else private_text(arguments.recovery_code)
             )
             result = {"import_id": asyncio.run(api.apply(arguments.plan_id, **options))}

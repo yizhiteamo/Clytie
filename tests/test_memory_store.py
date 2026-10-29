@@ -191,3 +191,46 @@ def test_failed_first_write_does_not_leave_identity(store):
     with pytest.raises(sqlite3.IntegrityError):
         write(store)
     assert store.uid is None and store.all_records() == []
+
+
+async def test_plugin_dedup_returns_readable_confirmed_record(store):
+    existing = write(store, explicit=True)
+    view = memory_view(store, ["memory.read.public", "memory.write"])
+    with bind_scene("owner_private", "owner_chat"):
+        returned = await view.write(
+            MemoryDraft(
+                kind=existing.kind,
+                content=existing.content,
+                subject="owner",
+                visibility="public",
+                source_type="group",
+            )
+        )
+    assert returned == existing and len(store.all_records()) == 1
+    assert returned.basis == "owner_confirmed"
+
+
+async def test_core_backed_group_view_cannot_read_or_dedup_private_record(store):
+    private = store.write(
+        dict(kind="fact", content="虚构私密事实", visibility="private"),
+        scene="owner_private",
+        conversation_id="owner_chat",
+        owner="owner",
+        operator="owner",
+    )
+    view = memory_view(store, ["memory.read.private", "memory.write"])
+    with bind_scene("public_group", "group_a"):
+        assert await view.get(private.record_id) is None
+        assert await view.search("虚构私密事实") == []
+        written = await view.write(
+            MemoryDraft(
+                kind="fact",
+                content=private.content,
+                subject="owner",
+                visibility="private",
+                source_type="private",
+            )
+        )
+    assert written.record_id != private.record_id
+    assert written.origin_conversation_id == "group_a" and written.basis == "observed"
+    assert len(store.all_records()) == 2

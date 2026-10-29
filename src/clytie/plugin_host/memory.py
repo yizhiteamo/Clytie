@@ -82,10 +82,8 @@ class WriteMemory(_MemoryBase):
     __slots__ = ()
 
     async def write(self, draft):
-        result = MemoryRecord.model_validate(await self._backend.write(draft))
-        if result.write_mode != "auto":
-            raise ValueError("plugin writes must use automatic write mode")
-        return result
+        # 本体负责新建时 auto；可读重复项可以是已有的 confirmed，不能据此拒绝去重。
+        return MemoryRecord.model_validate(await self._backend.write(draft))
 
 
 class ReadWriteMemory(ReadMemory, WriteMemory):

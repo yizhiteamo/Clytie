@@ -772,7 +772,23 @@ class PluginHost(MigrationMixin):
                     else registration.implementation
                 )
                 result = function(*args)
-                if inspect.isasyncgen(result):
+                if point == "memory.importer" and method == "read":
+                    from clytie.sdk.types import ImportCandidate
+
+                    if not hasattr(result, "__aiter__"):
+                        raise TypeError("importer read must return an async iterator")
+
+                    async def collect():
+                        rows = []
+                        async for item in result:
+                            args[1].raise_if_cancelled()
+                            if not isinstance(item, ImportCandidate):
+                                raise TypeError("invalid importer candidate")
+                            rows.append(item)
+                        return rows
+
+                    result = await timed(collect(), self.clock, 30)
+                elif inspect.isasyncgen(result):
                     result = [item async for item in result]
                 elif inspect.isawaitable(result):
                     if point.startswith("behavior.") or point == "context_section":

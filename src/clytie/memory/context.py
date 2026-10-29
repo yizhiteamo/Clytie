@@ -10,7 +10,7 @@ from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import ChatMessage, TextPart, ToolResult, ToolSpec
 
 from .retrieval import Retrieval
-from .store import tokens
+from .store import query_tokens, tokens
 
 
 @dataclass
@@ -201,7 +201,7 @@ class MemoryContext:
             return []
         from clytie.kernel.projection import visible
 
-        words = tokens(query)
+        words = query_tokens(query)
         rows = []
         for record in self.ledger.rows("record"):
             if (
@@ -238,7 +238,13 @@ class MemoryContext:
                 if i["trace_id"] == record["trace_id"]
             ]
             display = json.dumps(summary, ensure_ascii=False)
-            if words & tokens(display):
+            searchable = " ".join(
+                [
+                    summary.get("tool") or "",
+                    *[f"{item['plan']} {item['result']}" for item in summary["summary"]],
+                ]
+            )
+            if words & tokens(searchable):
                 rows.append((datetime.fromisoformat(record["created_at"]), display))
         return [text for _, text in sorted(rows, reverse=True)[:10]]
 

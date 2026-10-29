@@ -4,7 +4,7 @@ import math
 
 from clytie.sdk import CancelToken
 
-from .store import BASIS, canonical, fingerprint, tokens
+from .store import BASIS, canonical, fingerprint, query_tokens
 
 
 class HostExtension:
@@ -188,7 +188,7 @@ class Retrieval:
         config = self.store.config.get("memory", {})
         records = self.store.project(scene, conversation_id)
         by_id = {r.record_id: r for r in records}
-        words = tokens(query)
+        words = query_tokens(query)
         ordered_words = sorted(words)
         lexical_scores = {}
         for start in range(0, len(ordered_words), 400):

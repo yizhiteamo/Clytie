@@ -38,6 +38,13 @@ def tokens(text):
     return result
 
 
+def query_tokens(text):
+    words = tokens(text)
+    if re.search(r"[\u3400-\u9fff]{2,}", normalized(text)):
+        words = {w for w in words if len(w) > 1 or not "\u3400" <= w <= "\u9fff"}
+    return words
+
+
 def content_hash(record):
     value = record.model_dump(mode="json")
     value.pop("revision")

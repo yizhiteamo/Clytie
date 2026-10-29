@@ -64,3 +64,60 @@ async def test_behavior_memory_origin_comes_from_host_bound_conversation(tmp_pat
     assert store.project("public_group", "different_group") == []
     assert store.project("owner_private", "owner_chat") == [record]
     await h.close()
+
+
+async def test_importer_host_validates_items_and_times_out_with_mock_clock(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from clytie.plugin_host.host import PluginFailure
+
+    plugin(
+        tmp_path,
+        "fake-importer",
+        SOURCE
+        + """
+    def make_importer(self):
+        return self
+    def detect(self, source):
+        return True
+    async def read(self, source, cancel):
+        if source == "slow":
+            await self.ctx.clock.sleep(100)
+        yield {"not": "an SDK candidate"}
+""",
+        contributes={
+            "memory": {"importer": {"factory": "make_importer", "formats": ["fictional"]}}
+        },
+    )
+    h = host(tmp_path)
+    await enable(h, "fake-importer")
+    with pytest.raises(PluginFailure):
+        await h.invoke(
+            "companion_a",
+            "fake-importer",
+            "memory.importer",
+            "importer",
+            "invalid",
+            CancelToken(),
+            method="read",
+        )
+    task = asyncio.create_task(
+        h.invoke(
+            "companion_a",
+            "fake-importer",
+            "memory.importer",
+            "importer",
+            "slow",
+            CancelToken(),
+            method="read",
+        )
+    )
+    for _ in range(10):
+        await h.clock.sleep(0)
+    h.clock.advance(30)
+    with pytest.raises(PluginFailure):
+        await task
+    assert h.failures
+    await h.close()

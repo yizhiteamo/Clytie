@@ -175,7 +175,11 @@ async def test_restore_downgrade_and_undo_only_its_changes_with_conflicts(homes)
     unrelated = remember(target, "恢复之后新记住的事")
     current = target.get_raw(original.record_id)
     changed = revise(target, current, "恢复之后又改过的事")
+    target.clock.advance(3 * 24 * 3600)
     undo = transfers.undo(imported)
+    assert undo["days_ago"] == 3
+    assert undo["counts"] == {"retract": 0, "restore": 1, "conflict": 1}
+    assert "3 天前" in undo["summary"] and "冲突 1 条" in undo["summary"]
     assert (
         next(r for r in undo["records"] if r["record_id"] == original.record_id)["action"]
         == "conflict"

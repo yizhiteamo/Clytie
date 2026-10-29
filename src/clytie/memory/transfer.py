@@ -1,8 +1,10 @@
 """停止状态下的两阶段搬家；计划不保存明文，历史只追加。"""
 
 import hashlib
+import inspect
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -155,7 +157,10 @@ class Transfers:
         if importer:
             self.importer_allowed(importer, before)
             implementation = self.importers[importer]
-            if not implementation.detect(source):
+            detected = implementation.detect(source)
+            if inspect.isawaitable(detected):
+                detected = await detected
+            if not detected:
                 raise ValueError("导入器不支持该源副本")
             records = {}
             async for candidate in implementation.read(source, CancelToken()):
@@ -561,6 +566,11 @@ class Transfers:
 
     def undo(self, import_id, *, choices=None, show_content=False):
         original, rows, targets = self._undo_data(import_id, choices or {})
+        days = max(0, (self.store.clock.now() - datetime.fromisoformat(original["at"])).days)
+        counts = {
+            kind: sum(r["action"] == kind for r in rows)
+            for kind in ("retract", "restore", "conflict")
+        }
         plan = dict(
             id=uuid4().hex,
             companion_id=self.cid,
@@ -571,6 +581,9 @@ class Transfers:
             choices=choices or {},
             records=rows,
             imported_at=original["at"],
+            summary=f"这是 {days} 天前的导入，将撤回 {counts['retract']} 条、改回 {counts['restore']} 条、冲突 {counts['conflict']} 条",
+            days_ago=days,
+            counts=counts,
             downgrade_count=sum(r["downgrade"] for r in rows),
         )
         atomic_write(self.plan_path(plan["id"]), canonical(plan).encode())
