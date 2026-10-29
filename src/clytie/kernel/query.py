@@ -128,6 +128,8 @@ def task_view(ledger, record, *, full=False):
         )
     else:
         for delivery in deliveries:
+            if delivery["error"]:
+                delivery["error"].pop("message", None)
             for attempt in delivery["attempts"]:
                 if attempt["receipt"] and attempt["receipt"].get("error"):
                     attempt["receipt"]["error"].pop("message", None)

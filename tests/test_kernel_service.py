@@ -157,7 +157,7 @@ async def test_ordinary_chat_reaction_requires_declared_exception(tmp_path):
     intent = reply(r).model_copy(
         update={"kind": "react", "parts": [], "emoji": "👌", "target": event.message.ref}
     )
-    with pytest.raises(ValueError, match="ordinary chat"):
+    with pytest.raises(ValueError, match="declared exception"):
         await kernel.seal(r["trace_id"], "ok", [intent])
     assert not kernel.allow_reaction_exception(r["trace_id"], intent)
     assert kernel.allow_reaction_exception(r["trace_id"], intent, permissions=["message.react"])
@@ -283,5 +283,45 @@ async def test_cancel_denied_finished_and_invalid_requests(tmp_path):
         await kernel.cancel("companion_a", inv.actor, "test_group", reply_to=event.message.ref)
         == "already_finished"
     )
+    await kernel.bus.drain()
+    kernel.ledger.close()
+
+
+async def test_task_cannot_register_undeclared_arbitrary_reaction(tmp_path):
+    kernel, channel, clock = setup(tmp_path)
+    r, inv, event = await new_record(kernel)
+    await kernel.execute(
+        r["trace_id"],
+        "echo-tool",
+        ToolCall(call_id="call", tool="echo", arguments={}),
+        Capability(clock),
+        inv,
+    )
+    r = kernel.ledger.get("record", r["trace_id"])
+    intent = reply(r).model_copy(
+        update={"kind": "react", "parts": [], "emoji": "😂", "target": event.message.ref}
+    )
+    with pytest.raises(ValueError, match="declared exception"):
+        await kernel.seal(r["trace_id"], "ok", [intent])
+    assert not kernel.ledger.get("intent", intent.intent_id)
+    await kernel.seal(r["trace_id"], "ok")
+    await kernel.reactions.drain()
+    await kernel.bus.drain()
+    assert [i.emoji for i in channel.calls] == ["✅"]
+    kernel.ledger.close()
+
+
+async def test_receive_duplicate_counter_and_debug_log(tmp_path):
+    kernel, _, _ = setup(tmp_path)
+    _, _, event = await new_record(kernel)
+
+    async def filtered(event):
+        return event
+
+    assert await kernel.receive(event, filter_event=filtered) is None
+    assert await kernel.receive(event, filter_event=filtered) is None
+    assert kernel.duplicates == 2
+    assert len(kernel.ledger.rows("inbound")) == 1
+    assert len([e for e in kernel.log.entries if e[1] == "inbound.duplicate"]) == 2
     await kernel.bus.drain()
     kernel.ledger.close()

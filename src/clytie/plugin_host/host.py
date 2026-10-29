@@ -746,7 +746,15 @@ class PluginHost(MigrationMixin):
             if point.startswith("behavior."):
                 phase = point.split(".", 1)[1]
                 value = thaw(runtime.manifest.data.get("failure_default", {}).get(phase))
-                return validate_result(point, None, value)
+                fallback = validate_result(point, None, value)
+                if isinstance(
+                    fallback, ReactOnly
+                ) and "message.react" not in runtime.manifest.data.get("permissions", ()):
+                    self.log.warning(
+                        "plugin.invalid_reaction_default", plugin_id=runtime.manifest.id
+                    )
+                    return None
+                return fallback
             if point in {"context_section", "event_subscriber", "schedule"}:
                 return None
             if point in {"memory.retriever", "memory.consolidator"}:

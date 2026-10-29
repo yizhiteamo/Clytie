@@ -69,6 +69,7 @@ class Kernel:
         )
         self.reactions = Reactions(ledger, self.delivery, clock, self.config.get("task_reactions"))
         self._reaction_exceptions = set()
+        self.duplicates = 0
 
     async def start(self):
         interrupted = self.ledger.restart()
@@ -122,6 +123,7 @@ class Kernel:
             return None
         event_id, new = self.ledger.claim_inbound(event)
         if not new:
+            self.duplicates += 1
             self.log.debug("inbound.duplicate", event_id=event_id)
             return None
         if self.observe:
@@ -274,11 +276,8 @@ class Kernel:
         )
 
     async def seal(self, trace, status, intents=(), error=None):
-        record = self.ledger.get("record", trace)
-        if record["kind"] != "task" and any(
-            i.kind == "react" and i.intent_id not in self._reaction_exceptions for i in intents
-        ):
-            raise ValueError("ordinary chat cannot react without a declared exception")
+        if any(i.kind == "react" and i.intent_id not in self._reaction_exceptions for i in intents):
+            raise ValueError("record cannot react without a declared exception")
         self.ledger.seal(trace, status, intents, error)
         await self.complete(trace)
 

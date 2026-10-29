@@ -158,6 +158,7 @@ async def test_behavior_exception_uses_default_and_other_plugin_runs(tmp_path):
         bad,
         contributes=contrib,
         failure_default={"before_attention": {"type": "react_only", "emoji": "fictional"}},
+        permissions=["message.react"],
     )
     plugin(tmp_path, "good", good, contributes=contrib)
     h = host(tmp_path)
