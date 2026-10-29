@@ -9,13 +9,17 @@ def name_for(config, scene):
     names = config["names"]
     return (
         names["internal"]
-        if scene == "owner_private"
+        if scene in names.get("internal_scenes", ["owner_private"])
         else names.get("external", {}).get(scene, names["internal"])
     )
 
 
 def render_task_card(config, task_id, seconds, *, scene, helper=None):
-    kind = "internal" if scene == "owner_private" else "external"
+    kind = (
+        "internal"
+        if scene in config["names"].get("internal_scenes", ["owner_private"])
+        else "external"
+    )
     card = config.get("task_card", {})
     template = card.get(kind, DEFAULT)
     if helper is None:

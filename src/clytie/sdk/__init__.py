@@ -5,5 +5,5 @@ from .clock import Clock
 from .context import PluginContext
 from .types import QUOTA_UNKNOWN
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = ["QUOTA_UNKNOWN", "CancelToken", "Cancelled", "Clock", "PluginContext", "__version__"]

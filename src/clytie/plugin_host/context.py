@@ -3,7 +3,7 @@
 from random import Random
 from types import SimpleNamespace
 
-from clytie.sdk.context import ServiceUnavailable
+from clytie.sdk.context import ServiceUnavailable, validate_proactive
 from clytie.sdk.immutable import FrozenDict
 from clytie.sdk.types import AssetRef, HttpResponse, ModelTurn, ProcessResult
 
@@ -46,10 +46,13 @@ class Proactive:
     def __init__(self, backend):
         self._backend = backend
 
-    async def submit(self, conversation_id, parts, *, reason):
-        result = await self._backend.submit(conversation_id, parts, reason=reason)
+    async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+        validate_proactive(topic=topic, material=material, parts=parts)
+        result = await self._backend.submit(
+            conversation_id, topic=topic, material=json_copy(material), parts=parts, reason=reason
+        )
         if not isinstance(result, str):
-            raise ValueError("proactive backend must return an intent id")
+            raise ValueError("proactive backend must return a trace id")
         return result
 
 

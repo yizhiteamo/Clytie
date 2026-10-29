@@ -11,9 +11,92 @@
       "type": "string",
       "minLength": 1
     },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "max_tool_rounds": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 8
+        },
+        "model_call_seconds": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 10,
+          "maximum": 600
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "replies": {
+      "type": "object",
+      "properties": {
+        "fallback_private": {
+          "type": "string",
+          "default": "刚刚没接上，可以再说一次吗？",
+          "maxLength": 200
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "outbound": {
+      "type": "object",
+      "properties": {
+        "style_words": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 50
+          },
+          "default": []
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
+    "protection": {
+      "type": "object",
+      "properties": {
+        "enter_ratio": {
+          "type": "number",
+          "default": 0.2,
+          "minimum": 0,
+          "maximum": 1
+        },
+        "exit_ratio": {
+          "type": "number",
+          "default": 0.3,
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false
+    },
     "names": {
       "type": "object",
       "properties": {
+        "internal_scenes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "owner_private"
+          ]
+        },
         "internal": {
           "type": "string",
           "minLength": 1
@@ -237,6 +320,38 @@
     "boundary": {
       "type": "object",
       "properties": {
+        "pause_hours": {
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 168
+        },
+        "input_filter": {
+          "type": "object",
+          "properties": {
+            "words": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "default": []
+            },
+            "patterns": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "default": []
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
         "refusal_threshold": {
           "type": "integer",
           "minimum": 1,
@@ -406,6 +521,23 @@
     "tasks": {
       "type": "object",
       "properties": {
+        "cancel_words": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10
+          },
+          "default": [
+            "取消",
+            "停",
+            "停止",
+            "停下",
+            "别做了"
+          ],
+          "minItems": 1,
+          "maxItems": 20
+        },
         "cancel_grace_seconds": {
           "type": "integer",
           "default": 5,

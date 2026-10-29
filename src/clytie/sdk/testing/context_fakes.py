@@ -360,11 +360,14 @@ class FakeProactive:
     def __init__(self, clock, *, allowed=True):
         self.clock, self.allowed, self.intents = clock, allowed, []
 
-    async def submit(self, conversation_id, parts, *, reason):
+    async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+        from clytie.sdk.context import validate_proactive
+
+        validate_proactive(topic=topic, material=material, parts=parts)
         await self.clock.sleep(0)
         if not self.allowed:
             raise PermissionError("fictional boundary denial")
-        self.intents.append((conversation_id, tuple(parts), reason))
+        self.intents.append((conversation_id, topic, material, tuple(parts or ()), reason))
         return f"{len(self.intents):032x}"
 
 

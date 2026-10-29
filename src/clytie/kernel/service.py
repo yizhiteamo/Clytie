@@ -13,6 +13,7 @@ from clytie.sdk.types import BusEvent, Denial, Invocation, TaskSummary, ToolResu
 from .delivery import Delivery
 from .events import EventBus, background
 from .ledger import EXEC_TERMINAL, dump
+from .projection import visible
 from .query import record_timings
 from .queue import ConversationQueue
 from .reactions import Reactions
@@ -71,6 +72,8 @@ class Kernel:
         self.reactions = Reactions(ledger, self.delivery, clock, self.config.get("task_reactions"))
         self._reaction_exceptions = set()
         self.duplicates = 0
+        self.conversation_scenes = {}
+        self.record_tasks = {}
 
     async def start(self):
         interrupted = self.ledger.restart()
@@ -179,6 +182,9 @@ class Kernel:
             timeout=min(seconds, self.max_task_seconds),
             schema=schema or {},
         )
+        with self.ledger.transaction():
+            inv["plan"] = {"summary": plan.summary}
+            self.ledger.put("invocation", inv["invocation_id"], inv)
         if not self.ledger.start_invocation(inv["invocation_id"]):
             return self._existing(inv)
         r = self.ledger.get("record", trace)
@@ -199,7 +205,7 @@ class Kernel:
         if len([i for i in self.ledger.rows("invocation") if i["trace_id"] == trace]) == 1:
             self.reactions.request(trace, "running")
         with record_scope(trace):
-            task = asyncio.create_task(capability.execute(plan, invocation, token))
+            task = asyncio.create_task(capability.execute(plan, invocation, token.child()))
         self.tasks[trace] = task
         deadline = asyncio.create_task(
             self.clock.sleep_until(datetime.fromisoformat(r["deadline"]))
@@ -311,6 +317,10 @@ class Kernel:
             task_id=r["task_id"],
             status=r["exec_status"],
             tool=r["tool"],
+            model_calls=r.get("model_calls", 0),
+            tool_rounds=r.get("tool_rounds", 0),
+            rewritten=r.get("rewritten", False),
+            outbound_categories=r.get("outbound_categories", []),
             **record_timings(r),
         )
         if r["kind"] != "task":
@@ -388,6 +398,19 @@ class Kernel:
             target = (tasks or queued or [None])[-1]
         if target is None:
             return "not_found"
+        current = self.ledger.get("record", _current_trace.get()) if _current_trace.get() else None
+        scene = (
+            current["scene"]
+            if current and current["conversation_id"] == conversation_id
+            else self.conversation_scenes.get(conversation_id, "public_group")
+        )
+        if not visible(
+            target,
+            scene=scene,
+            conversation_id=conversation_id,
+            private_scenes=self.config.get("memory", {}).get("private_scenes", ["owner_private"]),
+        ):
+            return "not_found"
         trace = target["trace_id"]
         allowed = (
             actor.role == "owner"
@@ -417,10 +440,15 @@ class Kernel:
                 active = self.delivery.active_tokens.get(intent["intent_id"])
                 if active:
                     active.cancel("cancelled")
-        if trace in self.tasks:
+        active_task = self.record_tasks.get(trace) or self.tasks.get(trace)
+        if active_task is not None:
             timer = asyncio.create_task(self.clock.sleep(self.grace))
             try:
-                await asyncio.wait({self.tasks[trace], timer}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(
+                    {active_task, timer}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if active_task not in done:
+                    active_task.cancel()
             finally:
                 timer.cancel()
                 await asyncio.gather(timer, return_exceptions=True)
