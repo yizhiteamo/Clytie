@@ -220,7 +220,7 @@
 | `peer` | `peer` |
 | `model` | `model.invoke` |
 | `http` | `network` |
-| `proactive` | `message.proactive`：提交主动消息意图（仍经过边界和出站检查） |
+| `proactive` | `message.proactive`：提交主动话题与材料，文字由模型生成；直接发送只允许表情和媒体（见 §7.5 与 agent-spec §15） |
 | `subprocess` | `subprocess` |
 
 ## 5. 扩展点签名
@@ -399,12 +399,13 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | `peer` | `peer` | `async send(companion_id, kind, payload) -> str`、`async request(companion_id, kind, payload, timeout_s) -> JsonObject` |
 | `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
 | `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
-| `proactive` | `message.proactive` | `async submit(conversation_id, parts, *, reason: str) -> str`（返回 `intent_id`；仍经过边界和出站检查，可能被拒绝） |
+| `proactive` | `message.proactive` | `async submit(conversation_id, *, topic: str \| None = None, material: JsonObject \| None = None, parts: list[MessagePart] \| None = None, reason: str) -> str`（返回 `trace_id`；话题与直接发送二选一，仍经过边界和出站检查，见下） |
 | `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
 | `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`；映射来自实例配置 |
 
 - `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
 - `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
+- `proactive.submit`（agent-spec §15，用户已确认）：`topic` 与 `parts` 同时给出或都不给时抛 `ValueError`。话题方式可附 `material`，文字由模型结合上下文生成，可以选择不发；不提供能力。直接发送只允许 `sticker`、`image`、`audio`、`video`、`file`，含 `text`、`card`、`link` 等文字类部分时抛 `ValueError`，提示改用话题方式。`reason` 写入日志和审计，不交给模型。目标会话必须在实例配置登记，未登记或陌生人私聊抛 `ValueError`，不创建记录。返回这次主动消息的 `trace_id`，插件不能读取账本。
 - **记忆权限规则**（宿主负责裁剪，插件无法改变）：
   1. 只有 `memory.write`：只能写入新记录，不能 `search`、`get`、`revise`、`retract`。`revise` / `retract` 只能作用于当前场景下读得到的记录。
   2. 场景**由宿主绑定**，插件不能传入或修改。宿主在调用环节、工具、上下文段落等处理某条事件时，把该事件的场景绑定到这次调用；`search`、`get`、`revise`、`retract` 都按绑定的场景过滤。

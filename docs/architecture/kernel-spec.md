@@ -14,7 +14,7 @@
 
 | 实体 | 主键 | 关键字段 |
 |---|---|---|
-| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|merged\|dropped_on_restart`、`merged_into = trace_id`（消息合并，见 `agent-spec.md` §2）；`ignored` 原因字段取值包括 `boundary_paused` |
+| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|merged\|dropped_on_restart`、`merged_into = trace_id`（消息合并，见 `agent-spec.md` §2）；`ignored` 原因字段取值包括 `boundary_paused`、`cancel_only` |
 | `record` 处理记录 | `trace_id` | `source_event_id?`（主动消息、定时任务为空）、`conversation_id`、`requester?`、`kind: chat\|task`、`task_id?`、`tool?`、`parent_trace_id?`、`scene`、`exec_status`、`delivery_status`、`deadline`、各阶段耗时、`created_at` |
 | `invocation` 能力调用 | `invocation_id` | `trace_id`、`plugin_id`、`tool`、`idem_key`、`args`、`status`、`result`、`error?`、`asset_ids`、开始/结束时间 |
 | `intent` 待交付 | `intent_id` | `trace_id`、`kind`、`parts`、`target?`、`split?`、`not_before?`、`status`（第 6 节） |
@@ -162,6 +162,8 @@
 内部入口：`cancel(companion_id, actor, conversation_id, task_id=None, reply_to=None)`。
 
 **权限**（所有方式相同）：主人可以取消任何记录；其他人只能取消自己发起的（`requester` 是自己）。没有权限时返回 `denied` 并写审计，不改变状态。
+
+**可见性先于权限（用户已确认，agent-spec §6.2）**：取消入口先按第 13.1 节判断目标记录在当前场景是否可见。看不到的记录一律返回 `not_found`，之后才检查取消权限（`denied`）和是否已结束（`already_finished`）。适用于快速路径、`core_cancel_task` 和引用取消。私聊中发起的任务，要回到能看到它的场景取消。
 
 **选择目标**（按以下顺序，只用第一个适用的方式）：
 
