@@ -76,6 +76,10 @@ plugins/<id>/
 
 能力插件的工具描述包括：何时使用、**何时不用**、正反例（含否定、转述、讨论三类）、参数 Schema、适用对象、是否重任务、风险、交付方式。
 
+- 工具清单新增可选字段 `timeout_s`（正整数，秒）；截止时间计算与实例上限见 `kernel-spec.md` 第 8 节。
+- 工具参数 Schema 支持 `"x-clytie-sensitive": true` 注解。任意层级的敏感属性写入账本前替换为 `"[redacted]"`；`oneOf` / `anyOf` / `allOf` 任一分支标为敏感就按敏感处理，详见 `kernel-spec.md` 第 13.2 节。
+- 插件不把凭据写进 `ToolResult.data` 和收据的 `error.message`；这两处没有 Schema，不自动脱敏。
+
 ## 5. 权限
 
 | 权限 | 含义 |
