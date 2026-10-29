@@ -111,14 +111,20 @@ class MemoryContext:
             if days < 60
             else f"{days // 30}个月前"
         )
-        number = len(session.references) + 1
-        label = f"[记忆{number}]"
+        label = next(
+            (key for key, (rid, _) in session.references.items() if rid == record.record_id),
+            f"[记忆{len(session.references) + 1}]",
+        )
         session.references[label] = (record.record_id, record.revision)
         return f"{label} {record.content}（{when}）"
 
     async def build(self, trace, conversation, query):
         session = self.session(trace)
-        session.references.clear()
+        identity = self.retrieval.embedder_id
+        if identity != getattr(self, "_embedding_identity", None):
+            self._embedding_identity = identity
+            if self.changed:
+                self.changed()
         scene, cid = conversation.scene, conversation.conversation_id
         if scene == "stranger_private":
             return []
@@ -140,9 +146,10 @@ class MemoryContext:
         lines, selected, used = [], set(), 0
         for record in core:
             # 预算包括完整展示行，超出时不分割内容。
+            previous = dict(session.references)
             label = self.label(record, session)
             if used + len(label) > config.get("core_chars", 4000):
-                session.references.pop(f"[记忆{len(session.references)}]")
+                session.references = previous
                 continue
             lines.append(label)
             selected.add(record.record_id)
@@ -159,9 +166,10 @@ class MemoryContext:
         for record in recalled:
             if record.record_id in selected or count >= config.get("recall_limit", 10):
                 continue
+            previous = dict(session.references)
             label = self.label(record, session)
             if used + len(label) > config.get("recall_chars", 3000):
-                session.references.pop(f"[记忆{len(session.references)}]")
+                session.references = previous
                 continue
             lines.append(label)
             selected.add(record.record_id)

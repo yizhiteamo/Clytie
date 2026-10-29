@@ -113,7 +113,6 @@ claude -p "<验收指令>" --allowedTools "Read(./**)" --disallowedTools "Bash" 
 | `docs/architecture/kernel-spec.md` | A3.1 账本与交付：状态、防重、重发、取消、调度、查询与场景过滤 |
 | `docs/architecture/agent-spec.md` | A3.2 对话主干：工具循环、上下文、能力状态、边界、出站检查 |
 | `docs/architecture/memory-spec.md` | A3.3 记忆核心：当场记、投影、检索、加密导出与搬家导入 |
-| `docs/architecture/memory-spec.md` | A3.3 记忆核心：存储、投影、当场记、检索、加密导入导出 |
 | `docs/architecture/data-and-backup.md` | 实例目录、记忆导入导出、备份与保留策略 |
 | `docs/architecture/repository.md` | 公开仓库的内容规则与自动检查 |
 | `docs/design/kernel.md` | 统一账本、防重、交付、任务编号、表情回应规则、日志 |

@@ -69,13 +69,13 @@ async def test_semantics_model_change_and_rebuild(memory):
     retrieval = Retrieval(memory, embedder=FakeEmbedder(), embedder_id="fake_a")
     assert await retrieval.search("餐馆", "owner_private", "owner_chat") == []
     await retrieval.rebuild()
-    first = await retrieval.search("餐馆", "owner_private", "owner_chat", limit=1)
+    first = await retrieval.search("餐馆", "owner_private", "owner_chat")
     assert first[0].record_id == target.record_id
-    assert first == await retrieval.search("餐馆", "owner_private", "owner_chat", limit=1)
+    assert first == await retrieval.search("餐馆", "owner_private", "owner_chat")
     retrieval.embedder_id = "fake_b"
     assert await retrieval.search("餐馆", "owner_private", "owner_chat") == []
     await retrieval.rebuild()
-    assert (await retrieval.search("餐馆", "owner_private", "owner_chat", limit=1))[
+    assert (await retrieval.search("餐馆", "owner_private", "owner_chat"))[
         0
     ].record_id == target.record_id
     assert retrieval.progress == {"complete": 2, "total": 2}
@@ -107,3 +107,59 @@ async def test_failure_degrades_and_reranker_never_receives_private_record(memor
     ]
     assert await candidates.filter_hits(hits) == hits[1:]
     assert await CandidateReader(memory, "stranger_private", "unknown").count() == 0
+
+
+async def test_rerank_preserves_fused_tail(memory):
+    for index in range(8):
+        remember(memory, f"香菜{index}")
+    memory.config["memory"]["rerank_candidates"] = 5
+    plain = await Retrieval(memory).search("香菜", "owner_private", "owner_chat")
+
+    class Reranker:
+        async def rerank(self, query, records, cancel):
+            return list(range(len(records)))
+
+    ranked = await Retrieval(memory, reranker=Reranker()).search(
+        "香菜", "owner_private", "owner_chat"
+    )
+    assert ranked == list(reversed(plain[:5])) + plain[5:]
+
+
+async def test_host_embedding_identity_changes_on_version_dimension_and_config(memory):
+    from types import SimpleNamespace
+
+    from clytie.memory.retrieval import HostExtension
+
+    reg = SimpleNamespace(
+        plugin_id="fake-embedding", point="embedder", key="embedder", declaration={"dimension": 2}
+    )
+    runtime = SimpleNamespace(
+        manifest=SimpleNamespace(data={"version": "1.0.0"}),
+        registrations=[reg],
+        ctx=SimpleNamespace(config={"model": "alpha"}),
+    )
+
+    class Host:
+        runtimes = {("companion_a", "fake-embedding"): runtime}
+
+        async def invoke(self, *args, **kwargs):
+            return [[1] + [0] * (reg.declaration["dimension"] - 1) for _ in args[4]]
+
+    retrieval = Retrieval(memory, embedder=HostExtension(Host(), "companion_a", reg))
+    remember(memory, "无关键词匹配的记录")
+    seen = set()
+    for version, dimension, model in [
+        ("1.0.0", 2, "alpha"),
+        ("1.1.0", 2, "alpha"),
+        ("1.1.0", 3, "alpha"),
+        ("1.1.0", 3, "beta"),
+    ]:
+        runtime.manifest.data["version"] = version
+        reg.declaration["dimension"] = dimension
+        runtime.ctx.config["model"] = model
+        assert retrieval.embedder_id not in seen
+        seen.add(retrieval.embedder_id)
+        assert await retrieval.search("XYZ", "owner_private", "owner_chat") == []
+        await retrieval.rebuild()
+        assert len(await retrieval.search("XYZ", "owner_private", "owner_chat")) == 1
+        assert not retrieval.warnings

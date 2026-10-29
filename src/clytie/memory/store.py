@@ -167,7 +167,7 @@ class MemoryStore:
             r for r in self.all_records() if self.visible(r, scene, conversation_id, permissions)
         ]
 
-    def _save(self, record, *, operator, trace=None, import_id=None, reason=None):
+    def _save(self, record, *, operator, trace=None, import_id=None, reason=None, timestamp=None):
         old = self.get_raw(record.record_id)
         parent = content_hash(old) if old else None
         payload = record.model_dump_json()
@@ -180,7 +180,7 @@ class MemoryStore:
                 payload,
                 content_hash(record),
                 parent,
-                self.clock.now().isoformat(),
+                timestamp if timestamp is not None else self.clock.now().isoformat(),
                 operator,
                 trace,
                 import_id,

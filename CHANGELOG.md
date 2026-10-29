@@ -11,6 +11,7 @@
 
 - MemoryRecord 新增本体填写的 basis、origin_conversation_id；旧格式读取按 write_mode 推导可信程度，未知来源为 null。写入忽略外部可信字段，插件只能修改或撤销 observed 记录；owner_confirmed、owner_stated 只读。
 - 新增兼容扩展 memory.reranker，候选由本体投影后传入。
+- 语义路新增 `memory.semantic_min_similarity`（默认 0.5）；向量缓存身份包含版本、维度与配置指纹；一次回复内记忆编号稳定，搬家保留修订来源元数据。
 - 新增 memory 的核心/检索预算、召回条数、重排候选数、写入次数、泄漏片段阈值、embedder/reranker 配置。契约见 memory-spec §10。
 - A3.3 覆盖当场记、存储与投影、检索、加密导入导出；回想、群友印象和软遗忘等拆至 A3.4。
 

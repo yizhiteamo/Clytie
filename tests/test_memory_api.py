@@ -23,11 +23,17 @@ def test_memory_config_defaults_ranges_and_enabled_extension(tmp_path):
     memory = report.plugin_configs["companion_a"]["config"]["memory"]
     assert memory["core_chars"] == 4000 and memory["recall_limit"] == 10
     assert memory["embedder"] is None and memory["reranker"] is None
-    companion["memory"] = {"core_chars": 199, "reranker": "fake-model"}
+    assert memory["semantic_min_similarity"] == 0.5
+    companion["memory"] = {
+        "core_chars": 199,
+        "reranker": "fake-model",
+        "semantic_min_similarity": 1.1,
+    }
     write_yaml(home / "companions/companion_a/companion.yaml", companion)
     report = load_home(home, repo_root=repo)
     pointers = {error.pointer for error in report.errors}
     assert "/memory/core_chars" in pointers and "/memory/reranker" in pointers
+    assert "/memory/semantic_min_similarity" in pointers
     companion["memory"] = {"reranker": "fake-model"}
     companion.setdefault("plugins", {})["fake-model"] = {"enabled": True, "config": {}}
     write_yaml(home / "companions/companion_a/companion.yaml", companion)

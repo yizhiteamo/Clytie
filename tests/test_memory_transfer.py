@@ -165,7 +165,7 @@ async def test_restore_downgrade_and_undo_only_its_changes_with_conflicts(homes)
     path = export(source, source_home)
     target, _, transfers = homes("target")
     await move(transfers, path)
-    confirmed = remember(target, explicit=True)
+    remember(target, explicit=True)
     added = remember(target, "导入后本地新增")
     plan = await transfers.plan(path, mode="restore", passphrase=PASSPHRASE)
     assert plan["downgrade_count"] == 1
@@ -187,7 +187,7 @@ async def test_restore_downgrade_and_undo_only_its_changes_with_conflicts(homes)
     assert target.get_raw(unrelated.record_id) == unrelated
     assert target.get_raw(original.record_id) == changed
     assert not target.get_raw(added.record_id).retracted
-    assert confirmed.basis == "owner_confirmed"
+    assert target.get_raw(original.record_id).basis == "owner_stated"
     redo = transfers.undo(undo_id)
     await transfers.apply(redo["id"])
     assert target.get_raw(added.record_id).retracted
@@ -281,3 +281,49 @@ async def test_missing_conversation_projects_internally_and_snapshot_failure_is_
     assert target.meta("missing_origins") == [record.record_id]
     assert target.project("public_group", "unrelated") == []
     assert target.project("owner_private", "owner_chat")
+
+
+async def test_new_and_fast_forward_preserve_revision_provenance(homes):
+    source, home, _ = homes("source")
+    remember(source, "另一条保留的记录")
+    original = remember(source)
+    source.clock.advance(70)
+    updated = source.revise(
+        original.record_id,
+        1,
+        {"content": "修订内容"},
+        scene="owner_private",
+        conversation_id="owner_chat",
+        operator="owner",
+        trace="fictional-trace",
+        reason="fictional-reason",
+    )
+    target, _, transfers = homes("target")
+    target.clock.advance(300)
+    await move(transfers, export(source, home))
+
+    def provenance(store):
+        return [
+            tuple(r)
+            for r in store.db.execute(
+                "SELECT record_id,revision,data,hash,parent,at,operator,trace,reason FROM revisions ORDER BY record_id,revision"
+            )
+        ]
+
+    assert provenance(target) == provenance(source)
+    source.clock.advance(70)
+    source.revise(
+        updated.record_id,
+        2,
+        {"retracted": True},
+        scene="owner_private",
+        conversation_id="owner_chat",
+        operator="owner",
+        trace="forget-trace",
+        reason="forget-reason",
+    )
+    plan = await transfers.plan(
+        export(source, home, "next.enc"), mode="merge", passphrase=PASSPHRASE
+    )
+    await transfers.apply(plan["id"], passphrase=PASSPHRASE)
+    assert provenance(target) == provenance(source)

@@ -4,12 +4,36 @@ import math
 
 from clytie.sdk import CancelToken
 
-from .store import BASIS, canonical, tokens
+from .store import BASIS, canonical, fingerprint, tokens
 
 
 class HostExtension:
     def __init__(self, host, companion_id, registration):
         self.host, self.cid, self.registration = host, companion_id, registration
+
+    @property
+    def cache_identity(self):
+        from clytie.config import thaw
+
+        runtime = self.host.runtimes.get((self.cid, self.registration.plugin_id))
+        if runtime is None:
+            return fingerprint({"plugin": self.registration.plugin_id, "state": "inactive"})
+        reg = next(
+            (
+                r
+                for r in runtime.registrations
+                if r.point == self.registration.point and r.key == self.registration.key
+            ),
+            self.registration,
+        )
+        return fingerprint(
+            {
+                "plugin": reg.plugin_id,
+                "version": runtime.manifest.data["version"],
+                "declaration": thaw(reg.declaration),
+                "config": thaw(runtime.ctx.config),
+            }
+        )
 
     async def embed(self, texts, cancel):
         reg = self.registration
@@ -85,6 +109,14 @@ class Retrieval:
         self.last_warning = None
         self.warnings = []
         self.progress = {"complete": 0, "total": 0}
+
+    @property
+    def embedder_id(self):
+        return getattr(self.embedder, "cache_identity", self._embedder_id)
+
+    @embedder_id.setter
+    def embedder_id(self, value):
+        self._embedder_id = value
 
     def warn(self):
         self.warnings = ["向量模型不可用，仅使用关键词"]
@@ -183,9 +215,9 @@ class Retrieval:
                 ):
                     record = by_id.get(row["record_id"])
                     if record and record.revision == row["revision"]:
-                        scores.append(
-                            (record.record_id, cosine(q, vector(json.loads(row["vector"]))))
-                        )
+                        score = cosine(q, vector(json.loads(row["vector"])))
+                        if score > config.get("semantic_min_similarity", 0.5):
+                            scores.append((record.record_id, score))
                 routes.append(sorted(scores, key=lambda p: (-p[1], p[0])))
                 self.warnings = []
                 if self.store.meta("embedder_unavailable", False):
@@ -213,9 +245,12 @@ class Retrieval:
                 scores = vector(scores)
                 if len(scores) != len(candidates):
                     raise ValueError("invalid reranker result")
-                ranked = sorted(
-                    candidates,
-                    key=lambda k: (-scores[candidates.index(k)], -BASIS[by_id[k].basis], k),
+                ranked = (
+                    sorted(
+                        candidates,
+                        key=lambda k: (-scores[candidates.index(k)], -BASIS[by_id[k].basis], k),
+                    )
+                    + ranked[len(candidates) :]
                 )
             except Exception:
                 pass

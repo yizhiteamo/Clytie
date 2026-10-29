@@ -456,7 +456,10 @@ class Transfers:
                                 continue
                             self.store._save(
                                 MemoryRecord.model_validate_json(revision["data"]),
-                                operator="import",
+                                operator=revision["operator"],
+                                trace=revision["trace"],
+                                reason=revision["reason"],
+                                timestamp=revision["at"],
                                 import_id=import_id,
                             )
                         current = self.store.get_raw(record_id)

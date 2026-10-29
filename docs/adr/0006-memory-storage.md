@@ -4,7 +4,7 @@
 
 每个伴侣使用标准库 SQLite，文件为 companions/<cid>/memory/memory.sqlite3。数据库建立时没有 companion_uid；首条记录的事务生成随机 UUID 的十六进制值，原生首次导入的事务沿用包的 UID。身份与记录在同一事务提交，失败不留下半初始化身份。
 
-使用 records（当前版本）、revisions（追加修订）、audit、metadata、vectors、imports（导入前后版本关联）、foreign_revisions（分叉来源历史）和 keywords 表。当前版本保存 SDK JSON，同时以 record_id/revision、来源会话、可见等级、可信程度、撤销状态索引。向量以 record_id/revision/embedder_id 为联合主键，属于派生数据。只读状态查询不建库、不取得运行锁、不修正记录。
+使用 records（当前版本）、revisions（追加修订）、audit、metadata、vectors、imports（导入前后版本关联）、foreign_revisions（分叉来源历史）和 keywords 表。当前版本以 id 为主键保存 SDK JSON；来源会话、可见等级、可信程度和撤销状态在投影时检查。修订有 record_id/revision 联合主键及 record_id/hash 索引；关键词按 token/record_id 索引。向量以 record_id/revision/embedder_id 为联合主键，属于派生数据。只读状态查询不建库、不取得运行锁、不修正记录。
 
 修订的内容指纹使用 UTF-8、排序对象键、紧凑 JSON、标准 UTC 时间和 SHA-256。内容包含记忆字段，不包含本地修订序号、导入编号及操作者；前驱指纹另列，从而可判定相同内容的共同祖先，分叉历史不覆盖本地修订。导入编号通过关联列记录，不改变来源内容。每次变更事务递增库世代，计划同时绑定世代与数据库逻辑快照指纹，包含审计和派生数据变化；确认后任何变化要求重新计划。
 
@@ -13,3 +13,5 @@
 运行期持有 memory/.lock，复用现有跨进程文件锁；导入 apply 必须独占同一锁。事务内不调用插件、不跨 await，不执行模型；后台向量生成只在事务外 await，回写时核对当前修订和模型标识，过时结果丢弃。所有业务时间来自注入 Clock。
 
 选择 SQLite 和显式词元表，是为了沿用已有事务、备份与跨平台测试方式，并避免依赖本机 SQLite 是否编译特定分词扩展。中文词元比词典分词更粗，A3.3 用语义路补充口语相似性；真实检索质量在用户授权的后续模型选型中评估。
+
+第 1 轮验收后：语义候选设可配置余弦下限（默认 0.5，严格大于），离线正交/同向假向量验证无关排除及相关保留；这不是对真实模型质量的结论，后续选型需校准。缓存身份包含插件版本、声明和生效配置指纹，避免模型变更复用不兼容向量。

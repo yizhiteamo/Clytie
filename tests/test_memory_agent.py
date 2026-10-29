@@ -145,8 +145,9 @@ async def test_replaces_forget_conflict_and_shared_write_limit(tmp_path):
     await finish(agent)
 
 
+@pytest.mark.parametrize("semantic", [False, True])
 @pytest.mark.parametrize("case", ["absent", "found", "private", "retracted"])
-async def test_l6_evidence_from_agent_tool_result(tmp_path, case):
+async def test_l6_evidence_from_agent_tool_result(tmp_path, case, semantic):
     agent, _, model = await make_agent(
         tmp_path, tool("core_recall", query="画猫"), {"finish": "stop", "text": "照回想结果回复"}
     )
@@ -163,6 +164,16 @@ async def test_l6_evidence_from_agent_tool_result(tmp_path, case):
                 scene="owner_private",
                 conversation_id="owner_private",
             )
+    if semantic:
+
+        class Embedder:
+            async def embed(self, texts, cancel):
+                return [[1, 0] if "画猫" in t else [0, 1] for t in texts]
+
+        write(agent, "晴空")
+        agent.memory.retrieval.embedder = Embedder()
+        agent.memory.retrieval.embedder_id = "fictional-semantic"
+        await agent.memory.retrieval.rebuild()
     await agent.receive(event(agent, "你上次答应给我画猫", scene="public_group", mention=True))
     await agent.drain()
     results = [text_parts(m.parts) for m in model.requests[-1].messages if m.role == "tool"]
@@ -276,4 +287,44 @@ async def test_proactive_memory_is_projected_to_target_and_has_no_tools(tmp_path
     await agent.drain()
     assert private_text not in model.requests[-1].model_dump_json()
     assert not model.requests[-1].tools
+    await finish(agent)
+
+
+@pytest.mark.parametrize("operation", ["core_forget", "core_remember"])
+async def test_recall_reference_survives_agent_round_and_core_reordering(tmp_path, operation):
+    agent, _, model = await make_agent(
+        tmp_path,
+        {
+            "finish": "tool_calls",
+            "tool_calls": [
+                {
+                    "call_id": "remember",
+                    "tool": "core_remember",
+                    "arguments": {"kind": "fact", "content": "新的核心", "explicit": True},
+                },
+                {"call_id": "recall", "tool": "core_recall", "arguments": {"query": "琥珀"}},
+            ],
+        },
+        tool(
+            operation,
+            **(
+                {"target": "[记忆2]", "reason": "虚构撤销要求"}
+                if operation == "core_forget"
+                else {"replaces": "[记忆2]", "kind": "fact", "content": "修正琥珀"}
+            ),
+        ),
+        {"finish": "stop", "text": "完成"},
+    )
+    core = write(agent, "旧核心", explicit=True)
+    recalled = write(agent, "琥珀")
+    agent.clock.advance(1)
+    await agent.receive(event(agent, "请处理"))
+    await agent.drain()
+    assert not agent.memory.store.get_raw(core.record_id).retracted
+    result = agent.memory.store.get_raw(recalled.record_id)
+    assert result.retracted if operation == "core_forget" else result.content == "修正琥珀"
+    context = "\n".join(text_parts(m.parts) for m in model.requests[1].messages)
+    assert "[记忆1] 旧核心" in context and "[记忆3] 新的核心" in context
+    assert "[记忆2] 琥珀" in context
+    assert len(model.requests) == 3
     await finish(agent)
