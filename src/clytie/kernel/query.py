@@ -104,10 +104,7 @@ def task_view(ledger, record, *, full=False):
         )
     }
     task.update(
-        timings=dict(
-            queue_seconds=elapsed(record["created_at"], record["started_at"]),
-            execution_seconds=elapsed(record["started_at"], record["finished_at"]),
-        ),
+        timings=record_timings(record),
         parent_task_id=parent["task_id"] if parent else None,
         child_task_ids=[
             r["task_id"]
@@ -135,6 +132,15 @@ def task_view(ledger, record, *, full=False):
                 if attempt["receipt"] and attempt["receipt"].get("error"):
                     attempt["receipt"]["error"].pop("message", None)
     return task
+
+
+def record_timings(record):
+    start = record.get("execution_started_at") or record["started_at"]
+    return dict(
+        queue_seconds=elapsed(record["created_at"], start),
+        execution_seconds=elapsed(start, record["finished_at"]),
+        delivery_seconds=elapsed(record["finished_at"], record.get("delivery_finished_at")),
+    )
 
 
 def local_task(task_id, *, home=None, companion_id=None, full=False, repo_root=None):

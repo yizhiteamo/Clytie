@@ -262,3 +262,26 @@ async def test_execute_success_delivery_pending_can_be_cancelled(tmp_path):
     await kernel.bus.drain()
     assert channel.text == []
     kernel.ledger.close()
+
+
+async def test_cancel_denied_finished_and_invalid_requests(tmp_path):
+    kernel, _, clock = setup(tmp_path)
+    r, inv, event = await new_record(kernel)
+    member = Actor(actor_id="member", role="member", channel_id="fake")
+    before = kernel.ledger.get("record", r["trace_id"])
+    assert (
+        await kernel.cancel("companion_a", member, "test_group", reply_to=event.message.ref)
+        == "denied"
+    )
+    assert kernel.ledger.get("record", r["trace_id"]) == before
+    assert kernel.ledger.rows("audit")[-1]["allowed"] is False
+    assert await kernel.cancel("companion_b", inv.actor, "test_group") == "invalid_request"
+    assert await kernel.cancel("companion_a", None, "test_group") == "invalid_request"
+    assert await kernel.cancel("companion_a", inv.actor, "") == "invalid_request"
+    await kernel.seal(r["trace_id"], "ok")
+    assert (
+        await kernel.cancel("companion_a", inv.actor, "test_group", reply_to=event.message.ref)
+        == "already_finished"
+    )
+    await kernel.bus.drain()
+    kernel.ledger.close()

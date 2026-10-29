@@ -93,6 +93,7 @@ class HomeReport:
     plugin_configs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     failed_plugin_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     ledger_errors: tuple[Mapping[str, Any], ...] = ()
+    ledger_notices: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -105,6 +106,7 @@ class HomeReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "ledger_errors": thaw(self.ledger_errors),
+            "ledger_notices": thaw(self.ledger_notices),
             "home": self.home,
             "exists": self.exists,
             "valid": self.valid,

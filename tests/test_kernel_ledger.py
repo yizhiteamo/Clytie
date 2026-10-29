@@ -37,6 +37,7 @@ def test_restart_never_replays_and_unknown_never_retries(tmp_path):
     assert restarted.restart() == [trace]
     assert restarted.get("record", trace)["exec_status"] == "interrupted"
     assert restarted.get("intent", first.intent_id)["status"] == "unknown"
+    assert restarted.get("intent", first.intent_id)["error"]["code"] == "receipt_unknown_on_restart"
     assert restarted.get("intent", pending.intent_id)["error"]["code"] == "not_sent_before_restart"
     with pytest.raises(ValueError):
         restarted.begin_attempt(first.intent_id)

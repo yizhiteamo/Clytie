@@ -428,7 +428,12 @@ class Ledger:
                 if i["status"] not in INTENT_TERMINAL:
                     i.update(
                         status="unknown" if i["status"] == "sending" else "failed",
-                        error={"code": "not_sent_before_restart", "message": ""},
+                        error={
+                            "code": "receipt_unknown_on_restart"
+                            if i["status"] == "sending"
+                            else "not_sent_before_restart",
+                            "message": "",
+                        },
                     )
                     self.put("intent", i["intent_id"], i)
                     self.audit(

@@ -183,11 +183,19 @@ class LedgerSnapshots:
         if not self.base.exists():
             return
         for path in sorted(self.base.glob("*/snapshot.enc")):
-            contained(self.base, path)
-            envelope = json.loads(path.read_bytes())
-            header = envelope["header"]
-            # 先认证再使用保留元数据决定删除，不能信任被篡改的头。
-            self.read(path)
+            try:
+                contained(self.base, path)
+                envelope = json.loads(path.read_bytes())
+                header = envelope["header"]
+                # 不可信快照不清理；不妨碍健康账本继续运行。
+                self.read(path)
+            except Exception as exc:
+                self.log.warning(
+                    "ledger.snapshot_cleanup_skipped",
+                    path=path.relative_to(self.home).as_posix(),
+                    error=type(exc).__name__,
+                )
+                continue
             snapshots.append(
                 (datetime.fromisoformat(header["generated_at"]), bool(header["failed"]), path)
             )
@@ -376,3 +384,22 @@ def migration_status(home):
             )
         )
     return alerts
+
+
+def snapshot_notices(home):
+    home = Path(home)
+    notices = []
+    for path in sorted((home / "backups" / "ledger").glob("*/*/snapshot.enc")):
+        try:
+            contained(home, path)
+        except ValueError:
+            continue
+        notices.append(
+            dict(
+                companion_id=path.parents[1].name,
+                path=path.relative_to(home).as_posix(),
+                level="warning",
+                message="未设置内容保留期时，失败现场需用户逐个处理明确文件手动清理，不批量删除。快照和失败现场按生成时间到期，较旧内容可能比原始内容保存更久；迁移日志阻止启动期间不清理。",
+            )
+        )
+    return notices

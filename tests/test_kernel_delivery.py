@@ -87,7 +87,7 @@ async def test_started_group_finishes_after_cancel_and_deadline(tmp_path):
     assert len(channel.text) == 3
     assert all(kernel.ledger.get("intent", i.intent_id)["status"] == "sent" for i in intents)
     await settle(kernel)
-    assert channel.calls[-1].emoji == "❌"
+    assert channel.calls[-1].emoji == "✅"
     kernel.ledger.close()
 
 
@@ -194,4 +194,24 @@ async def test_receipt_message_retention_clears_summary_copy_too(tmp_path):
         a for a in kernel.ledger.rows("attempt") if a["intent_id"] == intents[0].intent_id
     )
     assert attempt["receipt"]["error"]["message"] is None
+    kernel.ledger.close()
+
+
+async def test_cancel_during_retry_wait_preserves_last_error(tmp_path):
+    kernel, channel, clock = setup(tmp_path)
+    channel.receipts = ["failed"]
+    r, inv, intents = await task_with_intents(kernel)
+    work = asyncio.create_task(kernel.delivery.deliver(r["trace_id"]))
+    await clock.drain()
+    assert kernel.ledger.get("intent", intents[0].intent_id)["status"] == "retry_wait"
+    assert (
+        await kernel.cancel("companion_a", inv.actor, r["conversation_id"], task_id=r["task_id"])
+        == "cancelled"
+    )
+    await clock.advance_and_drain(2)
+    await work
+    row = kernel.ledger.get("intent", intents[0].intent_id)
+    assert row["status"] == "failed" and row["error"]["code"] == "transient"
+    assert len(channel.text) == 1
+    await settle(kernel)
     kernel.ledger.close()

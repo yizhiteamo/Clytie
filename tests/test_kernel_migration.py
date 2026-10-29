@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 
+from clytie.api import local_status
 from clytie.cli import main
 from clytie.kernel.ledger import Ledger, LedgerError
 from clytie.kernel.migration import LedgerRuntime, migration_status
@@ -133,6 +134,60 @@ def test_readonly_query_summary_full_and_ambiguous(tmp_path):
     assert local_task(task_id, home=tmp_path)["error"]["code"] == "ambiguous"
     ledger.close()
     other.close()
+
+
+def test_default_cli_summary_and_shared_timing_fields(tmp_path, capsys):
+    from clytie.kernel.query import record_timings
+
+    base = tmp_path / "companions/companion_a"
+    ledger, _, _, clock, trace = fixture(base)
+    record = ledger.get("record", trace)
+    with ledger.transaction():
+        record.update(
+            execution_started_at=clock.now().isoformat(),
+            finished_at=clock.now().isoformat(),
+            delivery_finished_at=clock.now().isoformat(),
+        )
+        ledger.put("record", trace, record)
+    result = local_task(record["task_id"], home=tmp_path)
+    assert result["task"]["timings"] == record_timings(record)
+    assert result["task"]["timings"]["delivery_seconds"] == 0
+    assert main(["task", record["task_id"], "--home", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("任务 ") and "阶段耗时" in output and "完整内容" not in output
+    ledger.close()
+
+
+async def test_status_preserves_snapshot_notice_without_migration_journal(tmp_path):
+    from .test_config import make_home
+
+    home, repo, _, _ = make_home(tmp_path)
+    runtime = LedgerRuntime(home, "companion_a", MockClock())
+    await runtime.open()
+    failed = runtime.snapshots.create(0, 1, failed=True)
+    runtime.close()
+    report = local_status(home, repo_root=repo)
+    assert report.exit_code == 0 and not report.ledger_errors
+    assert any(
+        n["path"] == failed.relative_to(home).as_posix()
+        and "手动清理" in n["message"]
+        and "保存更久" in n["message"]
+        for n in report.ledger_notices
+    )
+
+
+async def test_corrupt_old_snapshot_skips_cleanup_without_blocking_start(tmp_path):
+    clock = MockClock()
+    first = LedgerRuntime(tmp_path, "companion_a", clock)
+    await first.open()
+    snapshot = first.snapshots.create(0, 1)
+    first.close()
+    snapshot.write_bytes(b"fictional corrupt envelope")
+    next_runtime = LedgerRuntime(tmp_path, "companion_a", clock)
+    await next_runtime.open()
+    assert snapshot.exists()
+    assert any(e[1] == "ledger.snapshot_cleanup_skipped" for e in next_runtime.log.entries)
+    next_runtime.close()
 
 
 async def test_crash_after_schema_commit_clears_only_residual_journal(tmp_path):

@@ -12,7 +12,7 @@ from clytie.sdk.types import BusEvent, Denial, Invocation, TaskSummary, ToolResu
 from .delivery import Delivery
 from .events import EventBus, background
 from .ledger import EXEC_TERMINAL, dump
-from .query import elapsed
+from .query import record_timings
 from .queue import ConversationQueue
 from .reactions import Reactions
 
@@ -303,6 +303,7 @@ class Kernel:
             ):
                 return
             r["notified"] = True
+            r["delivery_finished_at"] = self.ledger.now()
             self.ledger.put("record", trace, r)
         self.log.info(
             "record.completed",
@@ -310,13 +311,7 @@ class Kernel:
             task_id=r["task_id"],
             status=r["exec_status"],
             tool=r["tool"],
-            queue_seconds=elapsed(
-                r["created_at"], r.get("execution_started_at") or r["started_at"]
-            ),
-            execution_seconds=elapsed(
-                r.get("execution_started_at") or r["started_at"], r["finished_at"]
-            ),
-            delivery_seconds=elapsed(r["finished_at"], self.ledger.now()),
+            **record_timings(r),
         )
         if r["kind"] != "task":
             return
@@ -336,7 +331,7 @@ class Kernel:
         )
         success = r["exec_status"] == "ok"
         self.emit("task.completed" if success else "task.failed", dump(summary))
-        self.reactions.request(trace, "done" if success and not r["cancelled"] else "failed")
+        self.reactions.request(trace, "done" if success else "failed")
         if self.task_completed:
             await self.task_completed(summary)
 
@@ -407,7 +402,12 @@ class Kernel:
         token.cancel("cancelled")
         for intent in self.ledger.intents(trace):
             if not intent["status_reaction"] and not self.delivery.group_started(intent):
-                self.ledger.fail_intent(intent["intent_id"], "cancelled_before_send")
+                code = (
+                    intent["error"]["code"]
+                    if intent["status"] == "retry_wait" and intent["error"]
+                    else "cancelled_before_send"
+                )
+                self.ledger.fail_intent(intent["intent_id"], code)
                 active = self.delivery.active_tokens.get(intent["intent_id"])
                 if active:
                     active.cancel("cancelled")
