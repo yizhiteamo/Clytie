@@ -31,7 +31,7 @@ from clytie.sdk.types import (
 )
 
 from .context import BackendUnavailable, build_context
-from .dependencies import DependencyError, resolve
+from .dependencies import DependencyError, resolve, stop_order
 from .journal import Journals
 from .locking import MetadataLockTimeout, OperationBusy, Operations
 from .manifests import discover
@@ -354,7 +354,13 @@ class PluginHost(MigrationMixin):
             if plan.operation == "enable":
                 if self.is_active(plan.companion_id, pid):
                     continue
-                if await self._start(plan.companion_id, self.manifests[pid]):
+                try:
+                    started = await self._start(plan.companion_id, self.manifests[pid])
+                except MetadataLockTimeout as exc:
+                    exc.enabled = tuple(enabled)
+                    exc.patch = {"plugins": {item: {"enabled": True} for item in enabled}}
+                    raise
+                if started:
                     enabled.append(pid)
                 else:
                     failed.append(pid)
@@ -939,21 +945,32 @@ class PluginHost(MigrationMixin):
     async def close(self):
         result = {}
         for cid in sorted(set(self.settings) | {key[0] for key in self.runtimes}):
-            plugins = sorted(
-                pid
-                for (companion, pid), runtime in self.runtimes.items()
-                if companion == cid
-                and runtime.status in {"active", "quiescing", "starting", "stopping"}
-            )
             row = result[cid] = {"stopped": [], "not_stopped": {}}
+            plugins = []
             try:
+                plugins = sorted(
+                    pid
+                    for (companion, pid), runtime in self.runtimes.items()
+                    if companion == cid
+                    and runtime.status in {"active", "quiescing", "starting", "stopping"}
+                )
                 with self.operations.hold(cid, plugins, "shutdown"):
                     loaded = {pid: self.runtimes[cid, pid].manifest for pid in plugins}
-                    for pid in reversed(resolve(loaded, plugins).order) if plugins else ():
+                    for pid in stop_order(loaded):
                         await self._stop(cid, pid, "shutdown")
                         row["stopped"].append(pid)
-            except OperationBusy as exc:
-                row["not_stopped"] = {
-                    pid: exc.result(multiple=len(plugins) > 1) for pid in sorted(plugins)
-                }
+            except (Exception, asyncio.CancelledError) as exc:
+                reason = (
+                    exc.result(multiple=len(plugins) > 1)
+                    if isinstance(exc, OperationBusy)
+                    else {"error": type(exc).__name__}
+                )
+                for pid in plugins:
+                    if pid in row["stopped"]:
+                        continue
+                    # 停止清理可能完成后才传播取消；结果必须反映实际运行状态。
+                    if self.runtimes[cid, pid].status == "disabled":
+                        row["stopped"].append(pid)
+                    else:
+                        row["not_stopped"][pid] = reason.copy()
         return result

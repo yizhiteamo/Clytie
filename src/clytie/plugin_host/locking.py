@@ -18,6 +18,11 @@ _held = {}
 class MetadataLockTimeout(RuntimeError):
     """版本记录写锁等待超时；不是插件操作冲突或恢复失败。"""
 
+    def __init__(self, message):
+        super().__init__(message)
+        self.enabled = ()
+        self.patch = {"plugins": {}}
+
 
 class OperationBusy(ValueError):
     def __init__(self, owner):
@@ -176,7 +181,7 @@ class Operations:
         path = contained(
             self.home, self.home / "companions" / identifier(cid) / "plugin-versions.lock"
         )
-        # 有上限的阻塞等待；版本读改写不跨 await，进程内不会等待同任务释放。
+        # 有上限的轮询等待；版本读改写不跨 await，进程内不会等待同任务释放。
         # Event.wait 使用 OS 等待原语，不使用应用时间或 time.sleep。
         wake = threading.Event()
         for attempt in range(501):

@@ -86,3 +86,26 @@ def resolve(
     return EnablePlan(
         requested, tuple(order), tuple(sorted(selected - set(requested) - set(active)))
     )
+
+
+def stop_order(manifests: Mapping[str, Manifest]) -> tuple[str, ...]:
+    """只排序运行集合中的依赖边；缺失依赖不阻止停止，环中剩余项按 id。"""
+    remaining = set(manifests)
+    dependencies = {
+        pid: {
+            dep
+            for dep in manifest.data.get("dependencies", {})
+            if dep in remaining and not dep.startswith("x-")
+        }
+        for pid, manifest in manifests.items()
+    }
+    order = []
+    while remaining:
+        required_by_running = set().union(*(dependencies[pid] & remaining for pid in remaining))
+        ready = sorted(remaining - required_by_running)
+        if not ready:
+            order.extend(sorted(remaining))
+            break
+        order.extend(ready)
+        remaining.difference_update(ready)
+    return tuple(order)
