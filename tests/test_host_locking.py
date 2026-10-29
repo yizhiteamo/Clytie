@@ -4,6 +4,7 @@ import asyncio
 import json
 import multiprocessing
 import os
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +26,9 @@ def hold_in_child(path, connection):
 
 
 @pytest.mark.parametrize("ending", ["release", "crash"])
-def test_cross_process_exclusion_and_recovery_after_owner_exits(tmp_path, ending):
+def test_cross_process_exclusion_and_recovery_after_owner_exits(tmp_path, ending, monkeypatch):
+    # pytest 的 importlib 模式不添加仓库根路径；spawn 必须能重新导入目标模块。
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     path = tmp_path / "stateful.lock"
