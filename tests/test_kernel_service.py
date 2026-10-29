@@ -325,3 +325,50 @@ async def test_receive_duplicate_counter_and_debug_log(tmp_path):
     assert len([e for e in kernel.log.entries if e[1] == "inbound.duplicate"]) == 2
     await kernel.bus.drain()
     kernel.ledger.close()
+
+
+async def test_cancel_foreign_task_id_is_not_found_without_reading_other_ledger(
+    tmp_path, monkeypatch
+):
+    current, _, _ = setup(tmp_path / "companion_a")
+    other, _, _ = setup(tmp_path / "companion_b", cid="companion_b")
+    record, inv, _ = await new_record(other)
+    other.ledger.claim_invocation(
+        record["trace_id"],
+        "echo-tool",
+        ToolCall(call_id="call", tool="echo", arguments={}),
+        "example",
+        timeout=600,
+        schema={},
+    )
+    foreign_id = other.ledger.get("record", record["trace_id"])["task_id"]
+    before = other.ledger.path.read_bytes()
+
+    def forbid(*args, **kwargs):
+        raise AssertionError("cancel must not read another companion ledger")
+
+    monkeypatch.setattr(other.ledger, "rows", forbid)
+    monkeypatch.setattr(other.ledger, "get", forbid)
+    assert (
+        await current.cancel("companion_a", inv.actor, "test_group", task_id=foreign_id)
+        == "not_found"
+    )
+    assert other.ledger.path.read_bytes() == before
+    assert current.ledger.rows("audit") == []
+    await current.bus.drain()
+    await other.bus.drain()
+    current.ledger.close()
+    other.ledger.close()
+
+
+@pytest.mark.parametrize("task_id", ["", "invalid", "ABCDEF12", "abcdef1", "abcdef123", 12])
+async def test_cancel_rejects_malformed_task_id_without_selecting_latest(tmp_path, task_id):
+    kernel, _, _ = setup(tmp_path)
+    record, inv, _ = await new_record(kernel)
+    assert (
+        await kernel.cancel("companion_a", inv.actor, "test_group", task_id=task_id)
+        == "invalid_request"
+    )
+    assert kernel.ledger.get("record", record["trace_id"])["exec_status"] == "pending"
+    await kernel.bus.drain()
+    kernel.ledger.close()
