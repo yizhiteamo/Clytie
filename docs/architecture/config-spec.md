@@ -51,6 +51,7 @@
 | `delivery` | 否 | 交付重发设置，子字段见下 |
 | `tasks` | 否 | 任务取消、截止时间与并发设置，子字段见下 |
 | `ledger` | 否 | 账本内容保留设置，子字段见下 |
+| `task_reactions` | 否 | 任务状态回应设置（kernel-spec §13.5），子字段见下 |
 
 **A3.1 新配置**（按 `kernel-spec.md` 第 16 节同步）：
 
@@ -65,6 +66,10 @@
 | `tasks.max_concurrent` | 整数 | 2 | 1–8 |
 | `ledger.content_retention_days` | 整数或 `null` | `null`（不限期） | 不小于 1 |
 | `task_card.label` | `{internal: str, external: str}` | 都是 `"任务"` | 非空 |
+| `task_reactions.enabled` | 布尔 | `true` | 设为 `false` 时全部关闭 |
+| `task_reactions.audience` | `all` / `owner` | `all` | 所有有权限发起任务的人 / 只有主人的委托 |
+| `task_reactions.emojis` | `{accepted, running, done, failed}` | 👌、⏳、✅、❌ | 各为非空字符串，由平台插件映射为平台表情 |
+| `task_reactions.min_interval_seconds` | 整数 | 2 | 0–30 |
 
 实例 `limits.max_task_seconds` 见第 2 节。
 

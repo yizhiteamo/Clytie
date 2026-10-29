@@ -83,6 +83,7 @@
 | `kind` | `reply` \| `proactive` \| `react` | |
 | `parts` | list[MessagePart] | `react` 时为空 |
 | `emoji` | str? | `react` 时必填 |
+| `replaces_emoji` | str? | `kind = react` 时使用，填上一个确定发出的状态表情；平台支持撤掉表情时先撤旧的再加新的，不支持时只加新的（kernel-spec §13.5） |
 | `target` | MessageRef? | 引用或表情回应的目标 |
 | `task_id` | str? | |
 | `trace_id` | str | |
@@ -236,6 +237,7 @@ async react(intent: DeliveryIntent, cancel) -> Receipt
 features() -> ChannelFeatures
 ```
 `ChannelFeatures`：`max_text_chars`、`supports_react`、`supports_quote`、`supports_card`、`media_limits: dict`。
+另有 `supports_react_remove: bool`，默认 `false`（kernel-spec §13.5）。
 `media_limits` 的键：`{image|audio|video|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持。
 平台插件负责把平台账号映射为 `Actor` 和 `Conversation`：映射表由本体通过 `ctx` 提供（来自实例配置），插件不自己判断身份。
 
