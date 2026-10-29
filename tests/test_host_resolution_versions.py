@@ -58,7 +58,7 @@ async def test_accept_abnormal_record_requires_explicit_version_choice(tmp_path,
 async def test_damaged_journal_rejects_unspecified_or_out_of_range_version(tmp_path, choice):
     h, _, _, _ = await interrupted(tmp_path)
     h.journals.path("companion_a", "stateful").write_bytes(b"fictional-broken-json")
-    with pytest.raises(ValueError, match="only accept_current"):
+    with pytest.raises(ValueError, match="unavailable"):
         h.plan_recovery("companion_a", "stateful", "retry_restore")
     with pytest.raises(ValueError, match="explicit"):
         h.plan_recovery("companion_a", "stateful", "accept_current", version_choice=choice)

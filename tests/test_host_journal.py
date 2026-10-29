@@ -22,7 +22,11 @@ async def interrupted(tmp_path):
     update(path, script=MIGRATE)
     plan = h.plan_migration("companion_a", "stateful")
     h.snapshots.create("companion_a", "stateful", "1", "2", path=tmp_path / plan.snapshot)
-    record = h.journals.begin(plan)
+    record = h.journals.begin(
+        plan,
+        executor=h.operations.executor,
+        target_version={"plugin_version": "2.0.0", "data_version": 2},
+    )
     await old.storage.set("value", "fictional-partial-migration")
     return h, path, old, record
 
@@ -124,7 +128,7 @@ async def test_failed_automatic_restore_is_persistent_and_never_retried(tmp_path
     errors = local_status(tmp_path).to_dict()["failed_plugin_state"]["recovery_errors"]
     assert errors[0]["level"] == "error" and errors[0]["snapshot"] == record["snapshot"]
     assert set(errors[0]["locations"]) == {"state", "failed", "temporary"}
-    assert errors[0]["actions"] == ["retry_restore", "accept_current"]
+    assert errors[0]["actions"] == ["accept_current"]
 
 
 async def test_missing_existing_state_is_never_recreated(tmp_path):
@@ -292,7 +296,7 @@ async def test_accept_missing_directory_and_preexisting_cleanup_plan_are_rejecte
     h, _, old, record = await interrupted(tmp_path)
     failed = tmp_path / record["locations"]["failed"]["path"]
     old.storage.path.rename(failed)
-    with pytest.raises(ValueError, match="missing"):
+    with pytest.raises(ValueError, match="unavailable"):
         h.plan_recovery("companion_a", "stateful", "accept_current")
     # 清理计划在日志出现前生成，执行时仍必须重新检查引用。
     journal = h.journals.path("companion_a", "stateful")

@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from pathlib import Path, PurePosixPath
 
 from cryptography.exceptions import InvalidTag
@@ -45,7 +46,39 @@ def contained(root, path):
     return path
 
 
-def atomic_write(path, data):
+def atomic_read(path):
+    """Windows 读取句柄允许原子替换；读者始终读取自己打开的完整版本。"""
+    if os.name != "nt":
+        return Path(path).read_bytes()
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel.CreateFileW(str(path), 1 << 31, 7, None, 3, 0x80, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle(handle)
+        raise
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read()
+
+
+def atomic_write(path, data, *, retry_sharing=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".pending", dir=path.parent)
@@ -54,7 +87,21 @@ def atomic_write(path, data):
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
-    temporary.replace(path)
+    # Windows 的路径校验/外部扫描器也可能短暂持有不允许删除的句柄。
+    # 版本文件在写锁内有界重试替换；其他文件保持原来的单次写入语义。
+    for attempt in range(501 if retry_sharing and os.name == "nt" else 1):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError as exc:
+            if (
+                not retry_sharing
+                or os.name != "nt"
+                or exc.winerror not in {5, 32}
+                or attempt == 500
+            ):
+                raise
+            threading.Event().wait(0.01)
 
 
 class UpgradeSnapshots:

@@ -33,7 +33,7 @@ from clytie.sdk.types import (
 from .context import BackendUnavailable, build_context
 from .dependencies import DependencyError, resolve
 from .journal import Journals
-from .locking import OperationBusy, Operations
+from .locking import MetadataLockTimeout, OperationBusy, Operations
 from .manifests import discover
 from .memory import bind_scene
 from .migration import MigrationMixin
@@ -519,6 +519,8 @@ class PluginHost(MigrationMixin):
                 self.runtimes[key] = Runtime(companion_id, manifest, None, manifest.priority)
             runtime = self.runtimes[key]
 
+            metadata_timeout = isinstance(exc, MetadataLockTimeout)
+
             async def cleanup_start():
                 for unit in reversed(runtime.units or [runtime]):
                     if unit.plugin is None:
@@ -528,14 +530,17 @@ class PluginHost(MigrationMixin):
                             await timed(unit.plugin.stop(), self.clock, 10)
                     except (Exception, asyncio.CancelledError) as cleanup_error:
                         self._failure(runtime, "start_cleanup", cleanup_error)
-                runtime.status, runtime.registrations = "start_failed", ()
+                runtime.status, runtime.registrations = (
+                    ("disabled" if metadata_timeout else "start_failed"),
+                    (),
+                )
                 await self.emit(
                     companion_id,
                     "plugin.disabled",
                     {
                         "plugin_id": plugin_id,
                         "companion_id": companion_id,
-                        "reason": "start_failed",
+                        "reason": "version_record_timeout" if metadata_timeout else "start_failed",
                     },
                 )
 
@@ -543,7 +548,7 @@ class PluginHost(MigrationMixin):
             self._failure(runtime, "start", exc)
             if cancelled_during_cleanup:
                 raise asyncio.CancelledError
-            if isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, (asyncio.CancelledError, MetadataLockTimeout)):
                 raise
             return False
 
@@ -932,13 +937,23 @@ class PluginHost(MigrationMixin):
         return await self.invoke(companion_id, plugin_id, "schedule", schedule_id, tick)
 
     async def close(self):
-        for cid in sorted({key[0] for key in self.runtimes}):
-            plugins = [pid for companion, pid in self.runtimes if companion == cid]
+        result = {}
+        for cid in sorted(set(self.settings) | {key[0] for key in self.runtimes}):
+            plugins = sorted(
+                pid
+                for (companion, pid), runtime in self.runtimes.items()
+                if companion == cid
+                and runtime.status in {"active", "quiescing", "starting", "stopping"}
+            )
+            row = result[cid] = {"stopped": [], "not_stopped": {}}
             try:
                 with self.operations.hold(cid, plugins, "shutdown"):
-                    active = self._active(cid)
-                    loaded = {pid: self.runtimes[cid, pid].manifest for pid in active}
-                    for pid in reversed(resolve(loaded, active).order) if active else ():
+                    loaded = {pid: self.runtimes[cid, pid].manifest for pid in plugins}
+                    for pid in reversed(resolve(loaded, plugins).order) if plugins else ():
                         await self._stop(cid, pid, "shutdown")
+                        row["stopped"].append(pid)
             except OperationBusy as exc:
-                return exc.result(multiple=len(plugins) > 1)
+                row["not_stopped"] = {
+                    pid: exc.result(multiple=len(plugins) > 1) for pid in sorted(plugins)
+                }
+        return result

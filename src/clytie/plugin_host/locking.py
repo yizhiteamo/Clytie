@@ -15,6 +15,10 @@ _guard = threading.Lock()
 _held = {}
 
 
+class MetadataLockTimeout(RuntimeError):
+    """版本记录写锁等待超时；不是插件操作冲突或恢复失败。"""
+
+
 class OperationBusy(ValueError):
     def __init__(self, owner):
         self.owner = owner
@@ -167,8 +171,27 @@ class Operations:
         if self.owners.get((cid, pid)) != _task():
             raise RuntimeError("plugin operation requires its lock")
 
+    @contextmanager
     def metadata(self, cid):
         path = contained(
             self.home, self.home / "companions" / identifier(cid) / "plugin-versions.lock"
         )
-        return file_lock(path, {**self.executor, "operation": "version_record"}, self.log)
+        # 有上限的阻塞等待；版本读改写不跨 await，进程内不会等待同任务释放。
+        # Event.wait 使用 OS 等待原语，不使用应用时间或 time.sleep。
+        wake = threading.Event()
+        for attempt in range(501):
+            manager = file_lock(path, {**self.executor, "operation": "version_record"}, self.log)
+            try:
+                manager.__enter__()
+            except OperationBusy:
+                if attempt == 500:
+                    raise MetadataLockTimeout(
+                        "plugin version record write lock timed out"
+                    ) from None
+                wake.wait(0.01)
+            else:
+                try:
+                    yield
+                finally:
+                    manager.__exit__(None, None, None)
+                return

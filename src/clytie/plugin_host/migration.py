@@ -12,10 +12,10 @@ from clytie.sdk import CancelToken
 
 from .context import build_context
 from .dependencies import resolve
-from .locking import OperationBusy
+from .locking import MetadataLockTimeout, OperationBusy
 from .memory import bind_scene
 from .recovery import Cleanup, failed_status
-from .snapshots import atomic_write, canonical, contained, identifier
+from .snapshots import atomic_read, atomic_write, canonical, contained, identifier
 from .support import FileStorage, finish_cleanup
 
 
@@ -38,12 +38,11 @@ class MigrationMixin:
         )
 
     def _versions(self, companion_id):
-        with self.operations.metadata(companion_id):
-            return self._read_versions(companion_id)
+        return self._read_versions(companion_id)
 
     def _read_versions(self, companion_id):
         file = self._versions_path(companion_id)
-        values = json.loads(file.read_bytes()) if file.exists() else {}
+        values = json.loads(atomic_read(file)) if file.exists() else {}
         if not isinstance(values, dict):
             raise ValueError("invalid plugin version records")
         return values
@@ -65,7 +64,7 @@ class MigrationMixin:
         with self.operations.metadata(companion_id):
             versions = self._read_versions(companion_id)
             versions[plugin_id] = value
-            atomic_write(self._versions_path(companion_id), canonical(versions))
+            atomic_write(self._versions_path(companion_id), canonical(versions), retry_sharing=True)
 
     def _load_status(self, companion_id, manifest):
         if self.journals.path(companion_id, manifest.id).exists():
@@ -115,6 +114,8 @@ class MigrationMixin:
                     "existing version record forbids creating empty state",
                 )
         except (OSError, ValueError) as exc:
+            if not self.journals.path(cid, pid).exists():
+                raise
             return "recovery_incomplete", getattr(exc, "locations", type(exc).__name__)
         return None, None
 
@@ -291,10 +292,31 @@ class MigrationMixin:
         # 脚本完成才提交；记录原子更新是唯一提交点。此后任何错误都不恢复旧数据。
         try:
             self._record_version(cid, manifest)
+        except (OSError, ValueError, MetadataLockTimeout) as exc:
+            # 解锁诊断写入也可能在原子提交之后失败，按磁盘提交事实报告。
+            committed = self._version(cid, pid) == record["target_version"]
+            detail = (
+                "version committed; reload removes residual journal"
+                if committed
+                else "下次加载将按 4.3 节自动恢复"
+            )
+            reason = f"{type(exc).__name__}: {detail}"
+            migration.status = "migration_failed"
+            self.states.setdefault(cid, {})[pid] = {
+                "status": "migration_failed",
+                "step": "write_version_record",
+                "reason": reason,
+            }
+            self._failure(migration, "write_version_record", exc)
+            return {"outcome": "migration_failed", "snapshot": plan.snapshot, "reason": reason}
+        try:
             self.journals.clear(record, "migration_committed")
-        except (OSError, ValueError):
-            migration.status = "recovery_incomplete"
-            raise
+        except (OSError, ValueError) as exc:
+            # 版本已提交：下次加载只清理残留日志，绝不回滚新数据。
+            migration.status = "migration_failed"
+            reason = f"{type(exc).__name__}: version committed; reload removes residual journal"
+            self.states.setdefault(cid, {})[pid] = {"status": "migration_failed", "reason": reason}
+            return {"outcome": "migration_failed", "snapshot": plan.snapshot, "reason": reason}
         self.states.setdefault(cid, {}).pop(pid, None)
         base = contained(self.home, snapshot.parent)
         names = [p.name for p in base.glob("failed-*") if p.is_dir()]

@@ -13,7 +13,7 @@ from packaging.version import InvalidVersion, Version
 from clytie.sdk.immutable import freeze, thaw
 
 from .recovery import RecoveryError, inventory
-from .snapshots import SnapshotError, atomic_write, canonical, contained, identifier
+from .snapshots import SnapshotError, atomic_read, atomic_write, canonical, contained, identifier
 
 
 def valid_version(value):
@@ -68,16 +68,21 @@ def blocks_cleanup(home, directory):
 
 
 def recovery_status(home):
+    from .snapshots import UpgradeSnapshots
+
     root = Path(home).resolve()
+
+    def version(cid, pid):
+        path = contained(root, root / "companions" / cid / "plugin-versions.json")
+        return json.loads(atomic_read(path)).get(pid) if path.exists() else None
+
+    journals = Journals(UpgradeSnapshots(root, None, None), version, None)
     result = []
     for path in sorted((root / "companions").glob("*/plugin-recovery/*.json")):
         cid, pid = path.parent.parent.name, path.stem
         try:
-            value = json.loads(contained(root, path).read_bytes())
-            positions = {}
-            for name, item in value["locations"].items():
-                target = contained(root, root / item["path"])
-                positions[name] = {"path": item["path"], "exists": target.exists()}
+            value = journals._for_plan(cid, pid)
+            options = journals.action_options(value)
             result.append(
                 {
                     "level": "error",
@@ -86,9 +91,10 @@ def recovery_status(home):
                     "phase": value["phase"],
                     "step": value.get("step"),
                     "reason": value.get("error") or "recovery journal requires processing",
-                    "locations": positions,
+                    "locations": journals._positions(value),
                     "snapshot": value["snapshot"],
-                    "actions": ["retry_restore", "accept_current"],
+                    "actions": list(options),
+                    "action_details": options,
                 }
             )
         except (OSError, ValueError, KeyError, TypeError):
@@ -98,7 +104,7 @@ def recovery_status(home):
                     "companion_id": cid,
                     "plugin_id": pid,
                     "phase": "unknown",
-                    "reason": "unreadable recovery journal",
+                    "reason": "unreadable recovery metadata",
                     "journal": path.relative_to(root).as_posix(),
                     "actions": [],
                 }
@@ -358,13 +364,39 @@ class Journals:
             raise ValueError("no recovery journal")
         return record
 
+    def action_options(self, record):
+        """status 与计划共用的可用操作判断；只读，不生成计划或创建密钥。"""
+        cid, pid = record["companion_id"], record["plugin_id"]
+        current = self.version_reader(cid, pid)
+        intent = record.get("resolution")
+        damaged = record.get("resolution_only") or not valid_version(record.get("previous_version"))
+        options = {}
+        if not damaged:
+            try:
+                self.snapshots.read(self.home / record["snapshot"], cid, pid)
+            except (OSError, ValueError):
+                pass
+            else:
+                options["retry_restore"] = {"label": "重新恢复"}
+        if self._target(record, "state").is_dir():
+            options["accept_current"] = {
+                "label": "接受当前目录（需要输入数据版本）" if damaged else "接受当前目录",
+                "requires_data_version": bool(damaged),
+            }
+        if resolution_committed(intent, current):
+            return {key: value for key, value in options.items() if key == intent["operation"]}
+        return options
+
     def plan(self, cid, pid, operation, *, current_code, version_choice=None):
         if operation not in {"retry_restore", "accept_current"}:
             raise ValueError("unknown recovery action")
         record = self._for_plan(cid, pid)
         state = self._target(record, "state")
-        if operation == "accept_current" and not state.is_dir():
-            raise ValueError("private state missing; cannot accept current directory")
+        if operation not in self.action_options(record):
+            raise ValueError(
+                "recovery action unavailable; resume the same confirmed recovery action "
+                "or check damaged journal, private state and snapshot"
+            )
         current = self.version_reader(cid, pid)
         old = record.get("previous_version")
         target = record.get("target_version") or current_code
