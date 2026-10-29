@@ -67,7 +67,7 @@
 - 防重键：`(companion_id, channel_id, platform_message_id)`。`channel_id` 是逻辑 `account_ref`，所以每个平台账号自成一个命名空间；不同伴侣各自独立。`event_id` 的格式保持 SDK 已定的 `channel_id:platform_message_id`。
 - 平台插件必须保证 `platform_message_id` 在本账号内唯一并且稳定。
 - 平台本身没有消息 ID 的事件（通知、撤回等）：插件用平台提供的稳定字段合成 ID，写进 `event_id`。
-- 无法合成稳定 ID 时，插件把 `EventEnvelope.dedupable` 设为 `false`（SDK 新增字段，默认 `true`，见第 16 节）。这类事件不经过 `claim_inbound`，不写入 `dedupe` 和 `inbound`，不创建记录，只发布观察事件；**不能触发任务或回复**。
+- 无法合成稳定 ID 时，插件把 `EventEnvelope.dedupable` 设为 `false`（SDK 新增字段，默认 `true`，见第 16 节）。这类事件照常经过身份解析和输入过滤（隐私过滤不能绕过），然后不经过 `claim_inbound`，不写入 `dedupe` 和 `inbound`，不创建记录，只调用行为环节 `message_received`。不发布总线事件 `message.received`（它的负载需要 `trace_id`），不新增 SDK 事件。这类事件**不能触发任务或回复**。
 - 重复事件：不处理，计数，记 DEBUG 日志。重启后再次收到旧事件，同样按重复处理。
 - **防重键永久保留（用户已确认）**：只有编号、没有内容，不随第 13 节的内容清理删除。
 
@@ -96,6 +96,7 @@
 - 收据的 `intent_id` 与本次尝试不一致 → 拒绝这份收据，本次尝试标为 `unknown`，记 WARN 和审计。
 - 同一尝试重复收到收据：内容相同就忽略；内容冲突就保留第一份，其余写审计。
 - 平台插件抛出异常（而不是返回收据）→ 按 `unknown` 处理，因为无法证明没有发出。
+- **发送调用一直不返回**：截止点沿用已有时长，不新增配置项。拆分组内的发送用 `delivery.group_max_seconds`（从组的第一条开始计时），其他发送用 `delivery.retry.window_seconds`（从这个 intent 首次尝试开始计时）；安全停止属于 A4。到截止点后触发这次发送自己的取消令牌（组内用组的独立令牌），再等待 `tasks.cancel_grace_seconds`。仍没有收据，就把这次尝试记为 `unknown`，不得记为 `failed`，不重发。之后收到的收据按第 6.1 节迟到收据的规则处理。
 - A3.1 不提供"向平台查询是否已送达"的接口。
 
 ## 6. 交付状态与有限重发
@@ -323,11 +324,27 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 - 生成后解密到临时目录逐文件校验哈希，校验失败就不迁移。
 - 保留：每个伴侣只保留最近 2 份账本迁移快照，更早的在下一次迁移成功后逐个文件删除。设置了 `ledger.content_retention_days` 时，生成时间超过保留期的快照也删除。删除只针对明确的快照目录，逐个文件进行，不批量删除。
 - 账本迁移快照不参与 data-and-backup 常规备份的 30 天 / 每周 / 每月保留规则。
+- **过期检查的时机**：只在伴侣进程取得锁、并且处理完迁移日志之后执行，与第 13.2 节的账本内容清理同时进行。只要存在迁移日志伴侣就不启动，所以清理不会删掉日志正在引用的恢复来源。伴侣被阻止期间，快照和账本过期内容都不清理。到期时间按快照生成时间计算。
+
+**失败现场（用户已确认：加密另存）**
+- 从快照恢复**之前**，先把当前账本文件（不含 `.lock` 和 `.migration.json`）用实例备份密钥加密，保存到 `backups/ledger/<cid>/failed-<从版本>-<到版本>-<时间>/`，满足 AGENTS.md 3.3"恢复之前先自动快照"。
+- 失败现场解密校验通过后，才开始恢复。保存或校验失败时不恢复：日志保持当前阶段并记录原因，伴侣不启动，status 显示错误级提醒。
+- 失败现场的路径写入迁移日志，并在 status 中显示。
+- 不计入"最近 2 份"，不会挤掉有效的迁移前快照。
+- 和迁移前快照一样服从 `ledger.content_retention_days`（按生成时间），执行时机同上。没有设置保留期时一直保留，由用户手动删除。
 
 **迁移日志与提交点**
-- 迁移日志：`companions/<cid>/ledger/.migration.json`，记录从版本、到版本、快照路径、阶段、执行者、错误信息。
-- 阶段：`migrating`（正在迁移）→ `restoring`（失败后正在从快照恢复）→ `failed`（已恢复到旧版本，阻止自动重试）。
+- 迁移日志：`companions/<cid>/ledger/.migration.json`，记录从版本、到版本、快照路径、失败现场路径、阶段、执行者、错误信息。
+- 阶段：`migrating`（正在迁移）→ `restoring`（失败后正在保存失败现场并从快照恢复）→ `failed`（已恢复到旧版本，阻止自动重试）。
+- 写入顺序：快照校验通过 → 原子写入日志（先写临时文件再替换，阶段 `migrating`）→ 第一个迁移事务。日志写失败就不迁移。
 - 提交点：账本内的模式版本号，在最后一个迁移事务中写入。写入成功后删除日志。
+- 运行中迁移失败或被取消时，只能进入下表已有的状态（`restoring` → 保存失败现场 → 恢复 → `failed`），不新增阶段。
+
+**恢复时的保护**
+- 恢复全程持有 `ledger/.lock`。
+- 不整体改名或替换 `ledger/` 目录：锁文件在目录内，整体改名后，新进程可能拿到另一把锁。
+- `.lock` 和 `.migration.json` 不移动、不覆盖、不删除。
+- 按快照清单逐个文件写回。迁移新增的文件（快照中没有的），在已存入失败现场之后逐个删除，不批量删除。
 
 **启动时发现迁移日志**
 
@@ -366,6 +383,7 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 | config-spec §3 | 新增或更新下表字段 |
 | data-and-backup §1 目录树 | 加入 `backups/ledger/<cid>/`（账本迁移快照）和 `companions/<cid>/ledger/.migration.json` |
 | data-and-backup §4 | 写明账本迁移快照的加密、存放位置和保留规则（第 14 节），并注明它不参与常规备份的保留规则 |
+| data-and-backup §4 / §4.1 | 加入失败现场 `backups/ledger/<cid>/failed-…/` 的加密与保留（第 14 节）；§4.1 的密钥适用范围列出账本迁移快照和失败现场；删除 §4 中照抄带来的自引用"见 data-and-backup §4" |
 
 **config-spec 字段**（替换现有的"未规定"）：
 
