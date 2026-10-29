@@ -211,6 +211,37 @@ class Kernel:
             self.clock.sleep_until(datetime.fromisoformat(r["deadline"]))
         )
         cancelled = asyncio.create_task(token.wait())
+        settled = False
+        task_cancelled = False
+
+        def cancel_invocation():
+            nonlocal settled
+            if settled:
+                return None
+            settled = True
+            if not task.done():
+                task.cancel()
+            result = ToolResult(
+                call_id=call.call_id,
+                status="cancelled",
+                content="",
+                data={},
+                error={"code": token.reason or "cancelled", "message": ""},
+            )
+            self.ledger.finish_invocation(inv["invocation_id"], result)
+
+            async def late():
+                try:
+                    value = await task
+                except (Exception, asyncio.CancelledError):
+                    return
+                self.ledger.finish_invocation(inv["invocation_id"], value)
+
+            watcher = background(late())
+            self.delivery.background.add(watcher)
+            watcher.add_done_callback(self.delivery.background.discard)
+            return result
+
         try:
             done, _ = await asyncio.wait(
                 {task, deadline, cancelled}, return_when=asyncio.FIRST_COMPLETED
@@ -222,27 +253,7 @@ class Kernel:
                 try:
                     done, _ = await asyncio.wait({task, grace}, return_when=asyncio.FIRST_COMPLETED)
                     if task not in done:
-                        task.cancel()
-                        result = ToolResult(
-                            call_id=call.call_id,
-                            status="cancelled",
-                            content="",
-                            data={},
-                            error={"code": token.reason or "cancelled", "message": ""},
-                        )
-                        self.ledger.finish_invocation(inv["invocation_id"], result)
-
-                        async def late():
-                            try:
-                                value = await task
-                            except (Exception, asyncio.CancelledError):
-                                return
-                            self.ledger.finish_invocation(inv["invocation_id"], value)
-
-                        watcher = background(late())
-                        self.delivery.background.add(watcher)
-                        watcher.add_done_callback(self.delivery.background.discard)
-                        return result
+                        return cancel_invocation()
                 finally:
                     grace.cancel()
                     await asyncio.gather(grace, return_exceptions=True)
@@ -250,6 +261,7 @@ class Kernel:
                 result = task.result()
             except asyncio.CancelledError:
                 if not token.cancelled:
+                    task_cancelled = True
                     raise
                 result = ToolResult(
                     call_id=call.call_id,
@@ -267,12 +279,22 @@ class Kernel:
                     error={"code": type(exc).__name__, "message": ""},
                 )
             self.ledger.finish_invocation(inv["invocation_id"], result)
+            settled = True
             return result
+        except asyncio.CancelledError:
+            # task.result() 的取消仍由原有分支处理；这里只收尾外部取消。
+            if not task_cancelled:
+                cancel_invocation()
+            raise
         finally:
             self.tasks.pop(trace, None)
             deadline.cancel()
             cancelled.cancel()
-            await asyncio.gather(deadline, cancelled, return_exceptions=True)
+            try:
+                await asyncio.gather(deadline, cancelled, return_exceptions=True)
+            except asyncio.CancelledError:
+                cancel_invocation()
+                raise
 
     def _existing(self, inv):
         r = self.ledger.get("record", inv["trace_id"])
