@@ -13,6 +13,7 @@ def test_private_scene_configuration_is_validated(tmp_path, problem):
     home, repo, instance, companion = make_home(tmp_path)
     scene = problem if problem in {"public_group", "stranger_private", "undeclared"} else "family"
     companion["memory"] = {"private_scenes": ["owner_private", scene]}
+    companion["names"]["internal_scenes"] = ["owner_private", scene]
     if scene == "family":
         instance["scenes"].append(scene)
         companion["persona"]["scenes"][scene] = ["base"]

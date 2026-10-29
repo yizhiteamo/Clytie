@@ -21,7 +21,9 @@ class ConversationQueue:
 
     def _pump(self):
         def priority(item):
-            owner = item[3].role == "owner" or self.clock.monotonic() - item[1] > 60
+            owner = (
+                item[3] is not None and item[3].role == "owner"
+            ) or self.clock.monotonic() - item[1] > 60
             return (not owner, item[0])
 
         self.pending.sort(key=priority)

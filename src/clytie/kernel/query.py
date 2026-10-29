@@ -104,6 +104,8 @@ def task_view(ledger, record, *, full=False):
         )
     }
     task.update(
+        model_calls=record.get("model_calls", 0),
+        tool_rounds=record.get("tool_rounds", 0),
         timings=record_timings(record),
         parent_task_id=parent["task_id"] if parent else None,
         child_task_ids=[

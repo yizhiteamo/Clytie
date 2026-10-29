@@ -494,7 +494,7 @@ class CompanionState(SDKModel):
 
 class ContextRequest(SDKModel):
     scene: str
-    actor: Actor
+    actor: Actor | None = None
     budget_chars: int
 
 

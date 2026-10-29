@@ -372,7 +372,7 @@ async def test_running_context_operations_propagate_cancellation(tmp_path, opera
             sample_request(clock), CancelToken(), purpose="contract"
         ),
         "http": lambda: ctx.http.request("GET", "https://example.invalid/"),
-        "proactive": lambda: ctx.proactive.submit("test_group", [], reason="contract"),
+        "proactive": lambda: ctx.proactive.submit("test_group", parts=[], reason="contract"),
         "subprocess": lambda: ctx.subprocess.run(["fake"], timeout_s=1),
     }
     await assert_task_cancellation(operations[operation], started=entered.wait())

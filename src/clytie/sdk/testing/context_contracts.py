@@ -220,8 +220,19 @@ async def assert_http_contract(http):
 
 
 async def assert_proactive_contract(proactive, parts):
-    assert isinstance(await proactive.submit("test_group", parts, reason="contract"), str)
-    await assert_task_cancellation(lambda: proactive.submit("test_group", parts, reason="contract"))
+    assert isinstance(
+        await proactive.submit("test_group", topic="fictional topic", reason="contract"), str
+    )
+    await assert_task_cancellation(
+        lambda: proactive.submit("test_group", topic="fictional topic", reason="contract")
+    )
+    for kwargs in ({}, {"topic": "topic", "parts": []}, {"parts": parts}):
+        try:
+            await proactive.submit("test_group", reason="contract", **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid proactive submission accepted")
 
 
 async def assert_subprocess_contract(process):

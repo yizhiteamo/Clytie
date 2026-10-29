@@ -1,5 +1,6 @@
 """Local, read-only status facade used by the A1 command-line shell."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,8 +14,26 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
     from clytie.plugin_host.recovery import failed_status
 
     report = load_home(home, repo_root=repo_root)
+    notices = []
+    for companion in report.companions:
+        path = Path(report.home) / "companions" / companion["id"] / "boundary/state.json"
+        if path.is_file():
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+                for warning in state.get("warnings", []):
+                    if warning in {
+                        "boundary_notifier_unavailable",
+                        "boundary_notification_failed",
+                        "task_card_private_name",
+                    }:
+                        notices.append({"companion_id": companion["id"], "code": warning})
+            except (OSError, ValueError, AttributeError):
+                notices.append(
+                    {"companion_id": companion["id"], "code": "boundary_state_unreadable"}
+                )
     return replace(
         report,
+        dialogue_notices=tuple(notices),
         failed_plugin_state=failed_status(report.home),
         ledger_errors=tuple(migration_status(report.home)),
         ledger_notices=tuple(snapshot_notices(report.home)),

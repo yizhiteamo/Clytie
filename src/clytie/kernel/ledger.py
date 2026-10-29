@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .projection import redact, visible
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXEC_TERMINAL = {"ok", "error", "denied", "cancelled", "interrupted"}
 INTENT_TERMINAL = {"sent", "failed", "unknown"}
 TABLES = {"inbound", "record", "invocation", "intent", "attempt", "dedupe"}
@@ -49,6 +49,8 @@ class Ledger:
                 raise LedgerError("schema_too_new", "ledger schema newer than code")
             if readonly and version < SCHEMA_VERSION:
                 raise LedgerError("ledger_unavailable", "迁移中或待迁移")
+            if not readonly and 0 < version < SCHEMA_VERSION:
+                raise LedgerError("ledger_unavailable", "migration requires LedgerRuntime")
             if not readonly and version == 0:
                 with self.db:
                     for table in sorted(TABLES):
@@ -131,16 +133,20 @@ class Ledger:
             self.put("inbound", event.event_id, data)
         return event.event_id, True
 
-    def open_record(self, *, event_id=None, invocation=None, parent_trace_id=None):
+    def open_record(
+        self, *, event_id=None, invocation=None, parent_trace_id=None, conversation=None
+    ):
         with self.transaction():
             event = self.get("inbound", event_id) if event_id else None
             if event_id and event is None:
                 raise ValueError("unknown inbound")
             if event and event["state"] != "received":
                 raise ValueError("inbound already consumed")
-            if not event and invocation is None:
+            if not event and invocation is None and conversation is None:
                 raise ValueError("explicit invocation required without inbound")
-            source = event["conversation"] if event else dump(invocation.conversation)
+            source = (
+                event["conversation"] if event else dump(conversation or invocation.conversation)
+            )
             actor = (
                 event["message"]["sender"]
                 if event and event.get("message")
@@ -177,13 +183,23 @@ class Ledger:
                 self.put("inbound", event_id, event)
         return record
 
-    def ignore(self, event_id):
+    def ignore(self, event_id, reason=None):
         with self.transaction():
             event = self.get("inbound", event_id)
             if event["state"] != "received":
                 raise ValueError("inbound already consumed")
             event["state"] = "ignored"
+            event["reason"] = reason
             self.put("inbound", event_id, event)
+
+    def merge(self, event_ids, trace):
+        with self.transaction():
+            for event_id in event_ids:
+                event = self.get("inbound", event_id)
+                if event["state"] != "received":
+                    raise ValueError("inbound already consumed")
+                event.update(state="merged", merged_into=trace)
+                self.put("inbound", event_id, event)
 
     def find_invocation(self, key):
         encoded = encode(key)
@@ -497,6 +513,8 @@ class Ledger:
                     changed += 1
             for inv in self.rows("invocation"):
                 dirty = False
+                if expired(inv["claimed_at"]) and inv.get("plan") is not None:
+                    inv["plan"], dirty = None, True
                 if expired(inv["claimed_at"]) and inv["args"] is not None:
                     inv["args"], dirty = None, True
                 if expired(inv["finished_at"]) and inv["result"] is not None:
@@ -521,7 +539,7 @@ class Ledger:
                 audit = json.loads(raw)
                 if not expired(audit["at"]) or audit.get("content") is None:
                     continue
-                if audit["kind"] == "late_result":
+                if audit["kind"] in {"late_result", "model.late_result"}:
                     audit["content"] = None
                 elif (
                     audit["kind"] in {"late_receipt", "conflicting_receipt"}

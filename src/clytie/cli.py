@@ -88,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("账本迁移阻止 [error]：" + json.dumps(alert, ensure_ascii=False))
         for notice in result["ledger_notices"]:
             print("账本快照保留提示 [warning]：" + json.dumps(notice, ensure_ascii=False))
+        for notice in result["dialogue_notices"]:
+            print("对话配置提示 [warning]：" + json.dumps(notice, ensure_ascii=False))
         for alert in retained.get("recovery_errors", []):
             print("恢复未完成 [error]：" + json.dumps(alert, ensure_ascii=False))
         for entry in retained.get("directories", []):

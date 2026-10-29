@@ -297,6 +297,9 @@ async def assert_context_contributor_contract(contributor: Any, request: Context
     if result is not None:
         assert_roundtrip(result)
     await assert_task_cancellation(lambda: contributor.contribute(request))
+    proactive = request.model_copy(update={"actor": None})
+    result = await contributor.contribute(proactive)
+    assert result is None or isinstance(result, ContextSection)
 
 
 async def assert_scheduled_handler_contract(handler: Any, tick: Tick) -> None:

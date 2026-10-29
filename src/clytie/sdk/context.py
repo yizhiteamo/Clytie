@@ -116,8 +116,26 @@ class Http(Protocol):
 
 class Proactive(Protocol):
     async def submit(
-        self, conversation_id: str, parts: list[MessagePart], *, reason: str
+        self,
+        conversation_id: str,
+        *,
+        topic: str | None = None,
+        material: JsonObject | None = None,
+        parts: list[MessagePart] | None = None,
+        reason: str,
     ) -> str: ...
+
+
+def validate_proactive(*, topic=None, material=None, parts=None):
+    """共享 SDK 参数约束；目标会话与场景仍由本体验证。"""
+    if (topic is None) == (parts is None):
+        raise ValueError("provide exactly one of topic or parts")
+    if topic is not None and not isinstance(topic, str):
+        raise ValueError("topic must be text")
+    if parts is not None and any(
+        p.type not in {"sticker", "image", "audio", "video", "file"} for p in parts
+    ):
+        raise ValueError("text requires topic mode")
 
 
 class Subprocess(Protocol):

@@ -21,6 +21,12 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from referencing import Registry
 from referencing.exceptions import NoSuchResource, Unresolvable
 
+
+def compile_input_pattern(pattern):
+    """Preserve regex escapes; match normalized input case-insensitively."""
+    return re.compile(pattern, re.IGNORECASE)
+
+
 _MISSING = object()
 
 
@@ -94,6 +100,7 @@ class HomeReport:
     failed_plugin_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     ledger_errors: tuple[Mapping[str, Any], ...] = ()
     ledger_notices: tuple[Mapping[str, Any], ...] = ()
+    dialogue_notices: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -107,6 +114,7 @@ class HomeReport:
         return {
             "ledger_errors": thaw(self.ledger_errors),
             "ledger_notices": thaw(self.ledger_notices),
+            "dialogue_notices": thaw(self.dialogue_notices),
             "home": self.home,
             "exists": self.exists,
             "valid": self.valid,
@@ -602,6 +610,11 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         if data.get("id") != companion_id:
             reader.issue(file, ("id",), f"directory id {companion_id}", data.get("id"))
         for section in (
+            "names",
+            "agent",
+            "replies",
+            "outbound",
+            "protection",
             "boundary",
             "context",
             "memory",
@@ -631,8 +644,26 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             )
         memory = data.get("memory", {})
         private_scenes = memory.get("private_scenes", []) if isinstance(memory, dict) else []
-        for index, scene in enumerate(private_scenes if isinstance(private_scenes, list) else []):
-            position = ("memory", "private_scenes", index)
+        names = data.get("names") if isinstance(data.get("names"), dict) else {}
+        internal_scenes = names.get("internal_scenes", [])
+        scene_fields = [
+            ("memory", "private_scenes", private_scenes),
+            ("names", "internal_scenes", internal_scenes),
+        ]
+        positions = [
+            (section, key, index, scene)
+            for section, key, values in scene_fields
+            if isinstance(values, list)
+            for index, scene in enumerate(values)
+        ]
+        for section, key, index, scene in positions:
+            position = (section, key, index)
+            if (
+                section == "memory"
+                and isinstance(internal_scenes, list)
+                and scene not in internal_scenes
+            ):
+                reader.issue(file, position, "subset of names.internal_scenes", scene)
             if (
                 not isinstance(scene, str)
                 or scene not in scenes
@@ -656,7 +687,29 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                         "every conversation declares members_expected containing only owner/companions",
                         scene,
                     )
-        names = data.get("names") if isinstance(data.get("names"), dict) else {}
+        protection = data.get("protection", {})
+        if isinstance(protection, dict):
+            enter, leave = protection.get("enter_ratio"), protection.get("exit_ratio")
+            if (
+                isinstance(enter, (int, float))
+                and isinstance(leave, (int, float))
+                and leave <= enter
+            ):
+                reader.issue(file, ("protection", "exit_ratio"), "greater than enter_ratio", leave)
+        boundary = data.get("boundary", {})
+        filters = boundary.get("input_filter", {}) if isinstance(boundary, dict) else {}
+        patterns = filters.get("patterns", []) if isinstance(filters, dict) else []
+        for index, pattern in enumerate(patterns if isinstance(patterns, list) else []):
+            if isinstance(pattern, str):
+                try:
+                    compile_input_pattern(pattern)
+                except re.error:
+                    reader.issue(
+                        file,
+                        ("boundary", "input_filter", "patterns", index),
+                        "compilable regular expression",
+                        pattern,
+                    )
         if "forbidden_names" not in data and isinstance(names.get("internal"), str):
             data["forbidden_names"] = [names["internal"]]
         for scene in _entries(names.get("external")):

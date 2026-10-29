@@ -29,6 +29,16 @@ from .ledger import SCHEMA_VERSION, Ledger, LedgerError
 PROTECTED = {".lock", ".migration.json"}
 
 
+async def migrate_dialogue(db, cancel):
+    """旧 JSON 入站记录补齐合并与忽略原因字段；由运行锁/快照事务包装。"""
+    for key, raw in db.execute("SELECT id, data FROM inbound").fetchall():
+        cancel.raise_if_cancelled()
+        value = json.loads(raw)
+        value.setdefault("merged_into", None)
+        value.setdefault("reason", None)
+        db.execute("UPDATE inbound SET data=? WHERE id=?", (json.dumps(value), key))
+
+
 class LedgerSnapshots:
     def __init__(self, home, cid, clock, log):
         self.home, self.cid, self.clock, self.log = (
@@ -214,7 +224,7 @@ class LedgerRuntime:
         self.home, self.cid, self.clock = Path(home).resolve(), identifier(cid), clock
         self.log, self.migrations, self.retention_days = (
             log or HostLog(),
-            migrations or {},
+            {2: migrate_dialogue, **(migrations or {})},
             retention_days,
         )
         self.snapshots = LedgerSnapshots(self.home, cid, clock, self.log)
@@ -274,9 +284,19 @@ class LedgerRuntime:
                         current = None
                     if current == record["to_version"]:
                         self.journal.unlink()
-                        self.ledger = Ledger(self.path, self.cid, self.clock)
-                        with self.ledger.transaction():
-                            self.ledger.audit("migration_committed_journal_removed")
+                        with sqlite3.connect(self.path) as db:
+                            db.execute(
+                                "INSERT INTO audit(data) VALUES (?)",
+                                (
+                                    json.dumps(
+                                        {
+                                            "kind": "migration_committed_journal_removed",
+                                            "trace_id": None,
+                                            "at": self.clock.now().isoformat(),
+                                        }
+                                    ),
+                                ),
+                            )
                     elif current == record["from_version"]:
                         try:
                             self.restore(record)

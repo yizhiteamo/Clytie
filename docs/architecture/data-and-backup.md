@@ -17,6 +17,8 @@ Clytie-home/
 │  ├─ memory/                 记忆库及记忆资产
 │  ├─ ledger/                 统一任务账本
 │  │  └─ .migration.json     账本迁移日志
+│  ├─ boundary/
+│  │  └─ state.json          边界计数与暂停状态（原子替换，随伴侣目录备份）
 │  ├─ plugin-data/<plugin-id>/
 │  └─ logs/
 ├─ shared/assets/             内容哈希资产库
