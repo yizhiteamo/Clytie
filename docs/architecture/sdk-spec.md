@@ -63,6 +63,7 @@
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `event_id` | str | 去重键 |
+| `dedupable` | bool | 默认 `true`；无法合成稳定 ID 时为 `false`，只能观察，不能触发任务或回复（见 `kernel-spec.md` 第 3 节） |
 | `type` | str | `conversation.message`、`conversation.notice`、`conversation.request`（好友/入群申请）；`content.*` 预留 |
 | `companion_id` | str | 接收这条事件的伴侣 |
 | `channel_id` | str | |
@@ -235,6 +236,7 @@ async react(intent: DeliveryIntent, cancel) -> Receipt
 features() -> ChannelFeatures
 ```
 `ChannelFeatures`：`max_text_chars`、`supports_react`、`supports_quote`、`supports_card`、`media_limits: dict`。
+`media_limits` 的键：`{image|audio|video|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持。
 平台插件负责把平台账号映射为 `Actor` 和 `Conversation`：映射表由本体通过 `ctx` 提供（来自实例配置），插件不自己判断身份。
 
 ### 5.2 model
@@ -447,6 +449,8 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 ```
 
 - `channel`、`model`、`embedder`、`notifier` 每个插件最多一个；`tools` 可以有多个。
+- 工具清单新增可选字段 `timeout_s`（正整数，秒）；截止时间计算与实例上限见 `kernel-spec.md` 第 8 节。
+- 工具参数 Schema 支持 `"x-clytie-sensitive": true` 注解：带注解的属性写入账本前替换为 `"[redacted]"`；适用于任意层级，包括 `properties`、`items` 和嵌套对象；`oneOf` / `anyOf` / `allOf` 的任一分支把某属性标为敏感，就按敏感处理（见 `kernel-spec.md` 第 13.2 节）。
 - `audience` 取值 `owner`、`peer`、`member`、`stranger`；`risk` 取值 `low`、`medium`、`high`；`delivery` 取值 `text`、`image`、`audio`、`video`、`file`、`card`。
 - `schedule.days`：ISO 星期编号，1 = 星期一 … 7 = 星期日；省略表示每天。`at` 按实例配置的时区解释。节假日判断不属于调度器，由需要的插件自己处理。
 - `services[].handler` 签名：`async (method: str, args: JsonObject) -> JsonObject`。

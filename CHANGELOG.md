@@ -1,5 +1,12 @@
 # 变更记录
 
+## SDK 0.x 次版本变更（A3.1 规格，尚未实现或发布）
+
+- `EventEnvelope` 新增 `dedupable: bool`，默认 `true`；不可防重事件只能观察，不触发任务或回复。
+- 工具清单新增可选正整数秒 `timeout_s`，参数 Schema 支持 `x-clytie-sensitive` 注解。
+- 明确 `ChannelFeatures.media_limits` 的媒体类型、`max_bytes`、`formats` 编码，未列出的类型视为不支持。
+- 本次仅记录 `kernel-spec.md` 第 16 节的 SDK 0.x 次版本变更；SDK 类型、清单 Schema 和契约测试在 A3.1 实现时同步，不在本规格 PR 中变更运行代码。
+
 ## 0.3.0（A2）
 
 - 插件宿主、四个参考插件、确定的官方索引、加密升级快照。
