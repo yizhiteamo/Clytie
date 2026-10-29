@@ -14,7 +14,7 @@
 
 | 实体 | 主键 | 关键字段 |
 |---|---|---|
-| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|dropped_on_restart` |
+| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|merged\|dropped_on_restart`、`merged_into = trace_id`（消息合并，见 `agent-spec.md` §2）；`ignored` 原因字段取值包括 `boundary_paused` |
 | `record` 处理记录 | `trace_id` | `source_event_id?`（主动消息、定时任务为空）、`conversation_id`、`requester?`、`kind: chat\|task`、`task_id?`、`tool?`、`parent_trace_id?`、`scene`、`exec_status`、`delivery_status`、`deadline`、各阶段耗时、`created_at` |
 | `invocation` 能力调用 | `invocation_id` | `trace_id`、`plugin_id`、`tool`、`idem_key`、`args`、`status`、`result`、`error?`、`asset_ids`、开始/结束时间 |
 | `intent` 待交付 | `intent_id` | `trace_id`、`kind`、`parts`、`target?`、`split?`、`not_before?`、`status`（第 6 节） |
@@ -190,7 +190,7 @@
 - 执行已成功、交付还没结束：可以取消。执行状态保持 `ok`，不改写；还没开始的 intent 和还没开始的组标为 `failed`（`cancelled_before_send`）；已开始的组按第 7 节发完。这次取消写审计。
 - 取消之后，不再为这条记录登记新的 intent。
 
-文本识别（"取消""停"）在 A3.2 接入，规则在 A3.2 规格中另写。A3.1 的内部入口已经支持 `reply_to`，平台插件把引用信息放在 `Message.reply_to` 中传入。
+文本识别（"取消""停"）在 A3.2 接入，规则见 `agent-spec.md` 第 6 节。A3.1 的内部入口已经支持 `reply_to`，平台插件把引用信息放在 `Message.reply_to` 中传入。
 
 **截止时间**：
 - task 记录：升级为 task 时计算一次，之后不变：`deadline = 升级时间 + 工具的 timeout_s`（不含之前的排队时间）。工具没有声明时，用 `tasks.default_deadline_seconds`。两者都不能超过实例配置的 `limits.max_task_seconds`：工具声明超过上限时截断到上限并记 WARN；伴侣配置超过上限属于配置错误，校验时拒绝。

@@ -37,7 +37,7 @@
 |---|---|---|
 | `schema_version` | 是 | `1` |
 | `id` | 是 | 与目录名一致 |
-| `names` | 是 | `{internal: str, external: {scene: str}?}`：对内名字、各场景的对外显示名 |
+| `names` | 是 | `{internal: str, external: {scene: str}?, internal_scenes: [scene]?}`：对内名字、各场景的对外显示名；对内场景默认 `[owner_private]` |
 | `forbidden_names` | 否 | 对外场景中不允许出现的名字（出站检查使用），默认包含 `internal` |
 | `model` | 是 | `{plugin: id, config: {...}}` |
 | `channels` | 是 | `[{plugin: id, account: 账号引用, config: {...}}]` |
@@ -52,6 +52,24 @@
 | `tasks` | 否 | 任务取消、截止时间与并发设置，子字段见下 |
 | `ledger` | 否 | 账本内容保留设置，子字段见下 |
 | `task_reactions` | 否 | 任务状态回应设置（kernel-spec §13.5），子字段见下 |
+
+**A3.2 新配置**（按 `agent-spec.md` 第 14 节同步）：
+
+| 字段 | 类型 | 默认值 | 范围 |
+|---|---|---|---|
+| `names.internal_scenes` | 场景名列表 | `[owner_private]` | 见下方校验规则 |
+| `agent.max_tool_rounds` | 整数 | 4 | 1–8 |
+| `agent.model_call_seconds` | 整数 | 120 | 10–600 |
+| `replies.fallback_private` | 字符串 | `"刚刚没接上，可以再说一次吗？"` | 0–200 字；空字符串表示不发 |
+| `tasks.cancel_words` | 字符串列表 | `["取消", "停", "停止", "停下", "别做了"]` | 1–20 项，每项 1–10 字 |
+| `boundary.pause_hours` | 整数 | 24 | 1–168 |
+| `boundary.input_filter.words` | 字符串列表 | 空 | 每项 1–100 字 |
+| `boundary.input_filter.patterns` | 正则列表 | 空 | 每项不超过 200 字符，必须能编译 |
+| `outbound.style_words` | 字符串列表 | 空 | 每项 1–50 字；追加到本体内置清单 |
+| `protection.enter_ratio` | 数字 | 0.2 | 0–1 |
+| `protection.exit_ratio` | 数字 | 0.3 | 0–1，必须大于 `enter_ratio` |
+
+`names.internal_scenes` 只决定名字和称呼。不在其中的场景都是对外场景。校验规则与 `memory.private_scenes` 相同：`public_group`、`stranger_private` 不能加入；加入的其他场景，映射到它的每个会话都必须声明 `members_expected`，且成员只能是主人和本部署的伴侣。`memory.private_scenes` 必须是 `internal_scenes` 的子集，否则配置无效。私密记忆、人设私密段落、账本内容的可见范围仍由 `memory.private_scenes` 决定，不受这个开关影响（`agent-spec.md` §9.1）。
 
 **A3.1 新配置**（按 `kernel-spec.md` 第 16 节同步）：
 
@@ -90,6 +108,7 @@
 | `private_scenes` | 场景名列表（`[owner_private]`）：哪些场景可以读取私密记忆 |
 
 `private_scenes` 的校验规则（不满足时配置无效）：
+- 必须是 `names.internal_scenes` 的子集（`agent-spec.md` §9.1）。
 - `public_group`、`stranger_private` 永远不能加入。
 - 加入的其他场景，实例配置中映射到该场景的每个会话都必须声明 `members_expected`，并且成员只能是主人和本部署的伴侣。也就是说，只有"在场的都是自己人"的场景才能开启私密记忆。
 - 这个设置只放宽"能读到私密记忆"，不影响出站检查：对外场景仍然拦截私密内容。

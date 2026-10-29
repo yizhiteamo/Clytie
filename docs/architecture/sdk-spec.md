@@ -424,6 +424,8 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 
 ### 7.7 清单中的扩展点编码
 
+工具名不能以 `core_` 开头，该前缀保留给本体工具；清单校验拒绝此前缀（`agent-spec.md` §3.3）。
+
 ```json
 "contributes": {
   "channel":  {"factory": "create_channel", "platform": "onebot-v11"},
