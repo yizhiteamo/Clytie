@@ -796,6 +796,26 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 if isinstance(channel, dict)
             )
         plugin_settings = _entries(data.get("plugins"))
+        for key, point in (("embedder", "embedder"), ("reranker", "memory.reranker")):
+            memory_plugin = memory.get(key) if isinstance(memory, dict) else None
+            if memory_plugin is None:
+                continue
+            position = ("memory", key)
+            setting = (
+                plugin_settings.get(memory_plugin, {}) if isinstance(memory_plugin, str) else {}
+            )
+            if not isinstance(setting, dict) or setting.get("enabled") is not True:
+                reader.issue(file, position, "memory plugin explicitly enabled", memory_plugin)
+            plugin, _, state = manifest(memory_plugin, file, position)
+            if state == "found" and plugin is not None:
+                contributes = plugin.get("contributes", {})
+                declared = (
+                    contributes.get("embedder")
+                    if key == "embedder"
+                    else contributes.get("memory", {}).get("reranker")
+                )
+                if not declared:
+                    reader.issue(file, position, f"plugin implements {point}", memory_plugin)
         role_plugins = {ref[0] for ref in references if isinstance(ref[0], str)}
         references.extend(
             (key, ("plugins", key), value.get("config"), "plugins")

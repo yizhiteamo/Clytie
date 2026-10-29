@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .cancellation import CancelToken
-from .types import MemoryHit, MemoryQuery, MemoryRecord
+from .types import ImportCandidate, MemoryHit, MemoryQuery, MemoryRecord
 
 
 class CandidateReader(Protocol):
@@ -41,7 +41,14 @@ class Retriever(Protocol):
 class Importer(Protocol):
     def detect(self, source: Path) -> bool: ...
 
-    def read(self, source: Path, cancel: CancelToken) -> AsyncIterator[MemoryRecord]: ...
+    def read(self, source: Path, cancel: CancelToken) -> AsyncIterator[ImportCandidate]: ...
+
+
+@runtime_checkable
+class Reranker(Protocol):
+    async def rerank(
+        self, query: str, records: list[MemoryRecord], cancel: CancelToken
+    ) -> list[float]: ...
 
 
 @runtime_checkable

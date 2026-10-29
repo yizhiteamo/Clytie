@@ -12,6 +12,7 @@ from .surface import surface
 @dataclass
 class _Scope:
     scene: str
+    conversation_id: str | None = None
     active: bool = True
 
 
@@ -19,8 +20,8 @@ _current: ContextVar[_Scope | None] = ContextVar("plugin_call_scene", default=No
 
 
 @contextmanager
-def bind_scene(scene="public_group"):
-    scope = _Scope(scene)
+def bind_scene(scene="public_group", conversation_id=None):
+    scope = _Scope(scene, conversation_id)
     token = _current.set(scope)
     try:
         yield
@@ -34,11 +35,18 @@ def current_scene():
     return scope.scene if scope is not None and scope.active else "public_group"
 
 
+def current_conversation():
+    scope = _current.get()
+    return scope.conversation_id if scope is not None and scope.active else None
+
+
 class _MemoryBase:
     __slots__ = ("_backend", "_permissions", "_private_scenes")
 
     def __init__(self, backend, permissions, private_scenes):
-        self._backend = backend
+        self._backend = (
+            backend.for_permissions(permissions) if hasattr(backend, "for_permissions") else backend
+        )
         self._permissions = frozenset(permissions)
         self._private_scenes = frozenset(private_scenes)
 
@@ -84,12 +92,14 @@ class ReadWriteMemory(ReadMemory, WriteMemory):
     __slots__ = ()
 
     async def revise(self, record_id, expected_revision, changes):
-        if await self.get(record_id) is None:
+        record = await self.get(record_id)
+        if record is None or record.basis != "observed":
             raise KeyError("record unavailable")
         return await self._backend.revise(record_id, expected_revision, changes)
 
     async def retract(self, record_id, expected_revision, reason):
-        if await self.get(record_id) is None:
+        record = await self.get(record_id)
+        if record is None or record.basis != "observed":
             raise KeyError("record unavailable")
         return await self._backend.retract(record_id, expected_revision, reason)
 

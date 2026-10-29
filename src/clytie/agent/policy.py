@@ -185,6 +185,7 @@ class Boundary:
 class Outbound:
     def __init__(self, config):
         self.config = config
+        self.memory_guard = None
 
     def check(self, text, scene):
         value = normalized(text, compact=True)
@@ -208,6 +209,8 @@ class Outbound:
         ]
         if hits:
             result["style"] = hits
+        if self.memory_guard and self.memory_guard(text, scene):
+            result.setdefault("privacy", []).append("包含了不能在这里说的私密内容")
         return result
 
 

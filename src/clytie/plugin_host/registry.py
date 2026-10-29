@@ -51,6 +51,7 @@ FACTORIES = {
     "embedder": {"embed": True},
     "tool": {"idempotency_key": False, "prepare": True, "execute": True},
     "memory.retriever": {"search": True},
+    "memory.reranker": {"rerank": True},
     "memory.importer": {"detect": False, "read": False},
     "memory.consolidator": {"run": True},
     "notifier": {"notify": True},
@@ -186,8 +187,16 @@ def validate_result(point, method, result):
         if not all(isinstance(item, EventEnvelope) for item in result):
             raise TypeError("invalid inbound event")
     if point == "memory.importer" and method == "read":
-        if not isinstance(result, list) or not all(isinstance(r, MemoryRecord) for r in result):
+        from clytie.sdk.types import ImportCandidate
+
+        if not isinstance(result, list) or not all(isinstance(r, ImportCandidate) for r in result):
             raise TypeError("invalid importer record")
+    if point == "memory.reranker":
+        if not isinstance(result, list) or not all(
+            isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+            for score in result
+        ):
+            raise TypeError("invalid reranker scores")
     if point == "service":
         if not isinstance(result, Mapping):
             raise TypeError("service must return a JSON object")

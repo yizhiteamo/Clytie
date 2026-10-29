@@ -112,6 +112,9 @@ class PluginHost(MigrationMixin):
         self.repo_root, self.home = Path(repo_root).resolve(), Path(home).resolve()
         self.clock, self.log, self.seed = clock, log or HostLog(), seed
         self.backends = backends or (lambda cid, pid: {})
+        self.memory_resources = {}
+        self.memory_jobs = {}
+        self.memory_config = {}
         self.manifests = discover(
             self.repo_root / "plugins", self.home / "plugins", repo_root=self.repo_root
         )
@@ -180,6 +183,7 @@ class PluginHost(MigrationMixin):
         self.timezone = report.instance["timezone"]
         for cid, result in report.plugin_configs.items():
             config = result["config"]
+            self.memory_config[cid] = (thaw(config), thaw(report.instance))
             self.configure(
                 cid,
                 plugins=thaw(config.get("plugins", {})),
@@ -201,6 +205,36 @@ class PluginHost(MigrationMixin):
                     }
                 )
                 self.identities[cid, pid, ref] = IdentityResolver(ref, pid, report.instance)
+
+    def memory_store(self, companion_id, config=None, instance=None):
+        if companion_id in self.memory_resources:
+            return self.memory_resources[companion_id][0]
+        from clytie.memory.store import MemoryStore
+        from clytie.memory.transfer import runtime_lock
+
+        if config is None:
+            config, instance = self.memory_config[companion_id]
+        lock = runtime_lock(self.home, companion_id)
+        lock.__enter__()
+        try:
+            store = MemoryStore(
+                contained(
+                    self.home,
+                    self.home
+                    / "companions"
+                    / identifier(companion_id)
+                    / "memory"
+                    / "memory.sqlite3",
+                ),
+                clock=self.clock,
+                config=config,
+                instance=instance,
+            )
+        except BaseException:
+            lock.__exit__(None, None, None)
+            raise
+        self.memory_resources[companion_id] = (store, lock)
+        return store
 
     def _active(self, companion_id):
         return sorted(
@@ -493,6 +527,10 @@ class PluginHost(MigrationMixin):
                 runtime.units.append(unit)
                 unit.unit_role, unit.account_ref = layout["role"], layout.get("account")
                 backends = dict(self.backends(*key))
+                if "memory" not in backends and (
+                    key[0] in self.memory_config or key[0] in self.memory_resources
+                ):
+                    backends["memory"] = self.memory_store(key[0])
                 if (companion_id, plugin_id, unit.account_ref) in self.identities:
                     backends["identity"] = self.identities[
                         companion_id, plugin_id, unit.account_ref
@@ -688,7 +726,15 @@ class PluginHost(MigrationMixin):
             scheduler.add(registration.plugin_id, thaw(registration.declaration), on_tick)
 
     async def invoke(
-        self, companion_id, plugin_id, point, key, *args, method=None, scene="public_group"
+        self,
+        companion_id,
+        plugin_id,
+        point,
+        key,
+        *args,
+        method=None,
+        scene="public_group",
+        conversation_id=None,
     ):
         runtime = self.runtimes.get((companion_id, plugin_id))
         registration = next(
@@ -703,18 +749,23 @@ class PluginHost(MigrationMixin):
             raise PluginFailure("not_assembled")
         if point == "channel" and method == "events":
             return self._event_feed(runtime, registration)
-        task = asyncio.create_task(self._invoke(runtime, registration, point, args, method, scene))
+        task = asyncio.create_task(
+            self._invoke(runtime, registration, point, args, method, scene, conversation_id)
+        )
         runtime.calls.add(task)
         try:
             return await task
         finally:
             runtime.calls.discard(task)
 
-    async def _invoke(self, runtime, registration, point, args, method, scene):
+    async def _invoke(
+        self, runtime, registration, point, args, method, scene, conversation_id=None
+    ):
         if point in {"service", "schedule", "event_subscriber"}:
             scene = "public_group"
+            conversation_id = None
         try:
-            with bind_scene(scene):
+            with bind_scene(scene, conversation_id):
                 function = (
                     getattr(registration.implementation, method)
                     if method
@@ -740,6 +791,8 @@ class PluginHost(MigrationMixin):
                     or any(len(row) != registration.declaration["dimension"] for row in result)
                 ):
                     raise TypeError("embedding shape does not match request and manifest")
+                if point == "memory.reranker" and len(result) != len(args[1]):
+                    raise TypeError("reranker shape does not match request")
                 return result
         except Exception as exc:
             self._failure(runtime, point, exc)
@@ -812,12 +865,22 @@ class PluginHost(MigrationMixin):
         scene = scene or getattr(getattr(event, "conversation", None), "scene", "public_group")
         if phase == "after_generation":
             scene = input.conversation.scene
+        conversation_id = getattr(getattr(event, "conversation", None), "conversation_id", None)
+        if phase == "before_send" and input:
+            ids = {intent.conversation_id for intent in input}
+            conversation_id = next(iter(ids)) if len(ids) == 1 else None
         opinions = []
         current = list(input) if phase == "before_send" else input
         for reg in self.registrations(companion_id, point):
             supplied = list(current) if phase == "before_send" else current
             result = await self.invoke(
-                companion_id, reg.plugin_id, point, reg.key, supplied, scene=scene
+                companion_id,
+                reg.plugin_id,
+                point,
+                reg.key,
+                supplied,
+                scene=scene,
+                conversation_id=conversation_id,
             )
             if phase in {"after_generation", "before_send"}:
                 check = valid_after_generation if phase == "after_generation" else valid_before_send
@@ -854,11 +917,17 @@ class PluginHost(MigrationMixin):
             )
         return current if phase in {"after_generation", "before_send"} else None
 
-    async def context_sections(self, companion_id, request):
+    async def context_sections(self, companion_id, request, *, conversation_id=None):
         sections = []
         for reg in self.registrations(companion_id, "context_section"):
             result = await self.invoke(
-                companion_id, reg.plugin_id, reg.point, reg.key, request, scene=request.scene
+                companion_id,
+                reg.plugin_id,
+                reg.point,
+                reg.key,
+                request,
+                scene=request.scene,
+                conversation_id=conversation_id,
             )
             if result is not None:
                 sections.append((result, reg.declaration["budget_chars"]))
@@ -881,6 +950,7 @@ class PluginHost(MigrationMixin):
                 inv,
                 method="prepare",
                 scene=inv.conversation.scene,
+                conversation_id=inv.conversation.conversation_id,
             )
             if isinstance(plan, Denial):
                 return ToolResult(
@@ -896,6 +966,7 @@ class PluginHost(MigrationMixin):
                 cancel,
                 method="execute",
                 scene=inv.conversation.scene,
+                conversation_id=inv.conversation.conversation_id,
             )
             if result.call_id != call.call_id:
                 raise PluginFailure("wrong tool call id")
@@ -973,7 +1044,9 @@ class PluginHost(MigrationMixin):
 
     async def close(self):
         result = {}
-        for cid in sorted(set(self.settings) | {key[0] for key in self.runtimes}):
+        for cid in sorted(
+            set(self.settings) | {key[0] for key in self.runtimes} | set(self.memory_resources)
+        ):
             row = result[cid] = {"stopped": [], "not_stopped": {}}
             plugins = []
             try:
@@ -1002,4 +1075,12 @@ class PluginHost(MigrationMixin):
                         row["stopped"].append(pid)
                     else:
                         row["not_stopped"][pid] = reason.copy()
+            if not row["not_stopped"] and cid in self.memory_resources:
+                jobs = tuple(self.memory_jobs.pop(cid, ()))
+                for job in jobs:
+                    job.cancel()
+                await asyncio.gather(*jobs, return_exceptions=True)
+                store, lock = self.memory_resources.pop(cid)
+                store.close()
+                lock.__exit__(None, None, None)
         return result

@@ -17,6 +17,7 @@ from clytie.sdk.types import (
     ContextSection,
     DeliveryIntent,
     EventEnvelope,
+    ImportCandidate,
     Invocation,
     MemoryHit,
     MemoryQuery,
@@ -191,18 +192,29 @@ class FakeRetriever:
 
 
 class FakeImporter:
-    def __init__(self, records: tuple[MemoryRecord, ...], ctx: FakeContext | None = None) -> None:
+    def __init__(
+        self, records: tuple[ImportCandidate, ...], ctx: FakeContext | None = None
+    ) -> None:
         self.records = records
         self.ctx = ctx or FakeContext()
 
     def detect(self, source: Path) -> bool:
         return source.suffix == ".jsonl"
 
-    async def read(self, source: Path, cancel: CancelToken) -> AsyncIterator[MemoryRecord]:
+    async def read(self, source: Path, cancel: CancelToken) -> AsyncIterator[ImportCandidate]:
         cancel.raise_if_cancelled()
         for record in self.records:
             await cancellable_wait(self.ctx.clock, 0, cancel)
             yield record
+
+
+class FakeReranker:
+    def __init__(self, ctx: FakeContext | None = None):
+        self.ctx = ctx or FakeContext()
+
+    async def rerank(self, query, records, cancel):
+        await cancellable_wait(self.ctx.clock, 0, cancel)
+        return [float(query in record.content) for record in records]
 
 
 class FakeConsolidator:

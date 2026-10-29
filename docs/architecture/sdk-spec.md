@@ -196,6 +196,8 @@
 
 ## 3. 时钟协议
 
+生产时钟由 `src/clytie/clock.py` 的 `SystemClock` 提供，是唯一允许调用系统时钟的文件（仅 `datetime.now`、`time.monotonic`、`asyncio.sleep`）；本体其他代码通过注入获得时钟，插件通过 `ctx.clock` 获得。此适配边界经 Claude 只读技术确认，不改变业务时钟规则。
+
 `Clock`：
 - `now() -> datetime`（UTC，带时区）
 - `monotonic() -> float`
@@ -289,7 +291,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `service` | 清单声明 `{name, version, methods: [...]}`；`async call(method: str, args: dict) -> dict`。使用方通过 `ctx.services.get(name).call(...)` 调用，参数和返回值都必须可序列化 |
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
 | `memory.retriever` | `async search(q: MemoryQuery, candidates: CandidateReader, cancel) -> list[MemoryHit]`；`CandidateReader` 只返回 `q.allowed_visibility` 内的记录 |
-| `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出导入候选，包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
+| `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出 `ImportCandidate`（具体字段编码见 ADR 0008），包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
 | `memory.consolidator` | `async run(window_start, window_end, reader, cancel) -> list[MemoryRecord]`（kind=`episode`，由本体写入） |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |

@@ -22,7 +22,9 @@ FORBIDDEN = {
 }
 
 
-def inspect_source(source: str, *, plugin: bool = False) -> list[tuple[int, str]]:
+def inspect_source(
+    source: str, *, plugin: bool = False, relative_path: str = ""
+) -> list[tuple[int, str]]:
     tree = ast.parse(source)
     aliases: dict[str, str] = {}
     errors: list[tuple[int, str]] = []
@@ -61,7 +63,12 @@ def inspect_source(source: str, *, plugin: bool = False) -> list[tuple[int, str]
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = qualified(node.func)
-            if name in FORBIDDEN:
+            system_adapter = (
+                not plugin
+                and relative_path == "src/clytie/clock.py"
+                and name in {"datetime.datetime.now", "time.monotonic", "asyncio.sleep"}
+            )
+            if name in FORBIDDEN and not system_adapter:
                 errors.append((node.lineno, "clock-must-be-injected"))
             if name.startswith("random.") and name != "random.Random":
                 errors.append((node.lineno, "random-must-be-injected"))
@@ -76,7 +83,9 @@ def main() -> int:
             count += 1
             relative = path.relative_to(ROOT)
             for line, message in inspect_source(
-                path.read_text(encoding="utf-8"), plugin=relative.parts[0] == "plugins"
+                path.read_text(encoding="utf-8"),
+                plugin=relative.parts[0] == "plugins",
+                relative_path=relative.as_posix(),
             ):
                 print(f"{relative.as_posix()}:{line}: {message}")
                 failures += 1

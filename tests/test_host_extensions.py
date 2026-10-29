@@ -45,8 +45,8 @@ SOURCE_ALL = (
         return FakeRetriever(self.ctx)
     def create_importer(self):
         from clytie.sdk.testing import FakeImporter
-        from clytie.sdk.testing.samples import sample_memory
-        return FakeImporter((sample_memory(self.ctx.clock),), self.ctx)
+        from clytie.sdk.testing.samples import sample_import_candidate
+        return FakeImporter((sample_import_candidate(self.ctx.clock),), self.ctx)
     def create_consolidator(self):
         from clytie.sdk.testing import FakeConsolidator
         from clytie.sdk.testing.samples import sample_memory

@@ -25,7 +25,7 @@ async def test_validated_fourth_layer_per_channel_unit_and_primary_contributions
             {"name": pid + ".state", "version": "1.0", "methods": ["get"], "handler": "service"}
         ]
         manifest["config"] = schema
-        manifest["requires"]["sdk"] = ">=0.5,<0.6"
+        manifest["requires"]["sdk"] = ">=0.6,<0.7"
         manifest["hot_reload"] = True
         if pid == "fake-model":
             manifest["contributes"]["model"] = {"factory": "create_model"}

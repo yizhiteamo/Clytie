@@ -50,3 +50,15 @@ def test_accepts_sdk_and_injected_dependencies():
 
 def test_project_architecture():
     assert CHECKS.main() == 0
+
+
+def test_system_clock_adapter_is_exact_path_and_exact_api_only():
+    source = "from datetime import datetime as dt\nfrom time import monotonic as m\nimport asyncio\ndt.now()\nm()\nasyncio.sleep(1)"
+    assert CHECKS.inspect_source(source, relative_path="src/clytie/clock.py") == []
+    for path in ("src/clytie/memory/clock.py", "plugins/x/clock.py"):
+        assert len(CHECKS.inspect_source(source, relative_path=path)) == 3
+    assert CHECKS.inspect_source("import time\ntime.sleep(1)", relative_path="src/clytie/clock.py")
+    assert CHECKS.inspect_source(
+        "import random\nrandom.random()", relative_path="src/clytie/clock.py"
+    )
+    assert CHECKS.inspect_source("from clytie.clock import SystemClock", plugin=True)

@@ -14,7 +14,10 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
     from clytie.plugin_host.recovery import failed_status
 
     report = load_home(home, repo_root=repo_root)
-    notices = []
+    from clytie.clock import SystemClock
+    from clytie.memory.status import notices as memory_notices
+
+    notices = memory_notices(report, clock=SystemClock())
     for companion in report.companions:
         path = Path(report.home) / "companions" / companion["id"] / "boundary/state.json"
         if path.is_file():
