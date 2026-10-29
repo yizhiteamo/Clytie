@@ -1,6 +1,7 @@
 """测试显式装配的执行入口；默认拒绝权限，不装配真实平台或模型。"""
 
 import asyncio
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
@@ -336,6 +337,12 @@ class Kernel:
 
     async def cancel(self, companion_id, actor, conversation_id, task_id=None, reply_to=None):
         if companion_id != self.ledger.companion_id or not conversation_id or actor is None:
+            return "invalid_request"
+        if (
+            reply_to is None
+            and task_id is not None
+            and (not isinstance(task_id, str) or re.fullmatch(r"[0-9a-f]{8}", task_id) is None)
+        ):
             return "invalid_request"
         records = [r for r in self.ledger.rows("record") if r["trace_id"] != _current_trace.get()]
         target = None
