@@ -326,6 +326,37 @@ async def test_success_commits_only_current_plugin_once(tmp_path, monkeypatch):
     await h.close()
 
 
+@pytest.mark.parametrize("failure", ["write", "verify"])
+async def test_production_restore_reports_positions_on_temporary_failures(
+    tmp_path, monkeypatch, failure
+):
+    import clytie.plugin_host.journal as journal_module
+    from clytie.plugin_host.recovery import RecoveryError
+
+    h, _, old, record = await interrupted(tmp_path)
+    write, tree = journal_module.atomic_write, h.snapshots._tree
+
+    def fail_write(path, data):
+        if any(part.startswith(".restore-") for part in path.parts):
+            raise OSError("fictional temporary write failure")
+        write(path, data)
+
+    def fail_verify(path):
+        if path.name.startswith(".restore-"):
+            raise ValueError("fictional temporary verification failure")
+        return tree(path)
+
+    if failure == "write":
+        monkeypatch.setattr(journal_module, "atomic_write", fail_write)
+    else:
+        monkeypatch.setattr(h.snapshots, "_tree", fail_verify)
+    with pytest.raises(RecoveryError) as error:
+        h.journals.restore(record)
+    assert set(error.value.locations) == {"state", "failed", "temporary"}
+    assert h.journals.read("companion_a", "stateful")["phase"] == "restoring"
+    assert await old.storage.get("value") == "fictional-partial-migration"
+
+
 async def test_failure_never_rewrites_versions_of_any_plugin(tmp_path, monkeypatch):
     h, path, _ = await prepared(tmp_path)
     plugin(tmp_path, "other")

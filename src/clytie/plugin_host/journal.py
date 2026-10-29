@@ -1,4 +1,4 @@
-"""迁移恢复日志与用户确认解除；不修改版本记录，不加载插件代码。"""
+"""迁移恢复日志与用户确认解除；仅按确认计划修复版本记录，不加载插件代码。"""
 
 import base64
 import hashlib
@@ -8,8 +8,38 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from packaging.version import InvalidVersion, Version
+
+from clytie.sdk.immutable import freeze, thaw
+
 from .recovery import RecoveryError, inventory
 from .snapshots import SnapshotError, atomic_write, canonical, contained, identifier
+
+
+def valid_version(value):
+    if (
+        not isinstance(value, dict)
+        or type(value.get("data_version")) is not int
+        or value["data_version"] < 1
+    ):
+        return False
+    try:
+        Version(value["plugin_version"])
+        return True
+    except (KeyError, TypeError, InvalidVersion):
+        return False
+
+
+def resolution_committed(intent, current):
+    return bool(intent) and (
+        intent.get("committed", False)
+        or intent.get("status") == "written"
+        or (
+            intent.get("status") == "writing"
+            and intent.get("write_required", True)
+            and current == intent["version_after"]
+        )
+    )
 
 
 def journal_path(home, companion, plugin):
@@ -86,13 +116,21 @@ class RecoveryPlan:
     steps: tuple[str, ...]
     matches_snapshot: bool | None
     warning: str | None
+    version_before: object
+    version_after: object
+    version_choice: object
+
+    def __post_init__(self):
+        object.__setattr__(self, "version_before", freeze(self.version_before))
+        object.__setattr__(self, "version_after", freeze(self.version_after))
 
 
 class Journals:
-    def __init__(self, snapshots):
+    def __init__(self, snapshots, version_reader, version_writer):
         self.snapshots = snapshots
         self.home, self.clock, self.log = snapshots.home, snapshots.clock, snapshots.log
         self.plans = {}
+        self.version_reader, self.version_writer = version_reader, version_writer
 
     def path(self, cid, pid):
         return journal_path(self.home, cid, pid)
@@ -107,6 +145,23 @@ class Journals:
                 raise ValueError("journal identity mismatch")
             if record["phase"] not in {"migrating", "restoring"}:
                 raise ValueError("unknown recovery phase")
+            if record.get("resolution"):
+                intent = record["resolution"]
+                if (
+                    intent["operation"] not in {"retry_restore", "accept_current"}
+                    or intent["status"] not in {"executing", "writing", "written", "failed"}
+                    or not valid_version(intent["version_after"])
+                ):
+                    raise ValueError("invalid recovery choice")
+            if record.get("resolution_only"):
+                if (
+                    record["phase"] != "restoring"
+                    or record["resolution"]["operation"] != "accept_current"
+                ):
+                    raise ValueError("invalid resolution journal")
+                if self._target(record, "state") != self.snapshots.state_path(cid, pid):
+                    raise ValueError("invalid resolution state")
+                return record
             if not (
                 isinstance(record["from_version"], int)
                 and isinstance(record["to_version"], int)
@@ -157,6 +212,8 @@ class Journals:
             "companion_id": record["companion_id"],
             "plugin_id": record["plugin_id"],
             "at": self.clock.now().isoformat(),
+            "resolution": record.get("resolution"),
+            "error": record.get("error"),
         }
         path = self.path(record["companion_id"], record["plugin_id"]).with_suffix(".audit.jsonl")
         contained(self.home, path).parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +223,7 @@ class Journals:
             os.fsync(handle.fileno())
         self.log.info("plugin.recovery_audit", **event)
 
-    def begin(self, plan):
+    def begin(self, plan, *, executor=None, target_version=None):
         cid, pid = plan.companion_id, plan.plugin_id
         if self.path(cid, pid).exists():
             raise SnapshotError("existing recovery journal blocks migration")
@@ -181,6 +238,9 @@ class Journals:
             "plan_id": plan.plan_id,
             "companion_id": cid,
             "plugin_id": pid,
+            "previous_version": self.version_reader(cid, pid),
+            "target_version": target_version,
+            "executor": executor,
             "from_version": plan.from_version,
             "to_version": plan.to_version,
             "snapshot": plan.snapshot,
@@ -200,7 +260,7 @@ class Journals:
         self.audit(record, action)
         self.path(record["companion_id"], record["plugin_id"]).unlink()
 
-    def restore(self, record):
+    def restore(self, record, *, clear=True):
         cid, pid = record["companion_id"], record["plugin_id"]
         state = self._target(record, "state")
         try:
@@ -208,7 +268,8 @@ class Journals:
             self.save(record)
             payload = self.snapshots.read(self.home / record["snapshot"], cid, pid)
             if state.is_dir() and self.snapshots._tree(state) == payload:
-                self.clear(record, "restore_completed")
+                if clear:
+                    self.clear(record, "restore_completed")
                 return None
             temporary = self._target(record, "temporary")
             valid = temporary.is_dir() and self.snapshots._tree(temporary) == payload
@@ -247,7 +308,8 @@ class Journals:
             contained(self.home, temporary).rename(contained(self.home, state))
             record["step"] = "state_restored"
             self.save(record)
-            self.clear(record, "restore_completed")
+            if clear:
+                self.clear(record, "restore_completed")
             return failed if failed.exists() else None
         except Exception as exc:
             record["error"] = type(exc).__name__
@@ -262,26 +324,91 @@ class Journals:
         paths = {name: self._target(record, name) for name in record["locations"]}
         data = {
             "record": record,
+            "raw_journal": hashlib.sha256(
+                self.path(record["companion_id"], record["plugin_id"]).read_bytes()
+            ).hexdigest(),
+            "version": self.version_reader(record["companion_id"], record["plugin_id"]),
             "directories": {
                 name: inventory(path) if path.is_dir() else None for name, path in paths.items()
             },
         }
+        if record.get("resolution_only"):
+            return hashlib.sha256(canonical(data)).hexdigest()
         snapshot = contained(self.home, self.home / record["snapshot"])
         data["snapshot"] = (
             hashlib.sha256(snapshot.read_bytes()).hexdigest() if snapshot.is_file() else None
         )
         return hashlib.sha256(canonical(data)).hexdigest()
 
-    def plan(self, cid, pid, operation):
-        if operation not in {"retry_restore", "accept_current"}:
-            raise ValueError("unknown recovery action")
-        record = self.read(cid, pid)
+    def _for_plan(self, cid, pid):
+        try:
+            record = self.read(cid, pid)
+        except SnapshotError:
+            state = self.snapshots.state_path(cid, pid)
+            record = {
+                "companion_id": cid,
+                "plugin_id": pid,
+                "phase": "restoring",
+                "resolution_only": True,
+                "plan_id": "damaged-journal",
+                "locations": {"state": {"path": state.relative_to(self.home).as_posix()}},
+                "snapshot": None,
+            }
         if record is None:
             raise ValueError("no recovery journal")
+        return record
+
+    def plan(self, cid, pid, operation, *, current_code, version_choice=None):
+        if operation not in {"retry_restore", "accept_current"}:
+            raise ValueError("unknown recovery action")
+        record = self._for_plan(cid, pid)
         state = self._target(record, "state")
         if operation == "accept_current" and not state.is_dir():
             raise ValueError("private state missing; cannot accept current directory")
+        current = self.version_reader(cid, pid)
+        old = record.get("previous_version")
+        target = record.get("target_version") or current_code
+        intent = record.get("resolution")
+        damaged = record.get("resolution_only") or not valid_version(old)
+        committed = resolution_committed(intent, current)
+        if committed:
+            if intent["operation"] != operation or version_choice != intent["choice"]:
+                raise ValueError("resume the same confirmed recovery action and version choice")
+            after = intent["version_after"]
+        elif damaged:
+            if operation != "accept_current":
+                raise ValueError("damaged journal permits only accept_current")
+            if (
+                type(version_choice) is not int
+                or not 1 <= version_choice <= current_code["data_version"]
+            ):
+                raise ValueError("explicit data version within current code range required")
+            after = {
+                "plugin_version": current_code["plugin_version"],
+                "data_version": version_choice,
+            }
+        elif current == old or current == target:
+            if version_choice is not None:
+                raise ValueError("normal version record must remain unchanged")
+            after = current
+        elif operation == "retry_restore":
+            if version_choice is not None:
+                raise ValueError("retry_restore uses the recorded previous version")
+            after = old
+        else:
+            if version_choice not in {"old", "target"}:
+                raise ValueError("explicit old or target version choice required")
+            after = (
+                old
+                if version_choice == "old"
+                else {
+                    "plugin_version": current_code["plugin_version"],
+                    "data_version": record["to_version"],
+                }
+            )
         try:
+            if damaged:
+                raise SnapshotError("unverifiable journal")
             payload = self.snapshots.read(self.home / record["snapshot"], cid, pid)
             equal = state.is_dir() and self.snapshots._tree(state) == payload
         except (OSError, ValueError):
@@ -306,8 +433,23 @@ class Journals:
             if equal is False
             else "无法验证快照一致性；该插件将使用当前目录数据"
         )
+        if damaged:
+            warning = "无法核对，该版本由用户指定"
+        if current != after:
+            steps.insert(-1, "write_version_record")
         fingerprint = self._fingerprint(record)
-        values = (operation, cid, pid, fingerprint, tuple(steps), equal, warning)
+        values = (
+            operation,
+            cid,
+            pid,
+            fingerprint,
+            tuple(steps),
+            equal,
+            warning,
+            current,
+            after,
+            version_choice,
+        )
         plan = RecoveryPlan(hashlib.sha256(canonical(values)).hexdigest(), *values)
         self.plans[plan.plan_id] = plan
         return plan
@@ -318,15 +460,53 @@ class Journals:
         plan = self.plans.get(plan_id)
         if plan is None:
             raise PlanStale("unknown recovery plan")
-        record = self.read(plan.companion_id, plan.plugin_id)
-        if record is None or self._fingerprint(record) != plan.fingerprint:
+        record = self._for_plan(plan.companion_id, plan.plugin_id)
+        if self._fingerprint(record) != plan.fingerprint:
             raise PlanStale("recovery journal or directories changed; regenerate and confirm")
         self.plans.pop(plan_id)
+        committed = resolution_committed(record.get("resolution"), thaw(plan.version_before))
+        if record.get("resolution"):
+            self.audit(record, "resolution_previous_choice")
+        record["plan_id"] = plan.plan_id
+        record["phase"] = "restoring"
+        record["resolution"] = {
+            "plan_id": plan.plan_id,
+            "operation": plan.operation,
+            "choice": plan.version_choice,
+            "version_after": thaw(plan.version_after),
+            "status": "executing",
+            "committed": committed,
+            "write_required": plan.version_before != plan.version_after,
+        }
+        self.save(record)
         self.audit(record, plan.operation + "_confirmed")
-        if plan.operation == "retry_restore":
-            self.restore(record)
-        else:
-            if not self._target(record, "state").is_dir():
+        try:
+            if plan.operation == "retry_restore":
+                self.restore(record, clear=False)
+            elif not self._target(record, "state").is_dir():
                 raise PlanStale("private state missing")
-            self.clear(record, "current_directory_accepted")
+            record["resolution"]["status"] = "writing"
+            self.save(record)
+            if self.version_reader(plan.companion_id, plan.plugin_id) != plan.version_after:
+                self.version_writer(plan.companion_id, plan.plugin_id, thaw(plan.version_after))
+            record["resolution"]["status"] = "written"
+            record["resolution"]["committed"] = True
+            self.save(record)
+            self.clear(
+                record,
+                "restore_completed"
+                if plan.operation == "retry_restore"
+                else "current_directory_accepted",
+            )
+        except Exception as exc:
+            record["error"] = type(exc).__name__
+            resolution = record["resolution"]
+            written = resolution_committed(
+                resolution, self.version_reader(plan.companion_id, plan.plugin_id)
+            )
+            resolution["committed"] = written
+            resolution["status"] = "written" if written else "failed"
+            self.save(record)
+            self.audit(record, "resolution_failed")
+            raise
         return {"outcome": "migration_failed", "action": plan.operation}

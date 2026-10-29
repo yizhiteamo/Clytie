@@ -33,6 +33,7 @@ from clytie.sdk.types import (
 from .context import BackendUnavailable, build_context
 from .dependencies import DependencyError, resolve
 from .journal import Journals
+from .locking import OperationBusy, Operations
 from .manifests import discover
 from .memory import bind_scene
 from .migration import MigrationMixin
@@ -127,11 +128,11 @@ class PluginHost(MigrationMixin):
         self.unit_configs, self.identities = {}, {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
-        self.journals = Journals(self.snapshots)
+        self.operations = Operations(self.home, self.log)
+        self.journals = Journals(self.snapshots, self._version, self._write_version)
         self._plans, self._cascades, self._storages = {}, {}, {}
         self._queue, self._dispatching = deque(), False
         self._serial = 0
-        self._lock = asyncio.Lock()
 
     def configure(
         self,
@@ -325,70 +326,80 @@ class PluginHost(MigrationMixin):
         return self._plan("uninstall", companion_id, target)
 
     async def apply(self, plan_id):
-        async with self._lock:
-            self.refresh()
-            plan = self._plans.get(plan_id)
-            if (
-                plan is None
-                or self._plan(
-                    plan.operation, plan.companion_id, plan.target, plan.restore_cascaded
-                ).plan_id
-                != plan_id
-            ):
-                raise PlanStale("plan_stale: regenerate and confirm the plan")
-            if not plan.ok:
-                raise DependencyError("; ".join(plan.errors))
-            enabled, stopped, failed = [], [], []
-            for pid in plan.steps:
-                if plan.operation == "enable":
-                    if self.is_active(plan.companion_id, pid):
-                        continue
-                    if await self._start(plan.companion_id, self.manifests[pid]):
-                        enabled.append(pid)
-                    else:
-                        failed.append(pid)
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            raise PlanStale("unknown operation plan")
+        plugins = set(plan.steps) | {plan.target}
+        try:
+            with self.operations.hold(plan.companion_id, plugins, plan.operation):
+                return await self._apply_locked(plan_id)
+        except OperationBusy as exc:
+            return exc.result(multiple=len(plugins) > 1)
+
+    async def _apply_locked(self, plan_id):
+        self.refresh()
+        plan = self._plans.get(plan_id)
+        if (
+            plan is None
+            or self._plan(
+                plan.operation, plan.companion_id, plan.target, plan.restore_cascaded
+            ).plan_id
+            != plan_id
+        ):
+            raise PlanStale("plan_stale: regenerate and confirm the plan")
+        if not plan.ok:
+            raise DependencyError("; ".join(plan.errors))
+        enabled, stopped, failed = [], [], []
+        for pid in plan.steps:
+            if plan.operation == "enable":
+                if self.is_active(plan.companion_id, pid):
+                    continue
+                if await self._start(plan.companion_id, self.manifests[pid]):
+                    enabled.append(pid)
                 else:
-                    reason = (
-                        "cascade"
-                        if pid != plan.target
-                        else "uninstalled"
-                        if plan.operation == "uninstall"
-                        else "requested"
-                    )
-                    await self._stop(plan.companion_id, pid, reason)
-                    stopped.append(pid)
-                    if pid != plan.target:
-                        record = {
-                            "target": plan.target,
-                            "plugin": pid,
-                            "at": self.clock.now().isoformat(),
-                            "operation": plan_id,
-                        }
-                        history = self._history(plan.companion_id)
-                        history.append(record)
-                        atomic_write(
-                            self._metadata(plan.companion_id, "cascades.json"), canonical(history)
-                        )
-                        self.log.info("plugin.cascade_stopped", **record)
-            if plan.operation in {"disable", "uninstall"}:
-                latest_file = self._metadata(plan.companion_id, "last-disable.json")
-                latest = json.loads(latest_file.read_bytes()) if latest_file.exists() else {}
-                latest[plan.target] = plan_id
-                atomic_write(latest_file, canonical(latest))
-            if plan.operation == "uninstall":
-                self._excluded.add(plan.target)
-                atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
-                self.refresh()
-            return {
-                "enabled": enabled,
-                "stopped": stopped,
-                "failed": failed,
-                "patch": {
-                    "plugins": {
-                        pid: {"enabled": plan.operation == "enable"} for pid in enabled + stopped
+                    failed.append(pid)
+            else:
+                reason = (
+                    "cascade"
+                    if pid != plan.target
+                    else "uninstalled"
+                    if plan.operation == "uninstall"
+                    else "requested"
+                )
+                await self._stop(plan.companion_id, pid, reason)
+                stopped.append(pid)
+                if pid != plan.target:
+                    record = {
+                        "target": plan.target,
+                        "plugin": pid,
+                        "at": self.clock.now().isoformat(),
+                        "operation": plan_id,
                     }
-                },
-            }
+                    history = self._history(plan.companion_id)
+                    history.append(record)
+                    atomic_write(
+                        self._metadata(plan.companion_id, "cascades.json"), canonical(history)
+                    )
+                    self.log.info("plugin.cascade_stopped", **record)
+        if plan.operation in {"disable", "uninstall"}:
+            latest_file = self._metadata(plan.companion_id, "last-disable.json")
+            latest = json.loads(latest_file.read_bytes()) if latest_file.exists() else {}
+            latest[plan.target] = plan_id
+            atomic_write(latest_file, canonical(latest))
+        if plan.operation == "uninstall":
+            self._excluded.add(plan.target)
+            atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
+            self.refresh()
+        return {
+            "enabled": enabled,
+            "stopped": stopped,
+            "failed": failed,
+            "patch": {
+                "plugins": {
+                    pid: {"enabled": plan.operation == "enable"} for pid in enabled + stopped
+                }
+            },
+        }
 
     def _config(self, companion_id, manifest, override=None):
         settings = self.settings.get(companion_id, {})
@@ -426,12 +437,13 @@ class PluginHost(MigrationMixin):
 
     async def _start(self, companion_id, manifest, *, cls=None, override=None, version_check=True):
         plugin_id = manifest.id
+        self.operations.require(companion_id, plugin_id)
         key = companion_id, plugin_id
         path = self.snapshots.state_path(*key)
+        status, detail = self._before_load(companion_id, manifest.id)
+        if status:
+            return await self._blocked_start(companion_id, manifest, status, detail)
         try:
-            status, detail = self._before_load(companion_id, manifest.id)
-            if status:
-                return await self._blocked_start(companion_id, manifest, status, detail)
             for dependency, spec in manifest.data.get("dependencies", {}).items():
                 if (
                     not dependency.startswith("x-")
@@ -564,6 +576,7 @@ class PluginHost(MigrationMixin):
         self.log.error("plugin.failure", **failure)
 
     async def _stop(self, companion_id, plugin_id, reason="requested"):
+        self.operations.require(companion_id, plugin_id)
         runtime = self.runtimes.get((companion_id, plugin_id))
         if runtime is None or runtime.status not in {"active", "quiescing"}:
             return
@@ -865,6 +878,13 @@ class PluginHost(MigrationMixin):
         return CompanionState(companion_id=companion_id, states=self.states.get(companion_id, {}))
 
     async def reconfigure(self, companion_id, plugin_id, config=None):
+        try:
+            with self.operations.hold(companion_id, [plugin_id], "reload"):
+                return await self._reconfigure_locked(companion_id, plugin_id, config)
+        except OperationBusy as exc:
+            return exc.result()
+
+    async def _reconfigure_locked(self, companion_id, plugin_id, config=None):
         self.refresh()
         manifest = self.manifests[plugin_id]
         try:
@@ -913,7 +933,12 @@ class PluginHost(MigrationMixin):
 
     async def close(self):
         for cid in sorted({key[0] for key in self.runtimes}):
-            active = self._active(cid)
-            loaded = {pid: self.runtimes[cid, pid].manifest for pid in active}
-            for pid in reversed(resolve(loaded, active).order) if active else ():
-                await self._stop(cid, pid, "shutdown")
+            plugins = [pid for companion, pid in self.runtimes if companion == cid]
+            try:
+                with self.operations.hold(cid, plugins, "shutdown"):
+                    active = self._active(cid)
+                    loaded = {pid: self.runtimes[cid, pid].manifest for pid in active}
+                    for pid in reversed(resolve(loaded, active).order) if active else ():
+                        await self._stop(cid, pid, "shutdown")
+            except OperationBusy as exc:
+                return exc.result(multiple=len(plugins) > 1)
