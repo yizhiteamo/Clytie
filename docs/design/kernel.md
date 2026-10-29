@@ -36,6 +36,8 @@
 - 行为插件可以申请例外（例如睡眠插件的 💤），例外必须在清单中声明 `message.react` 权限，并在其设计文档中写明条件。
 - 长任务执行过程中不主动发进度，用户问起时再回答。
 
+本体的任务状态回应按 `architecture/kernel-spec.md` §13.5：在委托消息上显示接单（👌）、执行中（⏳）、完成（✅）、失败（❌）四个状态；状态变化时替换上一个确定发出的表情，不发新消息。这是挂在原消息上的状态标记，不属于“主动发进度”。默认适用于所有有权限发起任务的人，可配置为只有主人；合并间隔、终态、取消和重启处理均按该节执行。
+
 ## 6. 事件总线
 
 本体发布的事件：`message.received`、`reply.sent`、`task.started`、`task.completed`、`task.failed`、`companion.state_changed`、`quota.changed`、`plugin.enabled/disabled`。插件可以发布带自己 id 前缀的事件（如 `sleep.state_changed`）。事件负载类型在 SDK 中定义。

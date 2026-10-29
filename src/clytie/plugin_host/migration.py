@@ -50,8 +50,8 @@ class MigrationMixin:
     def _version(self, companion_id, plugin_id):
         return self._versions(companion_id).get(plugin_id)
 
-    def _record_version(self, companion_id, manifest):
-        self._write_version(
+    async def _record_version(self, companion_id, manifest):
+        await self._write_version(
             companion_id,
             manifest.id,
             {
@@ -60,8 +60,8 @@ class MigrationMixin:
             },
         )
 
-    def _write_version(self, companion_id, plugin_id, value):
-        with self.operations.metadata(companion_id):
+    async def _write_version(self, companion_id, plugin_id, value):
+        async with self.operations.metadata(companion_id):
             versions = self._read_versions(companion_id)
             versions[plugin_id] = value
             atomic_write(self._versions_path(companion_id), canonical(versions), retry_sharing=True)
@@ -291,7 +291,22 @@ class MigrationMixin:
             }
         # 脚本完成才提交；记录原子更新是唯一提交点。此后任何错误都不恢复旧数据。
         try:
-            self._record_version(cid, manifest)
+            await self._record_version(cid, manifest)
+        except asyncio.CancelledError:
+
+            async def restore_cancelled_commit():
+                migration.status = "migration_failed"
+                self.states.setdefault(cid, {})[pid] = {"status": "migration_failed"}
+                record["error"] = "CancelledError"
+                try:
+                    self.journals.restore(record)
+                except (OSError, ValueError):
+                    migration.status = "recovery_incomplete"
+                    self.states[cid][pid]["status"] = "recovery_incomplete"
+                    raise
+
+            await finish_cleanup(restore_cancelled_commit())
+            raise
         except (OSError, ValueError, MetadataLockTimeout) as exc:
             # 解锁诊断写入也可能在原子提交之后失败，按磁盘提交事实报告。
             committed = self._version(cid, pid) == record["target_version"]
@@ -383,8 +398,8 @@ class MigrationMixin:
         }:
             raise PlanStale("plugin must be stopped before recovery")
         try:
-            result = self.journals.apply(plan_id)
-        except (OSError, ValueError) as exc:
+            result = await self.journals.apply(plan_id)
+        except (OSError, ValueError, asyncio.CancelledError) as exc:
             if self.journals.path(plan.companion_id, plan.plugin_id).exists():
                 if runtime:
                     runtime.status = "recovery_incomplete"

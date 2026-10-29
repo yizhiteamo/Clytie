@@ -14,6 +14,7 @@ from types import ModuleType
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
 from clytie.sdk.behavior import (
+    ReactOnly,
     collect_context_sections,
     merge_attention,
     merge_before_attention,
@@ -128,11 +129,16 @@ class PluginHost(MigrationMixin):
         self.unit_configs, self.identities = {}, {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
-        self.operations = Operations(self.home, self.log)
+        self.operations = Operations(self.home, self.log, self.clock)
         self.journals = Journals(self.snapshots, self._version, self._write_version)
         self._plans, self._cascades, self._storages = {}, {}, {}
         self._queue, self._dispatching = deque(), False
         self._serial = 0
+        from clytie.kernel.events import EventBus
+
+        self.event_bus = EventBus(self.clock, self.log, self._event_subscribers)
+        self.schedulers = {}
+        self.timezone = getattr(getattr(self.clock, "local_tz", None), "key", "UTC")
 
     def configure(
         self,
@@ -171,6 +177,7 @@ class PluginHost(MigrationMixin):
             raise ManifestError(list(report.errors))
         from .identity import IdentityResolver
 
+        self.timezone = report.instance["timezone"]
         for cid, result in report.plugin_configs.items():
             config = result["config"]
             self.configure(
@@ -503,7 +510,7 @@ class PluginHost(MigrationMixin):
             runtime.registrations = tuple(registrations)
             runtime.status = "active"
             if version_check:
-                self._record_version(companion_id, manifest)
+                await self._record_version(companion_id, manifest)
                 if version and version["plugin_version"] != manifest.data["version"]:
                     await self.emit(
                         companion_id,
@@ -514,6 +521,7 @@ class PluginHost(MigrationMixin):
                             "to": manifest.data["version"],
                         },
                     )
+            self._register_schedules(companion_id, runtime)
             await self.emit(
                 companion_id,
                 "plugin.enabled",
@@ -597,6 +605,8 @@ class PluginHost(MigrationMixin):
 
     async def _stop_runtime(self, runtime, reason):
         companion_id, plugin_id = runtime.companion_id, runtime.manifest.id
+        if companion_id in self.schedulers:
+            await self.schedulers[companion_id].remove(plugin_id)
         runtime.status = "stopping"
         await self.emit(
             companion_id,
@@ -651,24 +661,31 @@ class PluginHost(MigrationMixin):
     async def emit(self, companion_id, name, payload, source="core"):
         event = BusEvent(name=name, payload=payload, at=self.clock.now(), source=source)
         self.events.append(event)
-        self._queue.append((companion_id, event))
-        if self._dispatching:
-            return
-        self._dispatching = True
-        try:
-            while self._queue:
-                cid, emitted = self._queue.popleft()
-                for registration in self.registrations(cid, "event_subscriber"):
-                    if self.matches(emitted.name, registration.declaration["subscribe"]):
-                        await self.invoke(
-                            cid,
-                            registration.plugin_id,
-                            "event_subscriber",
-                            registration.key,
-                            emitted,
-                        )
-        finally:
-            self._dispatching = False
+        self.event_bus.publish(companion_id, event)
+
+    def _event_subscribers(self, cid, event):
+        for registration in self.registrations(cid, "event_subscriber"):
+            if self.matches(event.name, registration.declaration["subscribe"]):
+
+                async def call(emitted, reg=registration):
+                    await self.invoke(cid, reg.plugin_id, "event_subscriber", reg.key, emitted)
+
+                yield call
+
+    def _register_schedules(self, cid, runtime):
+        from clytie.kernel.scheduler import Scheduler
+
+        if cid not in self.schedulers:
+            self.schedulers[cid] = Scheduler(self.clock, self.log, self.timezone)
+        scheduler = self.schedulers[cid]
+        for registration in runtime.registrations:
+            if registration.point != "schedule":
+                continue
+
+            async def on_tick(tick, cancel, reg=registration):
+                await self.invoke(cid, reg.plugin_id, "schedule", reg.key, tick)
+
+            scheduler.add(registration.plugin_id, thaw(registration.declaration), on_tick)
 
     async def invoke(
         self, companion_id, plugin_id, point, key, *args, method=None, scene="public_group"
@@ -714,6 +731,10 @@ class PluginHost(MigrationMixin):
                     else:
                         result = await result
                 result = validate_result(point, method, result)
+                if isinstance(
+                    result, ReactOnly
+                ) and "message.react" not in runtime.manifest.data.get("permissions", ()):
+                    raise ValueError("ReactOnly requires message.react permission")
                 if point == "embedder" and (
                     len(result) != len(args[0])
                     or any(len(row) != registration.declaration["dimension"] for row in result)
@@ -725,7 +746,15 @@ class PluginHost(MigrationMixin):
             if point.startswith("behavior."):
                 phase = point.split(".", 1)[1]
                 value = thaw(runtime.manifest.data.get("failure_default", {}).get(phase))
-                return validate_result(point, None, value)
+                fallback = validate_result(point, None, value)
+                if isinstance(
+                    fallback, ReactOnly
+                ) and "message.react" not in runtime.manifest.data.get("permissions", ()):
+                    self.log.warning(
+                        "plugin.invalid_reaction_default", plugin_id=runtime.manifest.id
+                    )
+                    return None
+                return fallback
             if point in {"context_section", "event_subscriber", "schedule"}:
                 return None
             if point in {"memory.retriever", "memory.consolidator"}:

@@ -43,9 +43,9 @@ async def test_crash_at_migration_commit_boundaries(tmp_path, monkeypatch, point
         if record["step"] == "migrations/to_2.py":
             raise Crash()
 
-    def crash_write(*args):
+    async def crash_write(*args):
         if point == "after_commit":
-            write(*args)
+            await write(*args)
         raise Crash()
 
     def crash_clear(*args):
@@ -318,9 +318,9 @@ async def test_success_commits_only_current_plugin_once(tmp_path, monkeypatch):
     write = h._record_version
     calls = []
 
-    def count(cid, manifest):
+    async def count(cid, manifest):
         calls.append((cid, manifest.id))
-        write(cid, manifest)
+        await write(cid, manifest)
 
     monkeypatch.setattr(h, "_record_version", count)
     result = await h.apply_migration(h.plan_migration("companion_a", "stateful").plan_id)
@@ -369,9 +369,9 @@ async def test_failure_never_rewrites_versions_of_any_plugin(tmp_path, monkeypat
     writes = []
     write = h._record_version
 
-    def counted(cid, manifest):
+    async def counted(cid, manifest):
         writes.append(manifest.id)
-        write(cid, manifest)
+        await write(cid, manifest)
 
     monkeypatch.setattr(h, "_record_version", counted)
     task = asyncio.create_task(

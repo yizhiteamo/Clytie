@@ -198,6 +198,12 @@
 
 - **时区**：`at` / `days` 使用实例配置的 `timezone`（与 sdk-spec §3、§7.7 一致）。伴侣配置不提供时区。
 - **固定频率**：计划时间是"锚点 + k × 周期"。`every` 的锚点是插件启动时刻。
+- **`every` 的取值范围（用户已确认）**：只接受能换算成固定秒数的 ISO 8601 时长，即周、日、时、分、秒（`W`、`D`、`H`、`M`（时间部分）、`S`）。
+  - 一天严格按 24 小时、一周按 7 天，在 UTC 上换算，不随夏令时变化。
+  - 带年（`Y`）或月（日期部分的 `M`）的时长一律拒绝，包括混合形式（如 `P1M1D`）和小数形式（如 `P0.5Y`）。按日历的月 / 年调度以后另行设计。
+  - 总时长为零（如 `PT0S`）的一律拒绝。
+  - 在清单校验和 SDK 类型校验两处都执行，两处结果必须一致。属于 SDK 0.x 次版本的不兼容变更，写入 CHANGELOG。
+- `days` 只属于 `at`：`every` 与 `days` 同时出现（包括 `days: []`）时，清单校验和 SDK 校验都拒绝。`at` 省略 `days` 或给出空列表都表示每天。
 - **漏点**：时钟一次越过多个计划时间时，只触发一次。`Tick.scheduled_at` 取被越过的计划时间中最晚的一个，`Tick.missed` 等于其余被跳过的个数。
 - **不重叠**：上一次还在执行时，本次跳过，计入下一次触发的 `missed`；触发之后清零。
 - **同一时刻**按 `(plugin_id, schedule id)` 排序依次触发。
@@ -306,7 +312,37 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 
 - 主人私聊中 `Ignore` 降级为 `ReactOnly` 是本体保护（sdk-spec 合并规则），是**唯一**的本体例外，已在 kernel.md §5 写明，不需要插件声明。
 - 插件返回 `ReactOnly`，必须在清单中声明了 `message.react` 权限。没有声明时，这条指令按插件出错处理（使用安全默认值）并记 WARN。
-- 除上述两种情况外，只有任务（`record.kind = task`）可以加表情回应。
+- 除上述两种情况外，只有任务（`record.kind = task`）可以加表情回应，即下面第 13.5 节的任务状态回应。
+
+### 13.5 任务状态回应（用户已确认：沿用旧系统的四个状态，所有有权限的人）
+
+在委托消息上用表情显示任务状态，**不发新消息**。这是挂在原消息上的状态标记，不属于 kernel.md §5 所说的"主动发进度"。
+
+**四个状态与时机**：
+
+| 状态 | 时机 | 默认表情 |
+|---|---|---|
+| `accepted` 接单 | 记录升级为 task 的事务提交后（与 `task.started` 同时） | 👌 |
+| `running` 执行中 | 第一次能力调用开始 `execute` 时 | ⏳ |
+| `done` 完成 | 发布 `task.completed` 时 | ✅ |
+| `failed` 失败 | 发布 `task.failed` 时（包括 `error`、`denied`、`cancelled`） | ❌ |
+
+- 状态变化时，用新表情替换上一个：DeliveryIntent 的 `replaces_emoji` 填上一个**确定发出**的状态表情。平台支持撤掉表情时（`ChannelFeatures.supports_react_remove`），插件先撤旧的再加新的；不支持时只加新的。
+- 两次状态变化间隔小于 `task_reactions.min_interval_seconds`（默认 2 秒）时，合并为后一个状态。例如接单后马上开始执行，只显示"执行中"。终态（`done` / `failed`）总是发出，不会被合并掉。
+- 平台不支持表情回应（`supports_react = false`）时，静默跳过。
+
+**适用范围**：
+- 只用于有来源入站消息的 task 记录，表情加在那条入站消息上。定时任务、主动任务没有来源消息，不加。
+- `task_reactions.audience`：`all`（默认，所有有权限发起这个任务的人）或 `owner`（只有主人的委托）。
+- `task_reactions.enabled`：默认 `true`；设为 `false` 时全部关闭。
+- 状态回应由本体发出，不需要插件声明 `message.react`。插件自己的表情例外（例如睡眠插件的 💤）仍按第 13.4 节声明。
+
+**与交付规则的关系**：
+- 状态回应在账本中登记为 `kind = react` 的 intent，并标记 `status_reaction = true`。它们**不计入**记录的 `delivery_status` 汇总，不受执行封口（第 2 节）和"取消后不登记新 intent"（第 8 节）的限制，否则取消后无法显示"失败"。
+- 状态回应**不重发**：任何 `failed` 或 `unknown` 都不重试，也绝不因为表情失败另发一条文字消息。
+- 一个状态还没发出、下一个状态已经到来时，跳过还没发出的那个，直接发新的。
+
+**重启时**：被重启修正为 `interrupted` 的 task 记录，如果最后一次确定发出的状态回应是 `accepted` 或 `running`，补发一次 `failed` 状态回应，避免原消息一直显示"执行中"。这是更新状态，不是重放任务：只发这一个表情，不执行能力、不发文字，结果不确定时也不再重试。其余重启修正仍按第 2 节只写审计。
 
 ## 14. 账本迁移
 
@@ -374,6 +410,13 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 
 ## 16. 需要同步修改的其他文档
 
+### 实现技术澄清（只读询问 Claude 后采用）
+
+- 取消入口排除自身记录，通过本体的调用上下文绑定当前 trace；后台事件、调度和状态回应不继承这个绑定。不新增插件可控的取消参数。
+- 版本短锁等待中取消：提交点之前的迁移按既有恢复流程完成清理，再传播取消；解除操作保留失败与选择审计，按原规则重新计划，不留下部分版本项。
+- 只读任务查询直接探测系统锁状态，不尝试取得锁：Windows 只读第零字节的锁冲突，Linux 读取锁表并匹配文件身份；不能读取时报告查询失败，不推断任务不存在。锁文件首次创建时先放入固定第零字节，再取得锁。
+- 内容保留期按每项内容实际入账时间（注入时钟）计算，迟到内容不沿用记录创建时间。持有运行锁、处理完迁移日志后启动时清理，运行期间定期清理；查询命令不清理。清理频率作为实现选型记录在 ADR 0005。
+
 | 文档 | 修改 |
 |---|---|
 | sdk-spec §1.3 | `EventEnvelope` 新增 `dedupable: bool`，默认 `true`（第 3 节）。属于 0.x 次版本变更，写入 CHANGELOG |
@@ -381,8 +424,13 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 | sdk-spec ChannelFeatures | `media_limits` 的键：`{image\|audio\|video\|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持 |
 | plugins.md 能力插件规范 | 不把凭据写进 `ToolResult.data` 和收据的 `error.message` |
 | config-spec §3 | 新增或更新下表字段 |
+| plugins.md §3 / sdk-spec §5.5 | `dedupable = false` 的事件经过过滤但不经过防重，可能重复到达，仅供 `message_received` 观察，不触发任务或回复 |
 | data-and-backup §1 目录树 | 加入 `backups/ledger/<cid>/`（账本迁移快照）和 `companions/<cid>/ledger/.migration.json` |
 | data-and-backup §4 | 写明账本迁移快照的加密、存放位置和保留规则（第 14 节），并注明它不参与常规备份的保留规则 |
+| sdk-spec §1.4 DeliveryIntent | 新增可选字段 `replaces_emoji: str?`（`kind = react` 时使用，第 13.5 节） |
+| sdk-spec §5.1 ChannelFeatures | 新增 `supports_react_remove: bool`，默认 `false`（第 13.5 节） |
+| kernel.md §5 | 写明本体的任务状态回应（四个状态，替换上一个，不发新消息），并注明它不属于"主动发进度"（第 13.5 节） |
+| config-spec §3 | 新增 `task_reactions`：`enabled`（布尔，默认 `true`）、`audience`（`all` / `owner`，默认 `all`）、`emojis`（`{accepted, running, done, failed}`，默认 👌 ⏳ ✅ ❌，各为非空字符串，由平台插件映射为平台表情）、`min_interval_seconds`（整数 0–30，默认 2） |
 | data-and-backup §4 / §4.1 | 加入失败现场 `backups/ledger/<cid>/failed-…/` 的加密与保留（第 14 节）；§4.1 的密钥适用范围列出账本迁移快照和失败现场；删除 §4 中照抄带来的自引用"见 data-and-backup §4" |
 
 **config-spec 字段**（替换现有的"未规定"）：

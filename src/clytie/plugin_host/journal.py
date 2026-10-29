@@ -1,5 +1,6 @@
 """迁移恢复日志与用户确认解除；仅按确认计划修复版本记录，不加载插件代码。"""
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -486,7 +487,7 @@ class Journals:
         self.plans[plan.plan_id] = plan
         return plan
 
-    def apply(self, plan_id):
+    async def apply(self, plan_id):
         from .host import PlanStale
 
         plan = self.plans.get(plan_id)
@@ -520,7 +521,9 @@ class Journals:
             record["resolution"]["status"] = "writing"
             self.save(record)
             if self.version_reader(plan.companion_id, plan.plugin_id) != plan.version_after:
-                self.version_writer(plan.companion_id, plan.plugin_id, thaw(plan.version_after))
+                await self.version_writer(
+                    plan.companion_id, plan.plugin_id, thaw(plan.version_after)
+                )
             record["resolution"]["status"] = "written"
             record["resolution"]["committed"] = True
             self.save(record)
@@ -530,7 +533,7 @@ class Journals:
                 if plan.operation == "retry_restore"
                 else "current_directory_accepted",
             )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             record["error"] = type(exc).__name__
             resolution = record["resolution"]
             written = resolution_committed(

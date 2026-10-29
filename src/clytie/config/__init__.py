@@ -92,6 +92,8 @@ class HomeReport:
     instance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     plugin_configs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     failed_plugin_state: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    ledger_errors: tuple[Mapping[str, Any], ...] = ()
+    ledger_notices: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def valid(self) -> bool:
@@ -99,10 +101,12 @@ class HomeReport:
 
     @property
     def exit_code(self) -> int:
-        return 2 if not self.exists else int(not self.valid)
+        return 2 if not self.exists else int(not self.valid or bool(self.ledger_errors))
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "ledger_errors": thaw(self.ledger_errors),
+            "ledger_notices": thaw(self.ledger_notices),
             "home": self.home,
             "exists": self.exists,
             "valid": self.valid,
@@ -414,6 +418,9 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
     instance = reader.document(instance_file, "instance")
     if instance is None:
         return HomeReport(str(directory), True, errors=tuple(reader.errors))
+    defaults, _ = _default_config(reader.schemas["instance"]["properties"]["limits"], instance_file)
+    if isinstance(instance.get("limits", {}), dict):
+        instance["limits"] = thaw(deep_merge(defaults, instance.get("limits", {})))
     try:
         timezone = instance.get("timezone")
         if isinstance(timezone, str):
@@ -594,10 +601,34 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             continue
         if data.get("id") != companion_id:
             reader.issue(file, ("id",), f"directory id {companion_id}", data.get("id"))
-        for section in ("boundary", "context", "memory"):
+        for section in (
+            "boundary",
+            "context",
+            "memory",
+            "delivery",
+            "tasks",
+            "ledger",
+            "task_reactions",
+            "task_card",
+        ):
             defaults, _ = _default_config(reader.schemas["companion"]["properties"][section], file)
             if isinstance(data.get(section, {}), dict):
                 data[section] = thaw(deep_merge(defaults, data.get(section, {})))
+        tasks = data.get("tasks", {})
+        limits = instance.get("limits", {})
+        deadline = tasks.get("default_deadline_seconds") if isinstance(tasks, dict) else None
+        ceiling = limits.get("max_task_seconds") if isinstance(limits, dict) else None
+        if (
+            isinstance(deadline, (int, float))
+            and isinstance(ceiling, (int, float))
+            and deadline > ceiling
+        ):
+            reader.issue(
+                file,
+                ("tasks", "default_deadline_seconds"),
+                "at most instance limits.max_task_seconds",
+                deadline,
+            )
         memory = data.get("memory", {})
         private_scenes = memory.get("private_scenes", []) if isinstance(memory, dict) else []
         for index, scene in enumerate(private_scenes if isinstance(private_scenes, list) else []):

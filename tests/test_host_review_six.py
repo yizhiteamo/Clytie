@@ -86,11 +86,17 @@ def test_stop_order_ignores_missing_dependencies_and_orders_cycle_remainder():
     ) == ("leaf", "cycle_a", "cycle_b")
 
 
-def test_metadata_real_wait_counter_and_timeout(tmp_path, monkeypatch):
+async def test_metadata_real_wait_counter_and_timeout(tmp_path, monkeypatch):
     import clytie.plugin_host.locking as module
 
     h = host(tmp_path)
     path = tmp_path / "companions/companion_a/plugin-versions.lock"
+
+    async def advance(seconds):
+        h.clock.advance(seconds)
+        await h.clock.sleep(0)
+
+    h.operations.clock = SimpleNamespace(sleep=advance)
     attempts = []
     real_lock = module.file_lock
 
@@ -103,12 +109,12 @@ def test_metadata_real_wait_counter_and_timeout(tmp_path, monkeypatch):
     with real_lock(path, {**process_identity(), "operation": "version_record"}):
         monkeypatch.setattr(module, "file_lock", counted)
         with pytest.raises(MetadataLockTimeout) as caught:
-            with h.operations.metadata("companion_a"):
+            async with h.operations.metadata("companion_a"):
                 pytest.fail("busy metadata lock was bypassed")
         assert len(attempts) == 501
         assert caught.value.enabled == ()
         assert caught.value.patch == {"plugins": {}}
-    with h.operations.metadata("companion_a"):
+    async with h.operations.metadata("companion_a"):
         pass
 
 
@@ -116,6 +122,12 @@ async def test_later_metadata_timeout_reports_enabled_plugins_and_patch(tmp_path
     plugin(tmp_path, "base")
     plugin(tmp_path, "dependent", dependencies={"base": {"version": ">=1"}})
     h = host(tmp_path)
+
+    async def advance(seconds):
+        h.clock.advance(seconds)
+        await h.clock.sleep(0)
+
+    h.operations.clock = SimpleNamespace(sleep=advance)
     start = h._start
     held = []
 

@@ -173,8 +173,8 @@ async def test_crash_immediately_after_version_replace_forbids_changed_choice(
     plan = h.plan_recovery("companion_a", "stateful", "accept_current", version_choice="target")
     write = h.journals.version_writer
 
-    def crash(*args):
-        write(*args)
+    async def crash(*args):
+        await write(*args)
         raise Crash()
 
     monkeypatch.setattr(h.journals, "version_writer", crash)
