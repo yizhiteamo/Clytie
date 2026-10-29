@@ -5,7 +5,7 @@
 - 第一条记录或首次导入确定 companion_uid，之后不变；空库无 UID。导入仅支持搬回自己的记忆，不支持外来伴侣；空库 new 需确认并沿用包的 UID。
 - 从零开始，无预置记忆；投影为空时注入固定说明，空库不能导出。
 - memory.importer 改为输出平台账号/会话引用和可信程度提议，由本体映射、用户确认可信提议；不能直接填写可信字段。仅支持空库和同一来源未被写入的试导入例外（memory-spec §9.4）。
-- 用户确认的 restore、撤销导入及冲突选择可恢复目标可信程度，计划单列降低项；聊天和插件操作只升不降。
+- 用户确认的 restore、撤销导入、冲突选择及导入器再次导入可恢复目标可信程度，计划单列降低项；聊天和插件操作只升不降。
 
 - MemoryRecord 新增本体填写的 basis、origin_conversation_id；旧格式读取按 write_mode 推导可信程度，未知来源为 null。写入忽略外部可信字段，插件只能修改或撤销 observed 记录；owner_confirmed、owner_stated 只读。
 - 新增兼容扩展 memory.reranker，候选由本体投影后传入。

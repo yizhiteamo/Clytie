@@ -16,7 +16,7 @@
 |---|---|
 | 可见等级 | 私密 / 公开可见 / 关系。由模型判断，拿不准时归为私密 |
 | 写入方式 | 自动 / 用户确认；与可信程度对应，见 memory-spec §1.1 |
-| 可信程度 | owner_confirmed / owner_stated / observed，由本体填写；聊天和插件操作只升不降，用户确认的导入操作例外见 memory-spec §1.3 |
+| 可信程度 | owner_confirmed / owner_stated / observed，由本体填写；聊天和插件操作只升不降，用户确认的导入操作（含导入器再次导入）例外见 memory-spec §1.3 |
 | 可信来源会话 | origin_conversation_id，由本体填写；未知为 null |
 | 来源类型 | 私聊 / 群聊 / 用户与伴侣的群内互动 |
 | 来源引用 | 账本追踪号（可追溯，不对外暴露） |
