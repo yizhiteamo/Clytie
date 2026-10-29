@@ -158,7 +158,9 @@
 | `content` | str | |
 | `subject` | str? | 相关的 `actor_id` |
 | `visibility` | `private` \| `public` \| `relationship` | |
-| `write_mode` | `auto` \| `confirmed` | |
+| `write_mode` | `auto` \| `confirmed` | confirmed 当且仅当 basis 为 owner_confirmed |
+| `basis` | `owner_confirmed` \| `owner_stated` \| `observed` | 本体填写；旧格式缺失时按 write_mode 推导：confirmed 对应 owner_confirmed，否则 observed |
+| `origin_conversation_id` | str? | 本体填写的可信来源会话，旧格式缺失为 null；随修订保存、导出 |
 | `source_type` | `private` \| `group` \| `owner_group_interaction` | |
 | `source_ref` | str? | 账本追踪号 |
 | `scope` | str? | 黑话等按群隔离的记录所属的 `conversation_id` |
@@ -344,6 +346,10 @@ async count() -> int
 
 只返回：可见等级在 `allowed_visibility` 内、未撤销、未冻结的记录。`get` 对不在范围内的 ID 静默跳过（不报错，避免泄露"这条记录存在"）。
 
+### 7.2a memory.reranker
+
+`async rerank(query: str, records: list[MemoryRecord], cancel) -> list[float]`：返回与 records 等长的分数。只接收本体按 memory-spec §3 投影后的记录；采用 §7.1 的 factory 编码。不可用时跳过重排（memory-spec §4）。
+
 ### 7.3 ApiClient（CLI 扩展使用）
 
 ```
@@ -413,6 +419,8 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
   4. 私密记录只在**同时满足**以下条件时可读：插件有 `memory.read.private`，并且绑定的场景在伴侣配置 `memory.private_scenes` 中（默认只有 `owner_private`）。可以加入哪些场景、有什么限制，见 `config-spec.md` 第 3 节。
   5. 只有 `memory.read.public` 的插件，在任何场景都读不到私密记录。
   6. `get` 对当前场景读不到的记录返回 `None`，和"记录不存在"无法区分。
+- A3.3 的记忆视图由本体存储支持，所有读取按 `memory-spec.md` §3 同时裁剪可见等级和来源会话；宿主绑定场景与会话，插件不能指定可信来源。
+- 写入入口忽略外部传入的 basis、write_mode、origin_conversation_id；插件写入 basis 一律为 observed，source_type 由宿主填写。插件 source_ref/scope 仅作说明，投影不信任。新建、去重与可信程度只升不降按 memory-spec §1.3；插件不能修订或撤销 owner_confirmed 记录，返回与找不到记录相同的错误。
 - **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
 - `revise` / `retract` 的 `expected_revision` 与当前修订号不一致时抛 `RevisionConflict`。
 

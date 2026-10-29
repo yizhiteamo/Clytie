@@ -33,6 +33,7 @@ plugins/<id>/
 | `service` | 向其他插件提供一个具名服务（如 `sleep.state`） |
 | `event_subscriber` | 订阅事件总线上的事件 |
 | `memory.retriever` / `memory.importer` / `memory.consolidator` | 记忆检索器、导入器（如旧系统导入）、经历整理器 |
+| `memory.reranker` | 对已投影的候选记忆重排（memory-spec §4.4），通过 factory 装配 |
 | `notifier` | 提供一种通知渠道（守护进程和边界保护用来通知主人） |
 | `cli_command` | 新增一个 CLI 子命令 |
 | `api_route` | 新增 API 路由（只读状态或插件自己的操作） |
