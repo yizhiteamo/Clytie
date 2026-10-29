@@ -44,17 +44,20 @@
 - `interrupted` 只在账本中使用，不加入 SDK 枚举。对外的 `TaskSummary` 中映射为 `status: error`、`error_code: interrupted`。
 
 **重启时**（伴侣启动、打开账本之后、接收新消息之前）：
-- `pending` / `running` 的执行 → `interrupted`。
+- `pending` / `running` 的执行 → `interrupted`；其中 `pending` / `running` 的 invocation 也改为 `interrupted`。
 - `sending` 的尝试 → `unknown`。
 - 还没开始尝试的 intent（`pending` / `retry_wait`）→ `failed`，`error.code = not_sent_before_restart`。它们确实没有发出，但**不会补发**。
 - `state = received` 的入站消息 → `dropped_on_restart`，不处理。
-- 这些修正都写审计，任何旧任务都不重放。
+- 这些修正都只写审计，**不发布任何事件**（包括 `task.*`），也不调用 `task_completed` 环节；任何旧任务都不重放。
+
+**执行封口**：执行到达终态，与这一轮的 `register_intents` 在同一个事务中提交。这样"执行已结束"时，这条记录要交付的 intent 已经全部登记，交付状态的汇总不会在中途被误判为终态。之后不再为这条记录登记 intent。
 
 **事件与 `task_completed` 环节**（统一时机，与 plugins.md §3、overview.md §5 一致）：
 - 只有 `kind = task` 的记录发布 `task.*` 事件，并调用 `task_completed` 环节；聊天记录不发。
-- 时机：执行到达终态，并且交付状态到达终态（第 6 节）之后。没有任何交付时，执行终态后立即发布。
+- `task.started`：记录升级为 task 的事务（第 1 节）提交后发布。
+- `task.completed` / `task.failed`：执行到达终态，并且交付状态到达终态（第 6 节）之后发布。没有任何交付时，执行封口后立即发布。
 - `ok` 发 `task.completed`，其他终态发 `task.failed`。总线事件和环节使用同一份 `TaskSummary`。
-- `TaskSummary` 的填法：`tool` 取记录的 `tool`；`started_at` 取第一次调用的开始时间；`finished_at` 取执行终态时间；`asset_ids` 取全部调用的产物。
+- `TaskSummary` 的填法：`tool` 取记录的 `tool`；`started_at` 取第一次调用的开始时间，领取后还没开始执行就结束的，取领取时间；`finished_at` 取执行终态时间；`asset_ids` 取全部调用的产物。
 - 排队中被取消、还没有任何调用的记录仍是 `chat`，不发 `task.*`。
 - `reply.sent`：每个 intent 到达 `sent` 时发一次。部分成功时，只为发出的那几条各发一次。
 - 迟到收据修正了状态时，**不补发、不修正已发布的事件**，只写审计。
@@ -64,7 +67,7 @@
 - 防重键：`(companion_id, channel_id, platform_message_id)`。`channel_id` 是逻辑 `account_ref`，所以每个平台账号自成一个命名空间；不同伴侣各自独立。`event_id` 的格式保持 SDK 已定的 `channel_id:platform_message_id`。
 - 平台插件必须保证 `platform_message_id` 在本账号内唯一并且稳定。
 - 平台本身没有消息 ID 的事件（通知、撤回等）：插件用平台提供的稳定字段合成 ID，写进 `event_id`。
-- 无法合成稳定 ID 时，插件把 `EventEnvelope.dedupable` 设为 `false`（SDK 新增字段，默认 `true`，见第 16 节）。这类事件只能观察，**不能触发任务或回复**，也不写入 `dedupe`。
+- 无法合成稳定 ID 时，插件把 `EventEnvelope.dedupable` 设为 `false`（SDK 新增字段，默认 `true`，见第 16 节）。这类事件不经过 `claim_inbound`，不写入 `dedupe` 和 `inbound`，不创建记录，只发布观察事件；**不能触发任务或回复**。
 - 重复事件：不处理，计数，记 DEBUG 日志。重启后再次收到旧事件，同样按重复处理。
 - **防重键永久保留（用户已确认）**：只有编号、没有内容，不随第 13 节的内容清理删除。
 
@@ -123,7 +126,7 @@
 - 每个 intent 最多尝试 `delivery.retry.max_attempts` 次（默认 3 次，包括首发）。第 k 次重发前等待 `backoff_seconds` 的第 k 项；列表比重发次数短时，用最后一项。等待使用注入时钟。
 - 停止重发的条件（满足任一）：
   - 次数用完；
-  - 距这个 intent 首次尝试超过 `delivery.retry.window_seconds`（默认 60 秒）。这个窗口适用于所有记录，包括聊天和主动消息；
+  - 距这个 intent 首次尝试超过 `delivery.retry.window_seconds`（默认 60 秒）。这个窗口适用于所有记录，包括聊天和主动消息；窗口用完视同次数用完，在拆分组中按第 7 节的 `skipped_after_failure` 处理；
   - task 记录超过它的 `deadline`，并且这个 intent 不属于已开始的拆分组（第 7 节）；
   - 记录被取消，并且这个 intent 不属于已开始的拆分组。
 - 停止时，intent 的终态为 `failed`，保留最后一次的错误码。
@@ -141,21 +144,40 @@
   - 某一条永久失败，或重发次数用完；
   - 从第一条开始尝试算起，超过 `delivery.group_max_seconds`（默认 60 秒，用户已确认）；
   - 进程安全停止的超时（A4）。
-- 停止后剩余各条标为 `failed`，`error.code` 分别为 `skipped_after_unknown`、`skipped_after_failure`、`group_timeout`、`shutdown`。
+- 停止后**还没开始尝试**的各条标为 `failed`，`error.code` 分别为 `skipped_after_unknown`、`skipped_after_failure`、`group_timeout`、`shutdown`。
+- 组超时和安全停止只阻止开始新的尝试。停止时正在发送的那一条，仍按第 5 节等待收据；等不到时记为 `unknown`，不能标为确定没发。
 - 组还没开始时取消，整组都不发，标为 `failed`，`error.code = cancelled_before_send`。
 - 重启后剩余各条按第 2 节处理，不补发。
 
-**发了一半的组（用户已确认）**：账本中这组的状态会是 `partial` 或 `unknown`。从 A3.2 起，同一会话下一次组装上下文时，本体注入一条说明"上一条回复只发出了前 N 段，后面没有发出"，让她可以自然地补上或解释。A3.1 只需要保证账本能查出发出了哪几段。
+**发了一半的组（用户已确认）**：从 A3.2 起，同一会话下一次组装上下文时，本体注入一条说明，让她可以自然地补上或解释。说明按**每条 intent 的实际状态**如实分三档，不使用记录级的汇总：
+- 确定发出的：`发出了前 N 段`；
+- 结果为 `unknown` 的：`第 N+1 段不确定是否发出`；
+- 之后没有尝试的：`后面的没有发出`。
+
+第一段就是 `unknown` 时，说明为"第 1 段不确定是否发出，后面的没有发出"。不能把不确定说成确定没发。A3.1 只需要保证账本能逐条查出每段的状态（`deliveries[]`）。
 
 ## 8. 取消（用户已确认）
 
-内部入口：`cancel(companion_id, actor, conversation_id, task_id=None)`。
+内部入口：`cancel(companion_id, actor, conversation_id, task_id=None, reply_to=None)`。
 
-- **带 `task_id`**：取消这个任务。主人可以取消任何任务；其他人只能取消自己发起的（`requester` 是自己）。
-- **不带 `task_id`**：
-  - 主人：取消当前会话中最近一个还没结束的任务，不管是谁发起的；
-  - 其他人：取消自己在当前会话中最近一个还没结束的任务。
-- 没有权限时返回 `denied` 并写审计，不改变任务状态。
+**权限**（所有方式相同）：主人可以取消任何记录；其他人只能取消自己发起的（`requester` 是自己）。没有权限时返回 `denied` 并写审计，不改变状态。
+
+**选择目标**（按以下顺序，只用第一个适用的方式）：
+
+| 方式 | 目标 |
+|---|---|
+| 带 `reply_to`（用户引用某条消息说"停"） | 被引用的消息对应的记录：可以是一条入站请求，也可以是她发出的某条回复（取它所属的记录）。排队中的记录也可以这样取消 |
+| 带 `task_id` | 这个编号的任务 |
+| 都不带 | 先找当前会话中最近一个还没结束的 `kind = task` 记录：主人不论发起人，其他人只找自己的。找不到时，只找 `actor` **自己**排队中、还没开始执行的记录 |
+
+- 不带引用和编号时，**不会取消别人排队中的普通聊天**，主人也一样（用户已确认）。
+- 正在执行、但还没有任何能力调用的 chat 记录，只能用 `reply_to` 取消。
+- 无论哪种方式，都排除这条取消消息自己产生的记录。
+- 引用的消息不在本伴侣账本中，或者对应的记录已经到终态，按下面的返回值处理。
+
+**自然语言指定**（例如"把 XX 的那个画图停掉"）：在 A3.2 实现。由模型判断目标，调用本体提供的取消能力；权限仍按上面的规则由本体检查，模型无法越权。目标对不上或有多个可能时，她要反问，不能猜（用户已确认）。
+
+**编号的显示时机不变**：`task_id` 在升级为 task 时分配，只写入账本，**不在开始时发给用户**。用户仍然只在任务结束时，从随结果附带的任务单中看到编号；执行中也不主动发进度（kernel.md §5）。
 
 **返回值**：`cancelled`（成功）、`denied`、`not_found`（找不到符合条件的任务）、`already_finished`（执行和交付都已到终态）、`invalid_request`（参数缺失或 `task_id` 不属于这个伴侣）。
 
@@ -165,10 +187,10 @@
 - 执行已成功、交付还没结束：可以取消。执行状态保持 `ok`，不改写；还没开始的 intent 和还没开始的组标为 `failed`（`cancelled_before_send`）；已开始的组按第 7 节发完。这次取消写审计。
 - 取消之后，不再为这条记录登记新的 intent。
 
-文本识别（"取消""停"）在 A3.2 接入，规则在 A3.2 规格中另写。
+文本识别（"取消""停"）在 A3.2 接入，规则在 A3.2 规格中另写。A3.1 的内部入口已经支持 `reply_to`，平台插件把引用信息放在 `Message.reply_to` 中传入。
 
 **截止时间**：
-- task 记录：`deadline = 创建时间 + 工具的 timeout_s`。工具没有声明时，用 `tasks.default_deadline_seconds`。两者都不能超过实例配置的 `limits.max_task_seconds`：工具声明超过上限时截断到上限并记 WARN；伴侣配置超过上限属于配置错误，校验时拒绝。
+- task 记录：升级为 task 时计算一次，之后不变：`deadline = 升级时间 + 工具的 timeout_s`（不含之前的排队时间）。工具没有声明时，用 `tasks.default_deadline_seconds`。两者都不能超过实例配置的 `limits.max_task_seconds`：工具声明超过上限时截断到上限并记 WARN；伴侣配置超过上限属于配置错误，校验时拒绝。
 - chat 记录和主动消息没有执行截止时间，交付只受第 6、7 节的窗口限制。
 
 ## 9. 调度器
@@ -209,7 +231,9 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 ```
 
 - 调用进程内的 API 层（A4 的 HTTP 接口以后复用同一组函数），不直接查询数据库。A3.1 不开 HTTP 服务。
-- 以只读方式打开账本：账本不存在时报 `ledger_missing`，**不创建空库**；不修改任何运行状态，也不执行第 2 节的重启修正。还没经过重启修正的非终态，按原值显示，并标注 `unrecovered: true`。
+- 以只读方式打开账本：账本不存在时报 `ledger_missing`，**不创建空库**；不修改任何运行状态，也不执行第 2 节的重启修正，也不迁移。
+- 存在迁移日志，或者账本模式版本低于代码版本时，报 `ledger_unavailable`，原因注明"迁移中或待迁移"，不读取账本内容。
+- `unrecovered` 的判断：`ledger/.lock` 没有被活着的进程持有，而账本里还有非终态时，这些非终态按原值显示并标注 `unrecovered: true`。有进程持有锁时，非终态按正常的运行中显示，`unrecovered: false`。
 - 不带 `--companion` 时，在所有伴侣中查找：
   - 只在一个伴侣中找到：正常返回。其他伴侣的账本缺失或损坏时，放进 `warnings`。
   - 多个伴侣有同一编号：列出匹配的伴侣，报 `ambiguous`，不自己猜。
@@ -285,15 +309,38 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 
 ## 14. 账本迁移
 
-账本属于本体，不使用插件的升级快照和迁移日志（data-and-backup §4.2 不变），规则如下：
+账本属于本体，不使用插件的升级快照和迁移日志（data-and-backup §4.2 不变），规则如下。
 
-- **锁**：`companions/<cid>/ledger/.lock`，跨进程有效。伴侣运行期间由伴侣进程持有；迁移和 `task` 命令的只读打开不需要这把锁。
-- **快照**：迁移前把账本目录复制到 `companions/<cid>/ledger-snapshots/<从版本>-<到版本>-<时间>/` 并逐文件校验哈希；校验失败就不迁移。
-- **迁移日志**：`companions/<cid>/ledger/.migration.json`，记录从版本、到版本、快照路径、阶段、执行者。迁移成功后删除。
-- **时机**：伴侣启动、打开账本时自动迁移，不需要确认（这是本体的数据格式升级，不是插件数据）。
-- **失败**：从快照恢复，这个伴侣不启动，status 显示错误级提醒（迁移步骤、原因、快照路径）。不自动重试，其他伴侣照常运行。
-- 启动时发现残留的迁移日志：按插件迁移的同一判断方式处理（data-and-backup §4.3 加载表），无法判断时这个伴侣不启动，等待用户处理。A3.1 不提供解除入口；需要时由用户按 status 中给出的快照路径手动恢复。
-- 快照按 data-and-backup 的保留策略清理（A4），不会因为迁移成功立即删除。
+**锁与时机**
+- 锁：`companions/<cid>/ledger/.lock`，跨进程有效，伴侣运行期间由伴侣进程持有。
+- 迁移只能由**已经取得这把锁**的伴侣启动流程执行。取不到锁（另一个进程正在运行这个伴侣或正在迁移）时，这次启动失败并报告，不迁移。
+- 伴侣启动、打开账本时自动迁移，不需要确认（这是本体的数据格式升级，不是插件数据）。
+- `task` 命令的只读打开不取锁，也不迁移（第 12 节）。
+
+**快照（用户已确认：加密，只留最近 2 份，服从内容保留期）**
+- 迁移前生成加密快照：用实例备份密钥加密（与常规备份、插件升级快照相同，见 data-and-backup §4 和 ADR 0004），存放在 `backups/ledger/<cid>/<从版本>-<到版本>-<时间>/`。
+- 快照不包含 `.lock` 和 `.migration.json`。
+- 生成后解密到临时目录逐文件校验哈希，校验失败就不迁移。
+- 保留：每个伴侣只保留最近 2 份账本迁移快照，更早的在下一次迁移成功后逐个文件删除。设置了 `ledger.content_retention_days` 时，生成时间超过保留期的快照也删除。删除只针对明确的快照目录，逐个文件进行，不批量删除。
+- 账本迁移快照不参与 data-and-backup 常规备份的 30 天 / 每周 / 每月保留规则。
+
+**迁移日志与提交点**
+- 迁移日志：`companions/<cid>/ledger/.migration.json`，记录从版本、到版本、快照路径、阶段、执行者、错误信息。
+- 阶段：`migrating`（正在迁移）→ `restoring`（失败后正在从快照恢复）→ `failed`（已恢复到旧版本，阻止自动重试）。
+- 提交点：账本内的模式版本号，在最后一个迁移事务中写入。写入成功后删除日志。
+
+**启动时发现迁移日志**
+
+| 日志阶段 | 账本模式版本 | 处理 |
+|---|---|---|
+| `migrating` | 已是"到版本" | 迁移已提交，只删除残留日志并写审计，正常启动 |
+| `migrating` | 仍是"从版本" | 视为迁移中途失败：日志先改为 `restoring`，从快照恢复，成功后改为 `failed`；伴侣不启动 |
+| `migrating` | 其他值或读不出 | 无法判断：不动账本，日志保持 `migrating` 并记录原因，伴侣不启动，status 显示错误级提醒 |
+| `restoring` | 任意 | 恢复中途中断：伴侣不启动，status 显示错误级提醒，不自动重试 |
+| `failed` | 任意 | 上次迁移已失败并恢复：伴侣不启动，不自动重新迁移 |
+
+- 所有不启动的情况，status 都显示：伴侣、阶段、原因、快照路径，以及处理方法。其他伴侣照常运行。
+- A3.1 不提供解除入口。处理方法写在 status 中：修好代码，或手动用快照恢复账本后，由用户删除 `companions/<cid>/ledger/.migration.json` 这一个文件，再启动伴侣。`failed` 阶段删除日志后，下次启动会重新尝试迁移。
 
 ## 15. 版本短锁与事件循环（#8）
 
@@ -317,6 +364,8 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 | sdk-spec ChannelFeatures | `media_limits` 的键：`{image\|audio\|video\|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持 |
 | plugins.md 能力插件规范 | 不把凭据写进 `ToolResult.data` 和收据的 `error.message` |
 | config-spec §3 | 新增或更新下表字段 |
+| data-and-backup §1 目录树 | 加入 `backups/ledger/<cid>/`（账本迁移快照）和 `companions/<cid>/ledger/.migration.json` |
+| data-and-backup §4 | 写明账本迁移快照的加密、存放位置和保留规则（第 14 节），并注明它不参与常规备份的保留规则 |
 
 **config-spec 字段**（替换现有的"未规定"）：
 
