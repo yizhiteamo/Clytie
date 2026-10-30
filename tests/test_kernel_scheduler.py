@@ -133,3 +133,30 @@ async def test_bus_timeout_does_not_block_other_companion_or_publisher():
     await clock.advance_and_drain(2)
     await bus.drain()
     assert received == ["b", "a"]
+
+
+async def test_bus_subscriber_cancel_isolated_but_dispatch_cancel_propagates():
+    import asyncio
+
+    clock, log, received = MockClock(), HostLog(), []
+    entered = asyncio.Event()
+
+    async def cancelled(event):
+        raise asyncio.CancelledError
+
+    async def slow(event):
+        received.append(event)
+        entered.set()
+        await clock.sleep(100)
+
+    bus = EventBus(clock, log, lambda cid, e: (cancelled, slow))
+    bus.publish("companion_a", "first")
+    bus.publish("companion_a", "queued")
+    await entered.wait()
+    worker = bus.workers["companion_a"]
+    await bus.close()
+    assert worker.cancelled()
+    assert received == ["first"]
+    assert not bus.publish("companion_a", "after_close")
+    assert not bus.workers and not bus.queues
+    assert len([x for x in log.entries if x[1] == "event.subscriber_failed"]) == 1

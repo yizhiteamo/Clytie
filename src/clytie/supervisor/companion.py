@@ -342,6 +342,7 @@ class Companion:
         for task in self.feeds:
             task.cancel()
         await asyncio.gather(*self.feeds, return_exceptions=True)
+        await kernel.bus.close()
         result = await self.host.close()
         for channel in self.channels.values():
             try:
