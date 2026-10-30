@@ -451,3 +451,7 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 | `ledger.content_retention_days` | 整数或 `null` | `null`（不限期） | 不小于 1 |
 | `task_card.label` | `{internal: str, external: str}` | 都是 `"任务"` | 非空 |
 | 实例 `limits.max_task_seconds` | 整数 | 3600 | 60–86,400 |
+
+## A4.1 停止与静默同步
+
+按 `supervisor-spec.md` §4.3、§6、§7，入站 ignored 增加原因 `shutting_down`、`silenced`、`model_auth_invalid`，照常写入 dedupe / inbound，不回复，重启或解除静默后不补回复。intent 增加错误码 `shutdown_before_send`、`silenced`。静默阻止新 intent 和表情；发送组在当前一条结束后停止，剩余标为 silenced；主动消息直接丢弃并审计。安全停止与正在执行任务的交付遵循该规格 §6。

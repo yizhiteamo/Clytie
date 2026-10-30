@@ -488,3 +488,13 @@ Issue #36（用户已确认）：窗口聊天原文保持原样，不从撤销�
 - owner_confirmed / owner_stated 的印象与黑话不淡化，但核心记忆排除 profile / jargon；修订升级规则不变，使用范围不变。core:with_owner 只用于群聊 episode，主人参与的黑话不因此免淡化。
 - 来源会话按 memory-recall-spec §4.6 的会话登记表处理：本体写入时按配置、导入时按包清单登记；只以 channel + kind + platform_id 在当前配置对应，逻辑 ID 和群名称不参与身份判断。不改 origin_conversation_id，不产生修订、不进内容指纹。未对应时仅对内可见、按登记类别淡化；旧包和无法得知身份的非印象来源不淡化。再次导出保留登记；更换 channel 不自动对应。本地与导入同逻辑 ID、不同平台身份的记录须分别引用自己的登记。
 - 停用回想立即取消进行中的工作且不写入；重新启用时所有会话进度移到现在，停用期间和未完成窗口都跳过，status 只显示跳过段数。
+
+## A4.1 连接状态与通知补充
+
+按 `supervisor-spec.md` §3.3、§9：
+
+- `Channel` 新增可选方法 `state() -> ChannelState`；`ChannelState` 字段为 `status`（`online`、`connecting`、`offline`、`auth_invalid`、`unknown`）、`since` 和可选 `code`。未实现时为 `unknown`，现有插件不需要修改。
+- 新增 `ChannelUnavailable(code)`，供 `connect()` 抛出。
+- 错误码增加 `auth_invalid`（凭证或登录态失效）和 `quota_exhausted`（额度用完），可以出现在 `ModelTurn.error.code`、`Receipt.error.code` 和 `ChannelUnavailable(code)`。原有 `rate_limited` / `transient` 不变。
+- notifier 清单增加可选 `outward: bool`，默认 `false`。静默期间暂停 `outward: true` 的实例通知插件；其他照常。
+- 契约测试覆盖未实现 `state()` 时为 `unknown`，以及 connect 抛出 auth_invalid 时不重启。

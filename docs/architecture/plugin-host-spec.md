@@ -61,3 +61,9 @@ catalog.json 仅从仓库官方清单生成，不读取实例清单；按 id 和
 第 6 轮用户确认的补充：close 的集合构造、停止排序及执行按伴侣隔离异常，结果记录每个伴侣 stopped / not_stopped 与原因；停止只排序运行集合中的依赖边，缺失依赖不阻止关闭，依赖方先停，无法排序的剩余项按 id 停止。多插件启用遇到 MetadataLockTimeout 时，异常的 enabled（元组）与 patch（配置补丁）包含本次已完成启用的插件，不包含此前已运行或本次失败的插件。
 
 关闭被取消和同一伴侣内继续停止其余插件的后续规则，见 `../design/supervisor.md` 的“安全停止（A4，用户已确认）”；在 A4 验收实现。
+
+## A4.1 实例范围装配与关闭
+
+按 `supervisor-spec.md` §5.1，新增只用于 notifier 的实例装配范围，沿用宿主装配路径和清单校验规则。列表取全局 `notify.plugins`，ctx 只有 config、log、clock、subprocess，没有伴侣、记忆、账本、平台或模型。伴侣级通知仍使用自己的通知插件。
+
+按 §6，close 按依赖方先停逐个停止，单个插件异常后继续停止其余插件，把失败插件与原因记入 not_stopped；一个伴侣失败不影响其他伴侣。关闭取消在所有伴侣完成后传播，完整结果由 ShutdownCancelled.result 携带。

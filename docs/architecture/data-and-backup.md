@@ -26,7 +26,9 @@ Clytie-home/
 ├─ backups/                   加密备份及回执
 │  └─ ledger/<cid>/           账本迁移快照及 failed-… 加密失败现场
 ├─ exports/                   导出的记忆包和文本快照
-└─ run/                       进程锁、健康状态；memory-temp/ 为实例内短暂 SQLite 校验文件
+├─ supervisor/                silence.json、notify-state.json、audit.jsonl（A4.3 备份）
+├─ logs/supervisor/            守护进程日志（不备份，A4.3 轮转）
+└─ run/                       supervisor.lock、health.json；memory-temp/ 为实例内短暂 SQLite 校验文件
 ```
 
 迁移到另一台电脑 = 克隆代码仓库 + 恢复实例目录的备份。
