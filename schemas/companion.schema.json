@@ -462,6 +462,64 @@
           "default": [
             "owner_private"
           ]
+        },
+        "core_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 5e4,
+          "default": 4000
+        },
+        "recall_chars": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 5e4,
+          "default": 3000
+        },
+        "recall_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 10
+        },
+        "semantic_min_similarity": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1,
+          "default": 0.5
+        },
+        "rerank_candidates": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 200,
+          "default": 30
+        },
+        "max_writes_per_record": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+        "leak_min_chars": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 50,
+          "default": 8
+        },
+        "embedder": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "default": null
+        },
+        "reranker": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "default": null
         }
       },
       "patternProperties": {

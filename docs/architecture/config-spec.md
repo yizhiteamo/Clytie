@@ -106,6 +106,17 @@
 | 字段 | 类型 |
 |---|---|
 | `private_scenes` | 场景名列表（`[owner_private]`）：哪些场景可以读取私密记忆 |
+| `core_chars` | 整数 200–50_000（4000） |
+| `recall_chars` | 整数 200–50_000（3000） |
+| `recall_limit` | 整数 1–50（10） |
+| `semantic_min_similarity` | 数值 -1–1（0.5）；语义路仅接受余弦相似度严格大于此值的候选；离线技术默认值，真实模型选型时校准 |
+| `rerank_candidates` | 整数 5–200（30） |
+| `max_writes_per_record` | 整数 1–20（5） |
+| `leak_min_chars` | 整数 4–50（8） |
+| `embedder` | 插件 id 或 null（null：只用关键词） |
+| `reranker` | 插件 id 或 null（null） |
+
+`embedder`、`reranker` 指向的插件必须已启用并实现对应扩展点，否则配置无效（memory-spec §10）。
 
 `private_scenes` 的校验规则（不满足时配置无效）：
 - 必须是 `names.internal_scenes` 的子集（`agent-spec.md` §9.1）。

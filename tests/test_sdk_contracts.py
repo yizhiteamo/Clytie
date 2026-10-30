@@ -59,6 +59,7 @@ from clytie.sdk.testing.samples import (
     sample_call,
     sample_conversation,
     sample_event,
+    sample_import_candidate,
     sample_intent,
     sample_invocation,
     sample_memory,
@@ -166,7 +167,7 @@ async def test_retriever_contract(ctx):
 
 
 async def test_importer_contract_without_reading_source(ctx):
-    importer = FakeImporter((sample_memory(ctx.clock),), ctx)
+    importer = FakeImporter((sample_import_candidate(ctx.clock),), ctx)
     await assert_importer_contract(importer, Path("fictional-source.jsonl"))
 
 
@@ -230,7 +231,7 @@ async def test_running_token_cancellation_on_remaining_fake_interfaces(ctx):
     async def import_records(cancel):
         return [
             record
-            async for record in FakeImporter((sample_memory(ctx.clock),), ctx).read(
+            async for record in FakeImporter((sample_import_candidate(ctx.clock),), ctx).read(
                 Path("fictional.jsonl"), cancel
             )
         ]

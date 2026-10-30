@@ -139,3 +139,21 @@ def sample_task_summary(clock):
         started_at=clock.now(),
         finished_at=clock.now(),
     )
+
+
+def sample_import_candidate(clock):
+    from clytie.sdk.types import ImportCandidate
+
+    record = sample_memory(clock)
+    fields = (
+        "record_id",
+        "kind",
+        "content",
+        "visibility",
+        "created_at",
+        "updated_at",
+        "retracted",
+        "tags",
+        "source_ref",
+    )
+    return ImportCandidate(**{key: getattr(record, key) for key in fields})

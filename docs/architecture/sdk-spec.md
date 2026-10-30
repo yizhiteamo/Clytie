@@ -158,7 +158,9 @@
 | `content` | str | |
 | `subject` | str? | 相关的 `actor_id` |
 | `visibility` | `private` \| `public` \| `relationship` | |
-| `write_mode` | `auto` \| `confirmed` | |
+| `write_mode` | `auto` \| `confirmed` | confirmed 当且仅当 basis 为 owner_confirmed |
+| `basis` | `owner_confirmed` \| `owner_stated` \| `observed` | 本体填写；旧格式缺失时按 write_mode 推导：confirmed 对应 owner_confirmed，否则 observed |
+| `origin_conversation_id` | str? | 本体填写的可信来源会话，旧格式缺失为 null；随修订保存、导出 |
 | `source_type` | `private` \| `group` \| `owner_group_interaction` | |
 | `source_ref` | str? | 账本追踪号 |
 | `scope` | str? | 黑话等按群隔离的记录所属的 `conversation_id` |
@@ -193,6 +195,8 @@
 - `Budget.deadline` 到达时，本体触发同一个取消令牌，原因为 `deadline`。
 
 ## 3. 时钟协议
+
+生产时钟由 `src/clytie/clock.py` 的 `SystemClock` 提供，是唯一允许调用系统时钟的文件（仅 `datetime.now`、`time.monotonic`、`asyncio.sleep`）；本体其他代码通过注入获得时钟，插件通过 `ctx.clock` 获得。此适配边界经 Claude 只读技术确认，不改变业务时钟规则。
 
 `Clock`：
 - `now() -> datetime`（UTC，带时区）
@@ -287,7 +291,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `service` | 清单声明 `{name, version, methods: [...]}`；`async call(method: str, args: dict) -> dict`。使用方通过 `ctx.services.get(name).call(...)` 调用，参数和返回值都必须可序列化 |
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
 | `memory.retriever` | `async search(q: MemoryQuery, candidates: CandidateReader, cancel) -> list[MemoryHit]`；`CandidateReader` 只返回 `q.allowed_visibility` 内的记录 |
-| `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel) -> AsyncIterator[MemoryRecord]`；本体负责快照、预览、合并 |
+| `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出 `ImportCandidate`（具体字段编码见 ADR 0008），包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
 | `memory.consolidator` | `async run(window_start, window_end, reader, cancel) -> list[MemoryRecord]`（kind=`episode`，由本体写入） |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
@@ -343,6 +347,10 @@ async count() -> int
 ```
 
 只返回：可见等级在 `allowed_visibility` 内、未撤销、未冻结的记录。`get` 对不在范围内的 ID 静默跳过（不报错，避免泄露"这条记录存在"）。
+
+### 7.2a memory.reranker
+
+`async rerank(query: str, records: list[MemoryRecord], cancel) -> list[float]`：返回与 records 等长的分数。只接收本体按 memory-spec §3 投影后的记录；采用 §7.1 的 factory 编码。不可用时跳过重排（memory-spec §4）。
 
 ### 7.3 ApiClient（CLI 扩展使用）
 
@@ -413,6 +421,8 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
   4. 私密记录只在**同时满足**以下条件时可读：插件有 `memory.read.private`，并且绑定的场景在伴侣配置 `memory.private_scenes` 中（默认只有 `owner_private`）。可以加入哪些场景、有什么限制，见 `config-spec.md` 第 3 节。
   5. 只有 `memory.read.public` 的插件，在任何场景都读不到私密记录。
   6. `get` 对当前场景读不到的记录返回 `None`，和"记录不存在"无法区分。
+- A3.3 的记忆视图由本体存储支持，所有读取按 `memory-spec.md` §3 同时裁剪可见等级和来源会话；宿主绑定场景与会话，插件不能指定可信来源。
+- 写入入口忽略外部传入的 basis、write_mode、origin_conversation_id；插件写入 basis 一律为 observed，source_type 由宿主填写。插件 source_ref/scope 仅作说明，投影不信任。新建、去重与可信程度只升不降按 memory-spec §1.3；插件只能修订或撤销 basis=observed 的记录；owner_confirmed、owner_stated 只读，修订或撤销返回与找不到记录相同的错误。聊天和插件操作不降低可信程度；用户确认的导入 restore、撤销导入、冲突选择及导入器再次导入可按目标版本恢复 basis，降低项在计划中单独列出。已校验本系统导出包是忽略外部可信字段的唯一例外，由本体保留或规范化，导入器不能自称可信包。
 - **MemoryDraft**：`kind`、`content`、`subject?`、`visibility`、`source_type`、`source_ref?`、`scope?`、`tags`。插件写入的记录 `write_mode` 一律为 `auto`。
 - `revise` / `retract` 的 `expected_revision` 与当前修订号不一致时抛 `RevisionConflict`。
 

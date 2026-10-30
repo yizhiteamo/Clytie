@@ -21,12 +21,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     task_parser.add_argument("--companion")
     task_parser.add_argument("--json", action="store_true")
     task_parser.add_argument("--full", action="store_true")
+    from clytie.memory.cli import add_parser
+    from clytie.memory.cli import run as memory_run
+
+    add_parser(subcommands)
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as exc:
         if exc.code and argv and "task" in argv:
             return 4
         raise
+    if arguments.command == "memory":
+        return memory_run(arguments)
     if arguments.command == "task":
         result = local_task(
             arguments.task_id,

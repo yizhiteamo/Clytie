@@ -397,6 +397,8 @@ class MemoryRecord(SDKModel):
     subject: str | None = None
     visibility: Visibility
     write_mode: Literal["auto", "confirmed"]
+    basis: Literal["owner_confirmed", "owner_stated", "observed"] = "observed"
+    origin_conversation_id: str | None = None
     source_type: Literal["private", "group", "owner_group_interaction"]
     source_ref: str | None = None
     scope: str | None = None
@@ -405,6 +407,44 @@ class MemoryRecord(SDKModel):
     decay: MemoryDecay
     tags: FrozenList[str] = Field(default_factory=FrozenList)
     retracted: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_basis(cls, value):
+        if isinstance(value, dict) and "basis" not in value:
+            value = dict(value)
+            value["basis"] = (
+                "owner_confirmed" if value.get("write_mode") == "confirmed" else "observed"
+            )
+        return value
+
+
+class ImportAccount(SDKModel):
+    channel: str
+    account: str
+
+
+class ImportConversation(SDKModel):
+    channel: str
+    kind: Literal["private", "group"]
+    platform_id: str
+
+
+class ImportCandidate(SDKModel):
+    """导入器不可信候选；身份映射与可信程度由本体确认。"""
+
+    record_id: TraceId
+    kind: Literal["fact", "preference", "event", "episode", "profile", "jargon"]
+    content: str
+    visibility: Visibility
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
+    retracted: bool = False
+    tags: FrozenList[str] = Field(default_factory=FrozenList)
+    source_ref: str | None = None
+    subject_account: ImportAccount | None = None
+    origin_conversation: ImportConversation | None = None
+    proposed_basis: Literal["owner_confirmed", "owner_stated", "observed"] = "observed"
 
 
 class MemoryQuery(SDKModel):

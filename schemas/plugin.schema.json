@@ -637,6 +637,22 @@
               "required": [
                 "factory"
               ]
+            },
+            "reranker": {
+              "type": "object",
+              "properties": {
+                "factory": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false,
+              "required": [
+                "factory"
+              ]
             }
           },
           "patternProperties": {

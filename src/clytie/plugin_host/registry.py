@@ -51,6 +51,7 @@ FACTORIES = {
     "embedder": {"embed": True},
     "tool": {"idempotency_key": False, "prepare": True, "execute": True},
     "memory.retriever": {"search": True},
+    "memory.reranker": {"rerank": True},
     "memory.importer": {"detect": False, "read": False},
     "memory.consolidator": {"run": True},
     "notifier": {"notify": True},
@@ -78,6 +79,8 @@ def assemble(runtime, *, role=None, primary=True):
                     asynchronous and not inspect.iscoroutinefunction(function)
                 ):
                     raise TypeError("factory object does not implement its SDK protocol")
+            if point == "memory.importer" and inspect.iscoroutinefunction(implementation.detect):
+                raise TypeError("importer detect must be synchronous")
             if point in {"model", "channel"}:
                 cls = ModelFeatures if point == "model" else ChannelFeatures
                 if not isinstance(implementation.features(), cls):
@@ -186,8 +189,17 @@ def validate_result(point, method, result):
         if not all(isinstance(item, EventEnvelope) for item in result):
             raise TypeError("invalid inbound event")
     if point == "memory.importer" and method == "read":
-        if not isinstance(result, list) or not all(isinstance(r, MemoryRecord) for r in result):
+        # 宿主已经在取消/超时边界内消费 SDK 的异步迭代器；这里只校验收集结果。
+        from clytie.sdk.types import ImportCandidate
+
+        if not isinstance(result, list) or not all(isinstance(r, ImportCandidate) for r in result):
             raise TypeError("invalid importer record")
+    if point == "memory.reranker":
+        if not isinstance(result, list) or not all(
+            isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+            for score in result
+        ):
+            raise TypeError("invalid reranker scores")
     if point == "service":
         if not isinstance(result, Mapping):
             raise TypeError("service must return a JSON object")

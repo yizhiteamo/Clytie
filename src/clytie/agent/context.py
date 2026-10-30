@@ -55,7 +55,16 @@ class Context:
         return "引用了一条看不到的消息"
 
     async def build(
-        self, conversation, actor, events, capabilities, *, mode=None, extra="", proactive=False
+        self,
+        conversation,
+        actor,
+        events,
+        capabilities,
+        *,
+        mode=None,
+        extra="",
+        proactive=False,
+        memory_trace=None,
     ):
         agent, ledger = self.agent, self.agent.ledger
         result = [
@@ -123,11 +132,12 @@ class Context:
             result.append(message("system", "上次拆分消息：" + "；".join(parts)))
             with ledger.transaction():
                 ledger.audit("partial_group_context", group_id=group)
-        # A3.3 通过本体投影接口接入；默认空，不让插件持有账本。
-        result.extend(await agent.memory_context(conversation, actor))
+        memory_position = len(result)
         budget = agent.config.get("context", {}).get("material_budget_chars", 6000)
         sections = await agent.host.context_sections(
-            agent.cid, ContextRequest(scene=conversation.scene, actor=actor, budget_chars=budget)
+            agent.cid,
+            ContextRequest(scene=conversation.scene, actor=actor, budget_chars=budget),
+            conversation_id=conversation.conversation_id,
         )
         if mode:
             result.append(message("system", "当前模式：" + mode.name))
@@ -172,6 +182,17 @@ class Context:
                 )
             )
         limits = agent.config.get("context", {})
+        memory_query = "\n".join(
+            [text_parts(e.message.parts) for e in events if e.message]
+            + [text for _, _, text in sorted(history, key=lambda r: r[0])[-3:]]
+        )
+        if agent.memory_context:
+            memory_messages = await agent.memory_context(conversation, actor)
+        else:
+            memory_messages = await agent.memory.build(
+                memory_trace or "context", conversation, memory_query
+            )
+        result[memory_position:memory_position] = memory_messages
         remaining, kept = limits.get("max_chars", 20_000), []
         for _, role, content in sorted(history, key=lambda r: r[0])[
             -limits.get("max_messages", 100) :

@@ -45,6 +45,7 @@ from clytie.sdk.types import (
     DeliveryIntent,
     Denial,
     EventEnvelope,
+    ImportCandidate,
     Invocation,
     MemoryHit,
     MemoryQuery,
@@ -333,16 +334,27 @@ async def assert_retriever_contract(retriever: Any, query: MemoryQuery, candidat
 async def assert_importer_contract(importer: Any, source: Path) -> None:
     assert isinstance(importer.detect(source), bool)
 
-    async def collect(cancel: CancelToken) -> list[MemoryRecord]:
+    async def collect(cancel: CancelToken) -> list[ImportCandidate]:
         stream = importer.read(source, cancel)
         assert isinstance(stream, AsyncIterator)
         return [record async for record in stream]
 
     for record in await collect(CancelToken()):
-        assert isinstance(record, MemoryRecord)
+        assert isinstance(record, ImportCandidate)
         assert_roundtrip(record)
     await assert_token_cancellation(collect)
     await assert_task_cancellation(lambda: collect(CancelToken()))
+
+
+async def assert_reranker_contract(reranker: Any, query: str, records: list[MemoryRecord]) -> None:
+    scores = await reranker.rerank(query, records, CancelToken())
+    assert isinstance(scores, list) and len(scores) == len(records)
+    assert all(
+        isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score)
+        for score in scores
+    )
+    await assert_token_cancellation(lambda cancel: reranker.rerank(query, records, cancel))
+    await assert_task_cancellation(lambda: reranker.rerank(query, records, CancelToken()))
 
 
 async def assert_consolidator_contract(

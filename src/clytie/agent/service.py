@@ -49,7 +49,7 @@ class Capability:
         self.host, self.cid, self.reg = host, cid, reg
 
     def idempotency_key(self, call, inv):
-        with bind_scene(inv.conversation.scene):
+        with bind_scene(inv.conversation.scene, inv.conversation.conversation_id):
             return self.reg.implementation.idempotency_key(call, inv)
 
     async def prepare(self, call, inv):
@@ -62,6 +62,7 @@ class Capability:
             inv,
             method="prepare",
             scene=inv.conversation.scene,
+            conversation_id=inv.conversation.conversation_id,
         )
 
     async def execute(self, plan, inv, cancel):
@@ -75,6 +76,7 @@ class Capability:
             cancel,
             method="execute",
             scene=inv.conversation.scene,
+            conversation_id=inv.conversation.conversation_id,
         )
 
 
@@ -113,7 +115,17 @@ class Agent:
             config.get("protection", {}), kernel.emit, config["model"]["plugin"]
         )
         self.context = Context(self)
-        self.memory_context = memory_context or self._empty_memory
+        from clytie.memory.context import MemoryContext
+
+        self.memory = MemoryContext(
+            host.memory_store(self.cid, config, instance),
+            log=self.log,
+            ledger=self.ledger,
+            changed=self.rebuild_memory,
+        )
+        self.memory.store.changed = self.rebuild_memory
+        self.outbound.memory_guard = self.memory.guard
+        self.memory_context = memory_context
         self.batches, self.background, self.warnings = {}, set(), []
         self.filtered_count = 0
         kernel.config = config
@@ -126,22 +138,52 @@ class Agent:
             {key: value["scene"] for key, value in instance.get("conversations", {}).items()}
         )
 
-    async def model_call(self, method, *args, scene="public_group"):
+    async def model_call(self, method, *args, scene="public_group", conversation_id=None):
         if self.model_registration is None:
             return await getattr(self.model, method)(*args)
         reg = self.model_registration
         return await self.host.invoke(
-            self.cid, reg.plugin_id, "model", reg.key, *args, method=method, scene=scene
+            self.cid,
+            reg.plugin_id,
+            "model",
+            reg.key,
+            *args,
+            method=method,
+            scene=scene,
+            conversation_id=conversation_id,
         )
 
-    async def _empty_memory(self, conversation, actor):
-        return []
+    def rebuild_memory(self):
+        self._memory_dirty = True
+        if not getattr(self, "_memory_rebuilding", None) or self._memory_rebuilding.done():
+
+            async def rebuild():
+                while self._memory_dirty:
+                    self._memory_dirty = False
+                    await self.memory.retrieval.rebuild()
+
+            self._memory_rebuilding = self.track(rebuild())
+            jobs = self.host.memory_jobs.setdefault(self.cid, set())
+            jobs.add(self._memory_rebuilding)
+            self._memory_rebuilding.add_done_callback(jobs.discard)
 
     async def start(self):
         if self.features.agent_type:
             raise ValueError("unsupported_model_type")
         self.protection.update(await self.model_call("quota"))
         await self.kernel.start()
+        from clytie.memory.retrieval import HostExtension
+
+        for name, point in (("embedder", "embedder"), ("reranker", "memory.reranker")):
+            pid = self.config.get("memory", {}).get(name)
+            reg = next(
+                (r for r in self.host.registrations(self.cid, point) if r.plugin_id == pid), None
+            )
+            if reg:
+                setattr(self.memory.retrieval, name, HostExtension(self.host, self.cid, reg))
+                if name == "embedder":
+                    self.memory.retrieval.embedder_id = pid
+        self.rebuild_memory()
 
     def track(self, coroutine):
         task = background(coroutine)
@@ -230,6 +272,7 @@ class Agent:
                 )
         if not self.features.supports_tools:
             return [], "\n".join(lines)
+        specs.extend(self.memory.specifications(actor))
         if self.cancellable(conversation):
             specs.append(
                 ToolSpec(
@@ -432,6 +475,7 @@ class Agent:
                 ),
                 child,
                 scene=conversation.scene,
+                conversation_id=conversation.conversation_id,
             )
         )
         timer = asyncio.create_task(self.clock.sleep_until(limit))
@@ -516,7 +560,14 @@ class Agent:
                 specs, states = self.tools(conversation, actor, proactive)
                 exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
                 context = await self.context.build(
-                    conversation, actor, events, states, mode=mode, extra=extra, proactive=proactive
+                    conversation,
+                    actor,
+                    events,
+                    states,
+                    mode=mode,
+                    extra=extra,
+                    proactive=proactive,
+                    memory_trace=trace,
                 )
                 if exhausted:
                     context.append(message("system", "工具轮数已用完，请直接回复"))
@@ -601,6 +652,7 @@ class Agent:
             )
         finally:
             self.kernel.record_tasks.pop(trace, None)
+            self.memory.sessions.pop(trace, None)
 
     async def execute(self, trace, conversation, actor, call, specs, token):
         spec = next((s for s in specs if s.name == call.tool), None)
@@ -631,6 +683,8 @@ class Agent:
                 error={"code": "invalid_arguments", "message": ""},
             )
         if call.tool.startswith("core_"):
+            if call.tool in {"core_remember", "core_forget", "core_recall"}:
+                return await self.memory.execute(trace, conversation, actor, call, token)
             if call.tool == "core_cancel_task":
                 content = await self.kernel.cancel(
                     self.cid,
@@ -720,7 +774,7 @@ class Agent:
         if hits and not fallback:
             specs, states = self.tools(conversation, actor, proactive)
             context = await self.context.build(
-                conversation, actor, events, states, proactive=proactive
+                conversation, actor, events, states, proactive=proactive, memory_trace=trace
             )
             context.append(
                 message(
@@ -729,7 +783,8 @@ class Agent:
                     + json.dumps(hits, ensure_ascii=False),
                 )
             )
-            context.append(message("user", text_parts(draft.parts)))
+            if "包含了不能在这里说的私密内容" not in hits.get("privacy", []):
+                context.append(message("user", text_parts(draft.parts)))
             try:
                 turn = await self.generate(trace, context, [], conversation, token, rewrite=True)
                 if turn.finish == "stop":

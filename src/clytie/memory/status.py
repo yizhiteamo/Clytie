@@ -1,0 +1,97 @@
+"""只读记忆状态，不启动插件，不打印任何记忆内容。"""
+
+from pathlib import Path
+
+from clytie.config import thaw
+from clytie.plugin_host.snapshots import contained
+
+from .context import MemoryContext
+from .store import MemoryStore
+
+
+def notices(report, *, clock):
+    result = []
+    home = Path(report.home)
+    for companion in report.companions:
+        cid = companion["id"]
+        config = report.plugin_configs.get(cid, {}).get("config", {})
+        path = home / "companions" / cid / "memory" / "memory.sqlite3"
+        if not path.is_file():
+            continue
+        store = None
+        try:
+            contained(home, path)
+            store = MemoryStore(
+                path,
+                clock=clock,
+                config=thaw(config),
+                instance=thaw(report.instance),
+                readonly=True,
+            )
+            active = [r for r in store.all_records() if not r.retracted]
+            missing = len({r.record_id for r in active} & set(store.meta("missing_origins", [])))
+            if missing:
+                result.append(dict(companion_id=cid, code="memory_missing_origins", count=missing))
+            if not config.get("memory", {}).get("embedder") or store.meta(
+                "embedder_unavailable", False
+            ):
+                result.append(
+                    dict(
+                        companion_id=cid,
+                        code="memory_keyword_only",
+                        message="向量模型不可用，仅使用关键词",
+                    )
+                )
+            progress = store.meta("embedding_progress")
+            if progress and progress["complete"] < progress["total"]:
+                result.append(dict(companion_id=cid, code="memory_embedding_progress", **progress))
+            # 仅计算对内核心记录的展示预算，不把原文放进状态结果。
+            core = sorted(
+                (
+                    r
+                    for r in store.project("owner_private", None)
+                    if r.basis == "owner_confirmed"
+                    or r.kind == "preference"
+                    and r.basis == "owner_stated"
+                ),
+                key=lambda r: (r.updated_at, r.record_id),
+                reverse=True,
+            )
+            memory = MemoryContext(store, log=None)
+            session = memory.session("status")
+            used, count = 0, 0
+            for record in core:
+                line = memory.label(record, session)
+                if used + len(line) <= config.get("memory", {}).get("core_chars", 4000):
+                    used += len(line)
+                    count += 1
+                else:
+                    session.references.pop(f"[记忆{len(session.references)}]")
+            if len(core) > count:
+                result.append(
+                    dict(companion_id=cid, code="memory_core_overflow", count=len(core) - count)
+                )
+        except Exception:
+            result.append(dict(companion_id=cid, code="memory_state_unreadable"))
+        finally:
+            if store is not None:
+                store.close()
+    directory = home / "run" / "memory-temp"
+    if directory.is_dir():
+        try:
+            contained(home, directory)
+            for path in sorted(directory.iterdir()):
+                contained(home, path)
+                if path.is_file():
+                    info = path.stat()
+                    result.append(
+                        dict(
+                            code="memory_temporary_file_retained",
+                            file=path.name,
+                            bytes=info.st_size,
+                            modified_at=info.st_mtime,
+                        )
+                    )
+        except (OSError, ValueError):
+            result.append(dict(code="memory_temporary_files_unreadable"))
+    return result
