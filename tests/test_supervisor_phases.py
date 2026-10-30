@@ -91,6 +91,9 @@ async def test_migration_stall_never_killed_and_silence_returns_pending(tmp_path
         await child.heartbeat(phase="starting", silenced=True)
         await child.ready()
         await spin()
+        assert svc.rows["companion_a"]["silence_status"] == "pending_migrating"
+        await child.heartbeat(phase="running", silenced=True)
+        await spin()
         assert svc.rows["companion_a"]["silence_status"] == "confirmed"
     finally:
         await svc.stop()

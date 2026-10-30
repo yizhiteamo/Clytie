@@ -181,7 +181,11 @@ class Supervisor:
                         row["silenced"] = bool(msg.get("silenced", False))
                         row["warnings"] = list(msg.get("warnings", []))
                         row["quota"] = msg.get("quota", "unknown")
-                        if row["phase"] != "migrating" and row["silenced"] == self.silenced:
+                        if (
+                            row["phase"] == "running"
+                            and "silenced" in msg
+                            and row["silenced"] == self.silenced
+                        ):
                             row["silence_status"] = "confirmed"
                         if not self.stopping and ready is not None:
                             row["state"] = (
