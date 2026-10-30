@@ -627,14 +627,7 @@ class Transfers:
                 self.store.db.execute(
                     "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
                 )
-                missing = set(self.store.meta("missing_origins", []))
-                missing.update(
-                    key
-                    for key, r in loaded["records"].items()
-                    if r.origin_conversation_id
-                    and r.origin_conversation_id not in self.store.instance.get("conversations", {})
-                )
-                self.store.set_meta("missing_origins", sorted(missing))
+                origins.track(self.store)
                 if plan["mode"] == "merge":
                     self.store.set_meta(
                         "merged_packages",
@@ -770,6 +763,7 @@ class Transfers:
             self.store.db.execute(
                 "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
             )
+            origins.track(self.store)
             self._record_import(import_id, changes, undo=plan["undo"], snapshot=backup.name)
         self._retention()
         return import_id

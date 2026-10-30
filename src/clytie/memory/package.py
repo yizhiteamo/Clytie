@@ -67,12 +67,12 @@ def temporary_database(home, companion_id, kind):
                 candidate.unlink()
 
 
-def snapshot(store, home, companion_id):
+def snapshot(store, home, companion_id, *, local_state=True):
     with temporary_database(home, companion_id, "export") as path:
-        return _snapshot(store, path)
+        return _snapshot(store, path, local_state=local_state)
 
 
-def _snapshot(store, path):
+def _snapshot(store, path, *, local_state=True):
     source = sqlite3.connect(":memory:")
     output = sqlite3.connect(path)
     try:
@@ -85,6 +85,8 @@ def _snapshot(store, path):
                 if store.has_table(table)
                 else []
             )
+            if table == "metadata" and not local_state:
+                rows = [row for row in rows if row[0] != "missing_origins"]
             if rows:
                 placeholders = ",".join("?" for _ in rows[0])
                 output.executemany(f"INSERT INTO {table} VALUES({placeholders})", rows)
@@ -219,7 +221,7 @@ def payload(store, companion_id, home):
         Version(clytie_version)
     except (metadata.PackageNotFoundError, ValueError) as exc:
         raise ValueError("无法读取有效的 Clytie 安装版本，拒绝导出") from exc
-    data = snapshot(store, home, companion_id)
+    data = snapshot(store, home, companion_id, local_state=False)
     db = open_database(data, home, companion_id)
     try:
         uid_row = db.execute("SELECT value FROM metadata WHERE key='companion_uid'").fetchone()

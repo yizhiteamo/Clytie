@@ -87,3 +87,53 @@ def backfill(store):
     for row in store.db.execute("SELECT data FROM revisions").fetchall():
         record = MemoryRecord.model_validate_json(row[0])
         attach(store, record, configured(store, record.origin_conversation_id))
+
+
+def sourced(store):
+    return [
+        r
+        for r in store.all_records()
+        if not r.retracted
+        and r.origin_conversation_id is not None
+        and not (r.kind == "profile" and "core:profile" in r.tags)
+    ]
+
+
+def current_key(store, record):
+    if not store.has_table("revision_origins"):
+        return None
+    row = store.db.execute(
+        "SELECT registry_key FROM revision_origins WHERE record_id=? AND revision=?",
+        (record.record_id, record.revision),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def missing_history(store):
+    return {
+        tuple(pair)
+        for pair in store.meta("missing_origins", [])
+        if isinstance(pair, list)
+        and len(pair) == 2
+        and all(isinstance(value, str) for value in pair)
+    }
+
+
+def track(store):
+    """在运行/导入锁内观察来源；只在本地集合变化时写库。"""
+    records = sourced(store)
+    current = {r.record_id: current_key(store, r) for r in records}
+    pairs = {(rid, key) for rid, key in missing_history(store) if current.get(rid) == key}
+    pairs.update(
+        (r.record_id, current[r.record_id])
+        for r in records
+        if current[r.record_id] is not None and resolve(store, r) is None
+    )
+    value = [list(pair) for pair in sorted(pairs)]
+    if value == store.meta("missing_origins", []):
+        return
+    if store.db.in_transaction:
+        store.set_meta("missing_origins", value)
+    else:
+        with store.transaction():
+            store.set_meta("missing_origins", value)

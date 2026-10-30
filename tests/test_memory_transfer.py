@@ -282,7 +282,11 @@ async def test_missing_conversation_projects_internally_and_snapshot_failure_is_
     assert target.uid is None and not target.all_records()
     await transfers.apply(plan["id"], passphrase=PASSPHRASE)
     assert target.get_raw(record.record_id).origin_conversation_id == record.origin_conversation_id
-    assert target.meta("missing_origins") == [record.record_id]
+    from clytie.memory.origins import current_key
+
+    assert target.meta("missing_origins") == [
+        [record.record_id, current_key(target, target.get_raw(record.record_id))]
+    ]
     assert target.project("public_group", "unrelated") == []
     assert target.project("owner_private", "owner_chat")
 

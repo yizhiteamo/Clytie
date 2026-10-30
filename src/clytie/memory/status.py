@@ -66,18 +66,14 @@ def notices(report, *, clock):
                             },
                         )
                     )
-            active = [r for r in store.all_records() if not r.retracted]
-            from .origins import binding, resolve
+            from .origins import current_key, missing_history, resolve, sourced
 
-            sourced = [
-                r
-                for r in active
-                if r.origin_conversation_id is not None
-                and not (r.kind == "profile" and "core:profile" in r.tags)
-            ]
-            missing = sum(resolve(store, r) is None for r in sourced)
+            records = sourced(store)
+            missing = sum(resolve(store, r) is None for r in records)
+            history = missing_history(store)
             restored = sum(
-                binding(store, r) is not None and resolve(store, r) is not None for r in sourced
+                (r.record_id, current_key(store, r)) in history and resolve(store, r) is not None
+                for r in records
             )
             if restored:
                 result.append(
@@ -85,7 +81,7 @@ def notices(report, *, clock):
                         companion_id=cid,
                         code="memory_origins_resolved",
                         count=restored,
-                        message=f"有 {restored} 条记录的来源会话已对应",
+                        message=f"有 {restored} 条记录的来源会话已恢复对应",
                     )
                 )
             if missing:

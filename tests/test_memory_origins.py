@@ -192,3 +192,104 @@ async def test_status_reports_unmatched_and_resolved_without_content(homes):
     assert not any(n["code"] == "memory_missing_origins" for n in after)
     assert any(n["code"] == "memory_origins_resolved" and n["count"] == 1 for n in after)
     assert "虚构纸船" not in str(before) + str(after)
+
+
+async def test_status_restored_only_after_missing_observation_and_readonly(homes):
+    from types import SimpleNamespace
+
+    from clytie.memory.status import notices
+
+    from .host_helpers import host
+
+    store, home, _ = homes("local")
+    store.instance["conversations"]["group_a"] = conversation()
+    missing_later = write(store)
+    store.instance["conversations"]["always"] = conversation("fake-always")
+    write(store, "always", "始终对应的虚构经历")
+    report = SimpleNamespace(
+        home=home,
+        companions=[{"id": "companion_a"}],
+        plugin_configs={"companion_a": {"config": store.config}},
+        instance=store.instance,
+    )
+
+    def counts():
+        before = list(store.db.iterdump())
+        result = {n["code"]: n.get("count", 0) for n in notices(report, clock=store.clock)}
+        assert list(store.db.iterdump()) == before
+        return result
+
+    async def restart():
+        h = host(home, clock=store.clock)
+        h.memory_store("companion_a", store.config, store.instance)
+        await h.close()
+
+    await restart()
+    assert counts().get("memory_origins_resolved", 0) == 0
+    generation = store.meta("generation")
+    await restart()
+    assert store.meta("generation") == generation
+    saved = store.instance["conversations"].pop("group_a")
+    await restart()
+    assert counts()["memory_missing_origins"] == 1
+    store.instance["conversations"]["renamed"] = saved
+    await restart()
+    assert counts()["memory_origins_resolved"] == 1
+    store.revise(
+        missing_later.record_id,
+        missing_later.revision,
+        {"content": "新的虚构修订"},
+        operator="owner",
+        scene="owner_private",
+        conversation_id="owner_chat",
+    )
+    await restart()
+    assert counts()["memory_origins_resolved"] == 1
+    # 即使编号相同，换登记后也不能借用旧登记的丢失历史。
+    current = store.get_raw(missing_later.record_id)
+    with store.transaction():
+        store._save(
+            current.model_copy(update={"revision": current.revision + 1}),
+            operator="import",
+            origin_binding={**origins.binding(store, current), "platform_id": "fake-always"},
+        )
+    assert counts().get("memory_origins_resolved", 0) == 0
+    await restart()
+    assert store.meta("missing_origins") == []
+    with store.transaction():
+        store.set_meta("missing_origins", [current.record_id])
+    assert counts().get("memory_origins_resolved", 0) == 0
+    await restart()
+    assert store.meta("missing_origins") == []
+
+
+async def test_export_excludes_local_missing_history_but_backup_retains_it(homes):
+    import json
+
+    from clytie.memory.crypto import un64
+    from clytie.memory.package import open_database, payload, snapshot
+
+    source, home, _ = homes("source")
+    source.instance["conversations"]["group_a"] = conversation()
+    write(source)
+    source.instance["conversations"].pop("group_a")
+    origins.track(source)
+    assert source.meta("missing_origins")
+    backup = open_database(snapshot(source, home, "companion_a"), home, "companion_a")
+    try:
+        assert backup.execute("SELECT value FROM metadata WHERE key='missing_origins'").fetchone()
+    finally:
+        backup.close()
+    raw = json.loads(payload(source, "companion_a", home))
+    exported = open_database(un64(raw["files"]["memory.sqlite3"]["data"]), home, "companion_a")
+    try:
+        assert (
+            exported.execute("SELECT value FROM metadata WHERE key='missing_origins'").fetchone()
+            is None
+        )
+    finally:
+        exported.close()
+    target, _, transfers = homes("target")
+    target.instance["conversations"]["group_a"] = conversation()
+    await move(transfers, export(source, home))
+    assert target.meta("missing_origins", []) == []

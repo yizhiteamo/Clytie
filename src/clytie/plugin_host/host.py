@@ -247,6 +247,9 @@ class PluginHost(MigrationMixin):
 
         try:
             migrate(store, self.home, companion_id, self.log)
+            from clytie.memory.origins import track
+
+            track(store)
         except BaseException:
             store.close()
             lock.__exit__(None, None, None)
