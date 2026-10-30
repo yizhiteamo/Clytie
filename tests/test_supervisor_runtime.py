@@ -281,6 +281,11 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     a.kernel.bus.publish(a.cid, "fictional_shutdown_event")
     await entered.wait()
     worker = a.kernel.bus.workers[a.cid]
+    entered.clear()
+    a.host.event_bus.subscribers = lambda cid, event: (subscriber,)
+    a.host.event_bus.publish(a.cid, "fictional_host_event")
+    await entered.wait()
+    host_worker = a.host.event_bus.workers[a.cid]
 
     async def close():
         calls.append("close")
@@ -291,6 +296,7 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     assert first == second and first["state"] == "stopped"
     assert calls == ["close"] and model.requests == []
     assert worker.cancelled() and a.kernel.bus.closed
+    assert host_worker.cancelled() and a.host.event_bus.closed
     assert not a.kernel.bus.publish(a.cid, "after_shutdown")
 
 

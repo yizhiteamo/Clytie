@@ -247,6 +247,7 @@ class Companion:
 
     async def _stop(self, mode, *, orphan=False):
         if not self.agent:
+            await self.host.event_bus.close()
             await self.host.close()
             self.runtime.close()
             return dict(state="stopped", stopped=[], not_stopped={}, reason=None)
@@ -340,6 +341,7 @@ class Companion:
             task.cancel()
         await asyncio.gather(*self.feeds, return_exceptions=True)
         await kernel.bus.close()
+        await self.host.event_bus.close()
         result = await self.host.close()
         for channel in self.channels.values():
             try:
