@@ -1,0 +1,277 @@
+# 守护进程实现规格（A4.1：进程、重启、通知、安全停止、全部静默）
+
+本文件是 roadmap A4.1 的实现契约，细化 `design/supervisor.md`。A4 的拆分与 E1–E8 由用户于 2026-10-30 确认；前台运行、静默包括主人私聊、运行中模型凭证失效后不调用模型且不发兜底回复、静默 5 秒未确认即重启子进程这四点同日确认：
+
+| 段 | 范围 | 规格 |
+|---|---|---|
+| A4.1 | 守护进程、伴侣进程、健康状态、重启策略、通知、安全停止、全部静默 | 本文件 |
+| A4.2 | 本机 HTTP API、登录、审计、CLI 改走 API、插件 `api_route` | A4.1 验收后另写 |
+| A4.3 | 常规备份、保留策略、恢复校验、副本目录、密钥 CLI、日志轮转 | A4.1 验收后另写 |
+
+所有验收都离线完成：假进程启动器、假平台、假模型、假通知后端和 MockClock，外加少量使用真实子进程和假插件的冒烟测试。不连接真实账号，不调用线上模型，不弹出真实桌面通知。
+
+## 0. 不变的约定
+
+- 用户手动启动，不设开机自启，不创建系统服务或计划任务。
+- 重启不重放旧任务；发送结果未知的消息不补发（kernel-spec §2、§6）。守护进程不读、不改账本内容，也不向新进程传递任何"待办"。
+- 凭证失效时不自动重新登录。
+- 不批量删除文件；本里程碑不删除任何用户数据。
+
+## 1. 进程结构
+
+```
+python -m clytie supervisor start   （前台运行，单实例）
+├─ 守护进程：重启策略、健康汇总、通知、全部静默、实例级通知插件
+└─ 伴侣子进程（每个伴侣一个）：插件宿主、本体、账本、记忆
+```
+
+- **前台运行**：`supervisor start` 在当前终端前台运行，日志同时输出到终端。关掉终端窗口或按 Ctrl+C 即触发安全停止（第 6 节），第二次 Ctrl+C 把正在执行的任务改为取消。这样做的原因是：不需要系统服务，状态可见，也不会留下用户不知道的后台进程；A4.1 还没有管理接口，后台运行时无法安全停止。
+- **后台运行（用户已确认，2026-10-30）**：A4.2 有了 API 之后提供 `supervisor start --detach`（启动后立即返回，日志写文件，停止、状态、静默通过 API 完成），并提供双击启动脚本（启动守护进程并打开 WebUI）。它们仍是用户手动启动，不是系统服务或开机自启。阶段三可选托盘图标。迁移到云服务器时如需系统服务（如 systemd），须另经用户明确同意。
+- **单实例**：守护进程持有 `run/supervisor.lock`，锁的实现与插件宿主相同（Windows 用 msvcrt 字节锁，Linux 用 flock）。锁文件记录 pid 和进程创建时间，以操作系统的锁作为"持有者还活着"的判据。已有实例在运行时，再次启动报"已在运行"并退出，退出码非 0。不通过删除锁文件来抢锁。
+- **伴侣子进程**：入口是内部命令 `python -m clytie companion run <cid>`。它不是给用户用的命令，帮助中不列出；单独运行时也必须取得同样的锁。启动顺序沿用现有流程：配置校验 → 取得账本锁并处理迁移日志 → 账本重启修正 → 插件宿主启动 → 本体启动 → 连接平台 → 开始接收消息。
+- **信号隔离**：子进程放在独立的进程组中（Windows 用 `CREATE_NEW_PROCESS_GROUP`），所以终端里的 Ctrl+C 只送到守护进程，由守护进程统一协调停止。
+- **进程启动器接口**：守护进程通过内部接口 `Launcher` 启动和终止子进程。生产环境使用真实子进程；测试使用假启动器，用脚本控制退出码、心跳、卡住等情况，并配合 MockClock。
+
+## 2. 守护进程与子进程的通信
+
+- 通道是子进程的标准输入和标准输出，每行一条 JSON（JSON Lines）。不开端口，不需要登录，父进程退出时通道随之关闭。子进程的日志写到标准错误和日志文件，不混进这个通道。
+- 每条消息都带 `type` 和 `seq`。未知的 `type` 只记一条 WARN，不导致崩溃。
+
+| 方向 | type | 内容 |
+|---|---|---|
+| 子 → 父 | `ready` | 已开始接收消息 |
+| 子 → 父 | `heartbeat` | 见第 3 节的健康字段 |
+| 子 → 父 | `fatal` | 退出前报告不可重试的原因：`reason`，取值见第 4.2 节 |
+| 子 → 父 | `stop_result` | 安全停止的结果（第 6 节） |
+| 父 → 子 | `stop` | `task_mode: cancel \| wait` |
+| 父 → 子 | `escalate` | 等待模式改为取消 |
+| 父 → 子 | `silence` | `on: bool`，子进程处理后回 `silence_ack` |
+
+- 消息里不包含聊天原文、记忆内容、凭据或平台账号。
+
+## 3. 健康状态
+
+### 3.1 子进程心跳
+
+- 每隔 `supervisor.heartbeat_seconds`（默认 5 秒）发送一次 `heartbeat`，字段如下：
+
+| 字段 | 来源 |
+|---|---|
+| `inflight_tasks` | 正在执行的任务数 |
+| `sending` | 处于 `sending` 状态的 intent 数 |
+| `channels` | 每个平台插件的连接状态：`online`、`connecting`、`offline`、`auth_invalid`、`unknown`（第 3.3 节） |
+| `model` | `ok`、`auth_invalid`、`unknown`：取自 `features()` 和最近一次正常调用的结果，**不为检查而调用模型** |
+| `quota` | 保障模式使用的最近一份 `QuotaSnapshot` 摘要（各窗口剩余比例），没有时为 `unknown` |
+| `silenced` | 子进程当前是否处于静默 |
+| `warnings` | 现有 `status` 提醒的代码列表，只有代码，不含原文 |
+
+- 超过 `supervisor.hang_seconds`（默认 30 秒）没有收到心跳，就判定为卡住：先终止子进程，再按崩溃处理（第 4 节）。被终止时还在发送中的 intent，下次启动时由账本标为 `unknown`，不会重发。
+
+### 3.2 健康汇总
+
+- 守护进程把每个伴侣的状态汇总到 `run/health.json`，原子替换写入；内容有变化时写，且每 5 秒最多写一次。
+- 每个伴侣的状态取值：`starting`、`running`、`degraded`、`stopping`、`stopped`、`crashed`、`backoff`（等待重启）、`restart_stopped`（连续失败后已停止重启）、`blocked`（不可重试，第 4.2 节）。另外记录运行时长、最近一次重启的原因、重启计数，以及第 3.1 节的心跳字段。
+- `python -m clytie supervisor status` 只读取这个文件，不连接任何进程。守护进程没有运行时（锁是空闲的），显示"未运行"，并附上文件最后更新的时间，标明"可能过时"。A4.2 有了 API 之后，守护进程运行时改为调用 API。
+- 外部组件（NapCat 等）：A4.1 只定义内部接口 `ExternalComponent`（`status()`、`start()`、`stop()`），用假实现在汇总中显示一行。不新增配置字段，真正接入 docker 放在阶段二。
+
+### 3.3 SDK 补充：连接状态与错误码
+
+- `Channel` 新增一个**可选**方法 `state() -> ChannelState`，字段为 `status`（取值同第 3.1 节）、`since` 和 `code?`。插件没有实现这个方法时，状态视为 `unknown`。现有插件不需要修改。
+- `sdk-spec` 的错误码约定新增两个：
+  - `auth_invalid`：凭证或登录态失效；
+  - `quota_exhausted`：额度用完。
+
+  它们可以出现在 `ModelTurn.error.code`、`Receipt.error.code`，以及 `connect()` 抛出的 `ChannelUnavailable(code)` 中。原有的 `rate_limited` / `transient` 不变。
+- 契约测试覆盖：缺少 `state()` 时为 `unknown`；`connect()` 抛出 `auth_invalid` 时进入第 4.2 节的不重启路径。
+
+## 4. 重启策略
+
+### 4.1 可重试的失败（崩溃）
+
+- 判定为崩溃的情况：子进程以非 0 退出码退出且没有报告 `fatal`、被信号终止、心跳超时，或者在 `ready` 之前异常退出且没有报告 `fatal`。
+- 退避间隔取自 `supervisor.restart.backoff_seconds`，默认 `[10, 30, 60, 120, 300]`；超过列表长度后一直用最后一个值。等待期间状态为 `backoff`。
+- 连续失败达到 `supervisor.restart.max_failures`（默认 5 次）后，状态变为 `restart_stopped`，不再自动重启，并通知主人。
+- 子进程从 `ready` 起连续运行满 `supervisor.restart.stable_seconds`（默认 600 秒），连续失败计数清零。
+- 计时一律使用注入时钟。重启只是重新执行第 1 节的启动流程，不重放任何内容。
+
+### 4.2 不可重试（只通知）
+
+子进程退出前通过 `fatal` 报告原因，守护进程据此把状态置为 `blocked`，通知主人，不重启：
+
+| reason | 情况 |
+|---|---|
+| `config_invalid` | 配置校验失败 |
+| `migration_blocked` | 存在账本迁移日志或"恢复未完成"，伴侣按现有规则拒绝启动 |
+| `lock_held` | 这个伴侣已经被另一个进程占用 |
+| `auth_invalid` | 启动时平台或模型报告凭证失效 |
+| `required_plugin_failed` | 必需的平台或模型插件启动失败，且错误码不是 `transient` / `rate_limited` |
+
+- 插件启动失败时，错误码是 `transient` / `rate_limited` 的，按第 4.1 节的崩溃处理。
+- `blocked` 只能由主人处理后手动重新启动来解除。A4.1 提供内部入口 `supervisor.restart(cid)`，CLI 和 API 在 A4.2 接入。
+
+### 4.3 运行中凭证失效或额度用完
+
+- 运行中出现 `auth_invalid` 时，**不退出、不重启**：
+  - 平台：该平台插件的状态标为 `auth_invalid`；其余平台照常工作。
+  - 模型：伴侣进入 `degraded`，**之后不再调用模型**，直到伴侣重新启动。新消息照常写入 `dedupe` 和 `inbound`，状态为 `ignored`，原因 `model_auth_invalid`；不回复，也不发兜底回复，避免每来一条消息都回一句"没接上"。
+- 额度用完（`quota_exhausted`）时，同样不重启，只通知。保障模式和失败回应仍按现有规则处理（boundary.md §3、agent-spec §10）。
+- 以上情况都由守护进程按第 5 节通知主人。主人重新登录后，手动重启伴侣即可恢复。
+
+## 5. 通知
+
+### 5.1 实例级通知插件
+
+- 守护进程在自己的进程里装配实例级的通知插件，列表来自全局配置 `notify.plugins`（插件 id 列表，默认空）。
+- 这些插件走插件宿主同样的装配路径，但 `ctx` 是**实例范围**：只有 `config`、`log`、`clock`、`subprocess`，没有伴侣、记忆、账本、平台或模型。宿主为此新增一种装配范围，清单校验规则不变。
+- 伴侣进程里的通知（例如边界保护达到阈值，agent-spec §7.3）仍使用该伴侣自己启用的通知插件，不经过守护进程。
+- A4.1 只用 `desktop-notifier` 加注入的假后端测试；**第一次真正弹出桌面通知之前需要用户同意**（plugins/catalog.md）。
+
+### 5.2 发什么
+
+| dedupe_key | 何时 | 正文（固定格式，不经过模型） |
+|---|---|---|
+| `restart_stopped:<cid>` | 连续失败后停止重启 | 伴侣 id、失败次数、最近一次的原因码 |
+| `blocked:<cid>:<reason>` | 第 4.2 节 | 伴侣 id、原因码、需要做什么（例如"重新登录后重启伴侣"） |
+| `auth_invalid:<cid>:<plugin>` | 第 4.3 节 | 伴侣 id、插件 id |
+| `quota_exhausted:<cid>` | 第 4.3 节 | 伴侣 id、恢复时间（如果可知） |
+| `stop_killed:<cid>` | 安全停止超时后被强制终止 | 伴侣 id、当时发送中的条数 |
+
+- 正文中只有编号、原因码和时间，不含聊天原文、记忆、平台账号或凭据。
+- **冷却**：同一个 `dedupe_key` 在 `notify.cooldown_hours`（默认 6 小时）内只通知一次。冷却状态保存在 `supervisor/notify-state.json`，原子替换写入，守护进程重启后继续有效。
+- **失败**：所有通知插件都失败或没有配置时，记 WARN，并在 `status` 中显示"有 N 条通知未送达"。这种情况不进入冷却；同一个 key 最多每 10 分钟重试一次，且只在问题仍然存在时重试。
+- 多个通知插件时依次尝试，第一个返回 `sent` 的就算送达。
+- **静默期间**：清单中声明 `notifier.outward: true` 的通知插件（经平台账号发出，消息会离开本机）暂停使用；其他插件照常工作。这个字段默认 `false`，`desktop-notifier` 不声明。
+
+## 6. 安全停止
+
+### 6.1 单个伴侣
+
+子进程收到 `stop` 后按以下顺序执行：
+
+1. **停止接收**：之后入站的消息照常写入 `dedupe` 和 `inbound`，状态为 `ignored`，原因 `shutting_down`；不回复，重启后也不补回复。主动消息和定时触发不再提交。
+2. **等发送中的消息发完**：已经开始的组按 kernel-spec §7 发完，最多等待 `supervisor.stop.delivery_wait_seconds`（默认 30 秒）。还没开始的 intent 标为 `failed`，错误码 `shutdown_before_send`，重启后不发。
+3. **处理正在执行的任务**：
+   - `task_mode = cancel`（默认）：按现有取消协议和宽限期取消，结果按 kernel-spec 的规则写入；
+   - `task_mode = wait`：等任务按各自的截止时间结束；期间收到 `escalate` 就改为取消。
+   - 任务结束后产生的交付，同样只等第 2 步规定的时长。
+4. **停止回想等后台作业**：回想按 memory-recall-spec 的规则取消，不写入。
+5. **停止插件**：按依赖方先停的顺序逐个停止。某个插件停止出错时，**继续停止其余插件**，失败的插件和原因记入 `not_stopped`（#10）。注意：现有的 `PluginHost.close` 遇到第一个异常就停下了，需要按这一条修正。
+6. 关闭账本和记忆库，发送 `stop_result`，以退出码 0 退出。
+
+- **总超时**：守护进程从发出 `stop` 起计时，`supervisor.stop.timeout_seconds`（默认 120 秒；等待模式下不限，但仍可以 `escalate`）内子进程没有退出，就强制终止。这时该伴侣的结果为 `not_stopped`，原因 `timeout_killed`，并按第 5 节通知主人。仍在发送中的消息在下次启动时标为 `unknown`，不会重发。
+
+### 6.2 整个守护进程
+
+- 所有伴侣**并行**执行安全停止；守护进程汇总每个伴侣的结果之后，才停止实例级通知插件、释放锁并退出。
+- 结果结构：
+
+```
+{cid: {"state": "stopped" | "not_stopped",
+       "stopped": [plugin_id],
+       "not_stopped": {plugin_id: reason},
+       "reason": str | null}}
+```
+
+  一个伴侣失败不影响其他伴侣的关闭（#10）。
+- **关闭期间被取消**（#7）：例如调用方的协程被取消。必须先等所有伴侣的关闭处理完成，再向调用方传播取消，不能当作正常返回。传播的异常类型为 `ShutdownCancelled`，它携带完整的上述结果（`.result`），调用方收到后仍能取得每个伴侣的 `stopped` / `not_stopped` 和原因。
+- 终端里的第二次 Ctrl+C 不算取消关闭，只把等待模式改为取消模式（第 1 节）。
+- `supervisor status` 和健康汇总在停止期间显示"还有 N 条消息正在发送 / N 个任务在执行"（来自心跳）。
+
+## 7. 全部静默
+
+- **作用**：所有伴侣立即停止对外发言。进程照常运行，消息照常记账。用于紧急情况。
+- **状态持久化**：保存在 `supervisor/silence.json`，内容为 `{on, since, by}`，原子替换写入。守护进程或伴侣重启后**仍然保持静默**，只能由主人手动解除（用户已确认，E5）。子进程在连接平台之前就先读这个文件，确保重启后的第一条消息也不会发出去。
+- **生效方式**：守护进程把状态写入文件，并向所有子进程发送 `silence`。子进程在交付层设一道硬闸：
+  - 新的 intent 一律不开始，标为 `failed`，错误码 `silenced`，**解除后也不补发**；
+  - 正在发送的组发完当前这一条就停，剩下的同样标为 `silenced`；
+  - 表情回应同样不发；
+  - 主动消息不创建，直接丢弃，写一条审计；
+  - 入站消息照常写入 `inbound`，状态为 `ignored`，原因 `silenced`；**不调用模型**，因此不消耗额度；
+  - 已经在执行的任务继续执行，但交付按上面的规则被拦下。
+- 包括主人私聊在内的所有场景都静默。解除只能通过守护进程的入口：A4.1 提供内部入口 `supervisor.silence(on)`，A4.2 接入 CLI 和 API；**不能**在聊天里解除。
+- **速度**：所有在运行的子进程都回复 `silence_ack` 才算生效。超过 5 秒还没有回复的子进程，按卡住处理：强制终止后重新启动，重启后读文件，进入静默。
+- **通知**：按第 5.1 节，静默期间暂停 `outward` 类通知插件。
+- **审计**：开启和解除都写审计（第 8 节）。
+
+## 8. 守护进程的数据与日志
+
+| 路径 | 内容 | 备份 |
+|---|---|---|
+| `run/supervisor.lock` | 单实例锁 | 否 |
+| `run/health.json` | 健康汇总 | 否 |
+| `supervisor/silence.json` | 静默状态 | 是（A4.3） |
+| `supervisor/notify-state.json` | 通知冷却 | 是（A4.3） |
+| `supervisor/audit.jsonl` | 只追加的审计：启动、停止、强制终止、重启、`blocked`、静默开启和解除、通知送达或失败（只记 key 和结果） | 是（A4.3） |
+| `logs/supervisor/` | 守护进程日志；轮转在 A4.3 实现 | 否 |
+
+- 审计每行包括：时间、操作、伴侣 id（如果有）、结果、原因码、来源（`terminal` 或内部入口；A4.2 加上 API 的登录身份）。不含原文。
+- 子进程的日志仍写在 `companions/<cid>/logs/`。
+
+## 9. 配置
+
+全局配置 `clytie.local.yaml` 新增以下字段，全部可选；未知字段报错，与现有规则相同：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `supervisor.heartbeat_seconds` | 整数 1–60（5） |
+| `supervisor.hang_seconds` | 整数 10–600（30），必须大于心跳间隔的 2 倍 |
+| `supervisor.restart.backoff_seconds` | 正整数列表，1–10 项（`[10, 30, 60, 120, 300]`） |
+| `supervisor.restart.max_failures` | 整数 1–100（5） |
+| `supervisor.restart.stable_seconds` | 整数 60–86,400（600） |
+| `supervisor.stop.delivery_wait_seconds` | 整数 0–600（30） |
+| `supervisor.stop.task_mode` | `cancel` \| `wait`（`cancel`） |
+| `supervisor.stop.timeout_seconds` | 整数 10–3600（120） |
+| `notify.plugins` | 插件 id 列表（空）；只能是声明了 `notifier` 的插件 |
+| `notify.cooldown_hours` | 整数 1–168（6） |
+
+插件清单的 `notifier` 新增可选字段 `outward: bool`（`false`）。
+
+## 10. 离线验收
+
+全部使用假启动器或真实子进程配合假插件、假平台、假模型、假通知后端，以及 MockClock。
+
+1. **单实例**：第二个守护进程启动时报"已在运行"；锁由操作系统判定，持有者被杀死后可以重新取得锁；不删除锁文件。
+2. **崩溃重启**：退避间隔依次为 10/30/60/120/300 秒；连续 5 次后状态为 `restart_stopped` 并通知一次；稳定运行 600 秒后计数清零；心跳超时会终止并重启。
+3. **不重放**：子进程在 `sending` 时被杀死并重启后，该 intent 标为 `unknown`、没有发送；重启前 `running` 的任务标为 `interrupted`，不重新执行（复用 kernel-spec 的现有断言，经由守护进程路径触发）。
+4. **不可重试**：第 4.2 节的五种原因都进入 `blocked`，不重启，只通知；`transient` 的插件启动失败按崩溃处理。
+5. **运行中失效**：模型报告 `auth_invalid` 后进入 `degraded`；之后的消息为 `ignored`（`model_auth_invalid`），不调用模型、不发兜底回复；平台报告 `auth_invalid` 时只有那个平台受影响；两种情况都通知一次；`quota_exhausted` 不重启。
+6. **通知**：同一个 key 6 小时内只通知一次，守护进程重启后冷却仍然有效；全部插件失败时记 WARN 并在 `status` 中计数，不进入冷却，最多每 10 分钟重试一次；正文中没有原文、账号和凭据（用含虚构敏感词的数据断言）；实例范围的 `ctx` 拿不到伴侣、记忆和账本。
+7. **安全停止**：
+   - 停止后的入站为 `ignored`（`shutting_down`），重启后不补回复；
+   - 已开始的组发完，未开始的为 `shutdown_before_send`；
+   - 取消模式和等待模式（包括 `escalate`）都正确；
+   - 超时后强制终止，结果为 `not_stopped`（`timeout_killed`），并通知。
+8. **#10**：同一伴侣内有一个插件停止时抛异常，其余插件仍按依赖方先停的顺序停止，`not_stopped` 列出失败的插件和原因；另一个伴侣正常关闭。
+9. **#7**：关闭过程中取消调用方，所有伴侣仍完成关闭后才抛出 `ShutdownCancelled`，`.result` 完整；不会正常返回。
+10. **全部静默**：
+    - 开启后，新的 intent、表情回应和主动消息都不发出；正在发送的组在当前这一条之后停止；入站为 `ignored`（`silenced`），不调用模型；
+    - 解除后不补发、不补回复；
+    - 守护进程和伴侣重启后仍是静默，子进程在连接平台之前就已进入静默；
+    - 主人私聊同样静默；
+    - 子进程超过 5 秒没有回复 `silence_ack` 时被重启并进入静默；
+    - `outward` 类通知插件暂停，桌面通知照常。
+11. **信号**：子进程运行在独立的进程组中（检查启动参数）；第一次中断触发安全停止，第二次中断改为取消任务（直接调用处理函数测试）。
+12. **健康**：`run/health.json` 的字段与状态取值都正确；守护进程未运行时 `supervisor status` 显示"未运行"和"可能过时"；不为检查而调用模型（用假模型的调用计数断言）；没有实现 `state()` 的平台插件显示 `unknown`。
+13. **通信通道**：未知的 `type` 只记 WARN；消息中没有原文（用虚构敏感词断言）；子进程的标准输出只用于这个通道。
+14. **冒烟测试**：使用真实子进程和 fake-channel、fake-model：启动 → `ready` → 心跳 → 用假的退出指令模拟崩溃 → 重启 → 安全停止，Windows 和 Linux 的 CI 都运行。
+
+## 11. 需要同步修改的其他文档
+
+| 文档 | 修改 |
+|---|---|
+| roadmap A4 | 拆分为 A4.1 / A4.2 / A4.3，每段的范围和验收与本文件第 0 节表格一致；A4.1 的验收引用本文件第 10 节 |
+| design/supervisor.md | 开头注明实现规格见本文件；§1 注明前台运行；§4 注明实例级通知插件和冷却时间 6 小时 |
+| data-and-backup §1 | 目录树加入 `supervisor/` 和 `logs/supervisor/`；`run/` 注明包含 `supervisor.lock` 和 `health.json` |
+| sdk-spec | `Channel.state()`（可选）、`ChannelState`、`ChannelUnavailable`、错误码 `auth_invalid` / `quota_exhausted`、notifier 清单的 `outward` 字段 |
+| config-spec | 第 9 节中的字段 |
+| plugin-host-spec | 实例范围的装配（只用于 notifier）；`close` 遇到异常后继续停止其余插件 |
+| kernel-spec | 入站 `ignored` 新增原因 `shutting_down`、`silenced`、`model_auth_invalid`；intent 错误码新增 `shutdown_before_send`、`silenced` |
+| agent-spec | 第 4.3 节的 `degraded`：不调用模型、不发兜底回复；静默时不调用模型 |
+
+## 12. 不在 A4.1 范围
+
+- HTTP API、登录、CLI 中的 stop/restart/silence 命令（A4.2；A4.1 只提供内部入口并测试）。
+- 备份、保留策略、恢复校验、副本目录、日志轮转、密钥 CLI（A4.3）。
+- 真正的 docker / NapCat 管理、真实桌面通知弹窗、经平台账号的通知插件（阶段二，并需要用户同意）。
+- `--detach` 后台运行与双击启动脚本（A4.2）；托盘图标（阶段三，可选）。
+- 开机自启、系统服务（不做；云服务器迁移时如需要，另经用户同意）。
