@@ -435,3 +435,87 @@ async def test_recollection_rules_in_owner_and_group_model_requests(tmp_path):
                 )
     finally:
         await finish(agent)
+
+
+async def test_owner_core_forget_retracts_profile_through_agent(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool("core_forget", target="[记忆1]", reason="虚构撤销"),
+        {"finish": "stop", "text": "已经忘记"},
+    )
+    try:
+        store = agent.memory.store
+        record = store.write(
+            dict(kind="profile", content="喜欢虚构纸船", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        with store.transaction():
+            profile = record.model_copy(
+                update={
+                    "revision": 2,
+                    "subject": "member",
+                    "origin_conversation_id": None,
+                    "tags": ["core:profile"],
+                }
+            )
+            store._save(profile, operator="core:recollect")
+        await agent.receive(event(agent, "别记那个喜欢虚构纸船的印象"))
+        await agent.drain()
+        assert store.get_raw(record.record_id).retracted
+        assert any(
+            "已经不会再提了" in text_parts(m.parts)
+            for m in model.requests[-1].messages
+            if m.role == "tool"
+        )
+    finally:
+        await finish(agent)
+
+
+async def test_agent_core_recall_thaws_and_reinforces_frozen_record(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path, tool("core_recall", query="虚构纸船"), {"finish": "stop", "text": "想起了"}
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+
+        class Embedding:
+            async def embed(self, texts, cancel):
+                return [[1, 0] for _ in texts]
+
+        retrieval = agent.memory.retrieval
+        retrieval.embedder = Embedding()
+        retrieval.embedder_id = "fake-only"
+        store = agent.memory.store
+        record = store.write(
+            dict(kind="episode", content="虚构纸船经历", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        await retrieval.rebuild()
+        agent.clock.advance(120 * 86_400)
+        assert next(
+            r
+            for r in store.project("owner_private", "owner_private")
+            if r.record_id == record.record_id
+        ).decay.frozen
+        await agent.receive(event(agent, "想想虚构纸船"))
+        await agent.drain()
+        assert any(
+            "很久以前" in text_parts(m.parts)
+            for m in model.requests[-1].messages
+            if m.role == "tool"
+        )
+        assert not next(
+            r
+            for r in store.project("owner_private", "owner_private")
+            if r.record_id == record.record_id
+        ).decay.frozen
+        assert (
+            store.db.execute(
+                "SELECT half_life_days FROM fade WHERE record_id=?", (record.record_id,)
+            ).fetchone()[0]
+            >= 45
+        )
+    finally:
+        await finish(agent)

@@ -45,6 +45,10 @@ def test_evidence_kinds_owner_tag_and_atomic_progress(store):
     ]
     result = commit(store, items)
     assert (result["written"], result["dropped"]) == (1, 5)
+    import json
+
+    audits = [json.loads(r[0]) for r in store.db.execute("SELECT data FROM audit")]
+    assert any(a["kind"] == "memory.recollect" and a["dropped"] == 5 for a in audits)
     record = store.all_records()[0]
     assert record.basis == "observed"
     assert list(record.tags) == ["core:with_owner"]
@@ -117,3 +121,37 @@ def test_merge_observed_preserves_oldest_and_revisions_but_rejects_owner(store):
     )
     item = item.model_copy(update={"merges": ["[记忆1]"]})
     assert commit(store, [item])["dropped"] == 1
+
+
+def test_owner_jargon_fades_but_owner_episode_does_not(store):
+    from clytie.memory.fade import projected
+
+    commit(
+        store,
+        [
+            RecollectItem(kind="jargon", content="纸船：虚构暗号", evidence=[1]),
+            RecollectItem(kind="episode", content="一起折纸船", evidence=[1]),
+        ],
+    )
+    store.clock.advance(120 * 86_400)
+    rows = {r.kind: r for r in store.all_records()}
+    assert "core:with_owner" not in rows["jargon"].tags
+    assert projected(store, rows["jargon"]).decay.frozen
+    assert "core:with_owner" in rows["episode"].tags
+    assert projected(store, rows["episode"]).decay.weight == 1
+
+
+async def test_recollection_snapshot_excludes_private_and_other_group(store):
+    store.write(
+        dict(kind="episode", content="虚构私密原文", visibility="private"),
+        scene="owner_private",
+        conversation_id="owner_chat",
+    )
+    store.write(
+        dict(kind="episode", content="另一群的虚构经历", visibility="relationship"),
+        scene="public_group",
+        conversation_id="group_b",
+    )
+    reader = SnapshotReader(store.project("public_group", "group_a"))
+    assert not reader.labels
+    assert "虚构私密原文" not in str(await reader.get([]))

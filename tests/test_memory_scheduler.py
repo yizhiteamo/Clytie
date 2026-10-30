@@ -191,3 +191,91 @@ async def test_model_follows_chat_switch_and_explicit_model_unit(tmp_path):
         assert len(first.requests) == len(second.requests) == len(calls) == 1
     finally:
         await finish(agent)
+
+
+async def test_disable_enable_skips_pending_and_disabled_windows(tmp_path):
+    from clytie.memory.window import highwater
+
+    agent, _, model = await make_agent(tmp_path)
+    try:
+        first = event(agent, "停用前尚未整理的虚构消息")
+        agent.ledger.claim_inbound(first)
+        agent.ledger.ignore(first.event_id)
+        await agent.recollector.set_enabled(False)
+        second = event(agent, "停用期间的虚构消息")
+        agent.ledger.claim_inbound(second)
+        agent.ledger.ignore(second.event_id)
+        await agent.clock.advance_and_drain(30 * 60)
+        assert not model.requests
+        await agent.recollector.set_enabled(True)
+        assert (
+            agent.recollector.progress("owner_private")["inbound"]
+            == highwater(agent.ledger)["inbound"]
+        )
+        row = agent.memory.store.db.execute(
+            "SELECT data FROM recollect_progress WHERE conversation_id='!state'"
+        ).fetchone()
+        assert json.loads(row[0])["skipped"] == 1
+        await agent.clock.advance_and_drain(30 * 60)
+        assert not model.requests
+    finally:
+        await finish(agent)
+
+
+async def test_disabled_state_survives_recollector_recreation(tmp_path):
+    from clytie.memory.scheduler import Recollector
+
+    agent, _, model = await make_agent(
+        tmp_path, changes={"memory": {"recollect": {"enabled": False}}}
+    )
+    try:
+        message = event(agent, "停用后的虚构内容")
+        agent.ledger.claim_inbound(message)
+        agent.ledger.ignore(message.event_id)
+        agent.recollector.config["enabled"] = True
+        restarted = Recollector(agent)
+        await restarted.set_enabled(True)
+        await restarted.process(message.conversation)
+        await agent.clock.advance_and_drain(30 * 60)
+        assert not model.requests
+        assert restarted.progress("owner_private")["inbound"] > 0
+    finally:
+        await finish(agent)
+
+
+async def test_disable_cancels_inflight_and_ignores_late_candidates(tmp_path, monkeypatch):
+    import asyncio
+
+    from clytie.sdk.types import RecollectItem
+
+    agent, _, _ = await make_agent(tmp_path)
+    entered, released = asyncio.Event(), asyncio.Event()
+    captured = []
+    original = agent.host.invoke
+
+    async def invoke(cid, pid, point, key, *args, **kwargs):
+        if point != "memory.consolidator":
+            return await original(cid, pid, point, key, *args, **kwargs)
+        captured.append(args[-1])
+        entered.set()
+        await released.wait()
+        return [RecollectItem(kind="episode", content="迟到的虚构回想", evidence=[1])]
+
+    monkeypatch.setattr(agent.host, "invoke", invoke)
+    try:
+        msg = event(agent, "虚构窗口")
+        agent.ledger.claim_inbound(msg)
+        agent.ledger.ignore(msg.event_id)
+        agent.clock.advance(30 * 60)
+        task = asyncio.create_task(agent.recollector.process(msg.conversation))
+        await entered.wait()
+        await agent.recollector.set_enabled(False)
+        assert captured[0].cancelled
+        released.set()
+        await task
+        assert not agent.memory.store.all_records()
+        await agent.recollector.set_enabled(True)
+        assert agent.recollector.progress("owner_private")["inbound"] > 0
+    finally:
+        released.set()
+        await finish(agent)

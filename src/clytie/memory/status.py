@@ -44,6 +44,17 @@ def notices(report, *, clock):
                     "SELECT * FROM recollect_progress WHERE conversation_id != ?", ("*",)
                 ):
                     progress = json.loads(row["data"])
+                    if row["conversation_id"] == "!state":
+                        if progress.get("skipped"):
+                            result.append(
+                                dict(
+                                    companion_id=cid,
+                                    code="recollect_skipped",
+                                    count=progress["skipped"],
+                                    message=f"停用期间有 {progress['skipped']} 段对话没有回想",
+                                )
+                            )
+                        continue
                     result.append(
                         dict(
                             companion_id=cid,
@@ -56,7 +67,27 @@ def notices(report, *, clock):
                         )
                     )
             active = [r for r in store.all_records() if not r.retracted]
-            missing = len({r.record_id for r in active} & set(store.meta("missing_origins", [])))
+            from .origins import binding, resolve
+
+            sourced = [
+                r
+                for r in active
+                if r.origin_conversation_id is not None
+                and not (r.kind == "profile" and "core:profile" in r.tags)
+            ]
+            missing = sum(resolve(store, r) is None for r in sourced)
+            restored = sum(
+                binding(store, r) is not None and resolve(store, r) is not None for r in sourced
+            )
+            if restored:
+                result.append(
+                    dict(
+                        companion_id=cid,
+                        code="memory_origins_resolved",
+                        count=restored,
+                        message=f"有 {restored} 条记录的来源会话已对应",
+                    )
+                )
             if missing:
                 result.append(dict(companion_id=cid, code="memory_missing_origins", count=missing))
             if not config.get("memory", {}).get("embedder") or store.meta(
@@ -77,9 +108,12 @@ def notices(report, *, clock):
                 (
                     r
                     for r in store.project("owner_private", None)
-                    if r.basis == "owner_confirmed"
-                    or r.kind == "preference"
-                    and r.basis == "owner_stated"
+                    if r.kind not in {"profile", "jargon"}
+                    and (
+                        r.basis == "owner_confirmed"
+                        or r.kind == "preference"
+                        and r.basis == "owner_stated"
+                    )
                 ),
                 key=lambda r: (r.updated_at, r.record_id),
                 reverse=True,

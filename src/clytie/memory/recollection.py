@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from clytie.sdk.types import MemoryRecord
 
+from . import origins
 from .store import canonical, normalized
 
 
@@ -127,7 +128,7 @@ class RecollectionCommit:
             tags=["core:profile"]
             if item.kind == "profile"
             else ["core:with_owner"]
-            if group and owner
+            if group and owner and item.kind == "episode"
             else [],
             retracted=False,
         )
@@ -155,6 +156,8 @@ class RecollectionCommit:
                             or current.basis != "observed"
                             or not store.visible(current, window.scene, cid)
                             or partition(current) != partition(record)
+                            or origins.identity(origins.binding(store, current))
+                            != origins.identity(origins.configured(store, cid))
                         ):
                             raise ValueError("invalid_merge")
                         merged.append(current)
@@ -174,6 +177,11 @@ class RecollectionCommit:
                             record.subject,
                             record.visibility,
                             record.origin_conversation_id,
+                        )
+                        and (
+                            record.kind == "profile"
+                            or origins.identity(origins.binding(store, r))
+                            == origins.identity(origins.configured(store, cid))
                         )
                         and normalized(r.content) == normalized(record.content)
                     ),

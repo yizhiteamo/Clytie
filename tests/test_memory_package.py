@@ -188,6 +188,8 @@ async def test_manifest_software_version_legacy_and_unknown_formats(export_case)
     legacy_db.write_bytes(un64(plain["files"]["memory.sqlite3"]["data"]))
     with sqlite3.connect(legacy_db) as connection:
         connection.execute("DROP TABLE fade")
+        connection.execute("DROP TABLE revision_origins")
+        connection.execute("DROP TABLE conversation_registry")
     data = legacy_db.read_bytes()
     plain["files"]["memory.sqlite3"] = {
         "data": b64(data),

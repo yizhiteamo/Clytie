@@ -4,13 +4,25 @@ from datetime import datetime
 
 
 def eligible(store, record):
+    if record.basis != "observed" or (
+        record.kind == "episode" and "core:with_owner" in record.tags
+    ):
+        return False
     if record.kind == "profile" and "core:profile" in record.tags:
         return True
-    if record.basis != "observed" or "core:with_owner" in record.tags:
+    if record.origin_conversation_id is None:
         return False
-    origin = store.instance.get("conversations", {}).get(record.origin_conversation_id, {})
+    from .origins import binding, resolve
+
+    entry = binding(store, record)
+    if entry is None:
+        return False
+    resolved = resolve(store, record)
     internal = store.config.get("names", {}).get("internal_scenes", ["owner_private"])
-    if origin.get("scene") == "owner_private" or origin.get("scene") in internal:
+    if resolved:
+        if resolved[1]["scene"] == "owner_private" or resolved[1]["scene"] in internal:
+            return False
+    elif entry["category"] in {"owner_private", "internal"}:
         return False
     return record.kind in {"episode", "profile", "jargon"}
 

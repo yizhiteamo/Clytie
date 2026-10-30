@@ -471,9 +471,20 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         reader.issue(instance_file, ("people",), "exactly one owner", owners)
     scenes = instance.get("scenes") if isinstance(instance.get("scenes"), list) else []
     conversations = _entries(instance.get("conversations"))
+    conversation_identities = set()
     for name, conversation in conversations.items():
         if not isinstance(conversation, dict):
             continue
+        identity = tuple(conversation.get(k) for k in ("channel", "kind", "platform_id"))
+        if all(isinstance(v, str) for v in identity):
+            if identity in conversation_identities:
+                reader.issue(
+                    instance_file,
+                    ("conversations", name),
+                    "unique channel/kind/platform_id",
+                    "duplicate conversation identity",
+                )
+            conversation_identities.add(identity)
         if conversation.get("scene") not in scenes:
             reader.issue(
                 instance_file,

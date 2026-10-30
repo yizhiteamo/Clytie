@@ -10,6 +10,7 @@ from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import ChatMessage, TextPart, ToolResult, ToolSpec
 
 from .fade import reinforce
+from .origins import scope as origin_scope
 from .retrieval import Retrieval
 from .store import query_tokens, tokens
 
@@ -142,9 +143,12 @@ class MemoryContext:
             (
                 r
                 for r in visible
-                if r.basis == "owner_confirmed"
-                or r.kind == "preference"
-                and r.basis == "owner_stated"
+                if r.kind not in {"profile", "jargon"}
+                and (
+                    r.basis == "owner_confirmed"
+                    or r.kind == "preference"
+                    and r.basis == "owner_stated"
+                )
             ),
             key=lambda r: (r.updated_at, r.record_id),
             reverse=True,
@@ -168,13 +172,6 @@ class MemoryContext:
         except Exception:
             self.log.warning("memory.retrieval_failed")
             recalled = []
-        contextual = [
-            r
-            for r in visible
-            if not r.decay.frozen
-            and (r.kind == "profile" or (r.kind == "jargon" and r.scope == cid))
-        ]
-        recalled = [*contextual, *recalled]
         used, count = 0, 0
         for record in recalled:
             if record.record_id in selected or count >= config.get("recall_limit", 10):
@@ -184,7 +181,7 @@ class MemoryContext:
             if record.kind == "jargon":
                 label += (
                     "（这个群里的说法）"
-                    if record.scope == cid
+                    if origin_scope(self.store, record) == cid
                     else "（群里的说法，听懂就好，不主动用）"
                 )
             if used + len(label) > config.get("recall_chars", 3000):

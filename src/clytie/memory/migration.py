@@ -75,6 +75,11 @@ def migrate(store, home, companion_id, log):
         store.db.execute(
             "CREATE TABLE fade(record_id TEXT PRIMARY KEY, last_recalled_at TEXT NOT NULL, half_life_days REAL NOT NULL)"
         )
+        from .origins import TABLES, backfill
+
+        for table, columns in TABLES.items():
+            store.db.execute(f"CREATE TABLE {table}({columns})")
+        backfill(store)
         store.db.execute("PRAGMA user_version=2")
         store.db.commit()
     except BaseException:

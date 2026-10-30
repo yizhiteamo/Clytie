@@ -445,3 +445,20 @@ def test_recollect_schema_defaults_and_fade_bounds():
             {"half_life_days": 30, "reinforce": 1.5, "max_half_life_days": 365, "freeze_below": 0.1}
         )
     )
+
+
+def test_conversation_identity_includes_kind_and_rejects_exact_duplicates(tmp_path):
+    home, repository, instance, _ = make_home(tmp_path)
+    group = next(c for c in instance["conversations"].values() if c["kind"] == "group")
+    private = dict(group, kind="private", scene="owner_private")
+    instance["conversations"]["owner_chat"] = private
+    private["platform_id"] = group["platform_id"]
+    private["channel"] = group["channel"]
+    write_yaml(home / "clytie.local.yaml", instance)
+    assert load_home(home, repo_root=repository).valid
+    instance["conversations"]["duplicate_group"] = dict(group)
+    write_yaml(home / "clytie.local.yaml", instance)
+    report = load_home(home, repo_root=repository)
+    assert not report.valid
+    assert "duplicate_group" in str(report.errors)
+    assert "clytie.local.yaml" in str(report.errors)

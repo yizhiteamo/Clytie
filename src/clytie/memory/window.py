@@ -13,7 +13,7 @@ def highwater(ledger):
     }
 
 
-def fresh_rows(ledger, progress, cid):
+def fresh_rows(ledger, progress, cid, *, skipping=False):
     rows = []
     end = dict(progress)
     for table in ("inbound", "intent"):
@@ -24,7 +24,11 @@ def fresh_rows(ledger, progress, cid):
             row = json.loads(payload)
             if row.get("conversation_id") != cid:
                 continue
-            if table == "intent" and row.get("status") not in {"sent", "failed", "unknown"}:
+            if (
+                not skipping
+                and table == "intent"
+                and row.get("status") not in {"sent", "failed", "unknown"}
+            ):
                 break
             end[table] = number
             if table == "inbound":

@@ -119,3 +119,91 @@ async def test_context_injection_reinforces_and_labels_jargon(store):
     )
     result = await context.build("private", private, "纸船")
     assert "听懂就好，不主动用" in result[0].parts[0].text
+
+
+async def test_confirmed_profiles_and_jargon_use_retrieval_not_core(store):
+    from types import SimpleNamespace
+
+    from clytie.memory.context import MemoryContext
+    from clytie.sdk.types import Conversation, RecollectItem
+
+    from .test_memory_recollection import commit
+
+    commit(
+        store,
+        [
+            RecollectItem(kind="profile", content="喜欢虚构纸船", about="speaker_b", evidence=[2]),
+            RecollectItem(kind="jargon", content="纸船：虚构暗号", evidence=[1]),
+        ],
+    )
+    for record in store.all_records():
+        store.revise(
+            record.record_id,
+            record.revision,
+            {"content": record.content},
+            operator="owner",
+            explicit=True,
+            scene="owner_private",
+            conversation_id="owner_chat",
+        )
+    store.clock.advance(120 * 86_400)
+    assert all(r.decay.weight == 1 for r in store.project("owner_private", "owner_chat"))
+    context = MemoryContext(store, log=SimpleNamespace(warning=lambda *args: None))
+    conversation = Conversation(
+        conversation_id="owner_chat", kind="private", scene="owner_private", channel_id="fake"
+    )
+    unrelated = await context.build("unrelated", conversation, "完全不相干的雨滴")
+    assert "纸船" not in str(unrelated)
+    recalled = await context.build("related", conversation, "纸船")
+    assert "喜欢虚构纸船" in str(recalled) and "听懂就好" in str(recalled)
+
+
+def test_unknown_non_profile_origin_never_fades(store):
+    from clytie.memory.fade import projected
+
+    record = store.write(
+        dict(kind="episode", content="虚构往事", visibility="relationship"),
+        scene="owner_private",
+        conversation_id=None,
+    )
+    store.clock.advance(120 * 86_400)
+    assert projected(store, record).decay.weight == 1
+
+
+async def test_unrelated_profiles_and_jargon_do_not_consume_recall_budget(store):
+    from types import SimpleNamespace
+
+    from clytie.memory.context import MemoryContext
+    from clytie.sdk.types import Conversation
+
+    for kind in ("profile", "jargon"):
+        for i in range(11):
+            record = store.write(
+                dict(kind=kind, content=f"虚构无关细节{i}", visibility="relationship"),
+                scene="public_group",
+                conversation_id="group_a",
+            )
+            if kind == "profile":
+                with store.transaction():
+                    store._save(
+                        record.model_copy(
+                            update={
+                                "revision": 2,
+                                "tags": ["core:profile"],
+                                "subject": f"member_{i}",
+                                "origin_conversation_id": None,
+                            }
+                        ),
+                        operator="core:recollect",
+                    )
+    wanted = episode(store)
+    context = MemoryContext(store, log=SimpleNamespace(warning=lambda *args: None))
+    for scene, cid, kind in [
+        ("owner_private", "owner_chat", "private"),
+        ("public_group", "group_a", "group"),
+    ]:
+        conv = Conversation(conversation_id=cid, kind=kind, scene=scene, channel_id="fake")
+        output = await context.build(cid, conv, "纸船")
+        assert "虚构纸船活动" in str(output)
+        assert "无关细节" not in str(output)
+    assert [r[0] for r in store.db.execute("SELECT record_id FROM fade")] == [wanted.record_id]

@@ -96,9 +96,82 @@ class Recollector:
         ).fetchone()
         return json.loads(row[0]) if row else self.baseline()
 
+    def enabled(self):
+        return self.config.get("enabled", True)
+
+    def sync_enabled(self):
+        row = self.store.db.execute(
+            "SELECT data FROM recollect_progress WHERE conversation_id='!state'"
+        ).fetchone()
+        state = json.loads(row[0]) if row else {"enabled": self.enabled(), "skipped": 0}
+        if not self.enabled():
+            for token in tuple(self.current.values()):
+                token.cancel("recollection_disabled")
+        if self.enabled() and not state["enabled"]:
+            end = highwater(self.agent.ledger)
+            skipped = 0
+            for cid, entry in self.agent.instance.get("conversations", {}).items():
+                if entry["scene"] == "stranger_private" or (
+                    entry["kind"] == "private" and entry["scene"] != "owner_private"
+                ):
+                    continue
+                rows, _ = fresh_rows(self.agent.ledger, self.progress(cid), cid, skipping=True)
+                sizes = [
+                    sum(
+                        len(p.get("text", ""))
+                        for p in (r[3].get("message") or r[3]).get("parts", [])
+                    )
+                    for r in rows
+                ]
+                size = 0
+                for i, chars in enumerate(sizes):
+                    if i == 0 or size + chars > self.config.get("window_chars", 12_000):
+                        skipped += 1
+                        size = 0
+                    size += chars
+            with self.store.transaction():
+                # 逐个覆盖进度，不删除账本或记忆；未知/已移除会话也不能补回旧窗口。
+                ids = {
+                    r[0]
+                    for r in self.store.db.execute("SELECT conversation_id FROM recollect_progress")
+                    if not r[0].startswith("!")
+                }
+                ids.update(self.agent.instance.get("conversations", {}))
+                ids.add("*")
+                for cid in ids:
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO recollect_progress VALUES(?,?)",
+                        (cid, canonical(end)),
+                    )
+                state = {"enabled": True, "skipped": skipped}
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO recollect_progress VALUES('!state',?)",
+                    (canonical(state),),
+                )
+        elif not row or state["enabled"] != self.enabled():
+            state["enabled"] = self.enabled()
+            with self.store.transaction():
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO recollect_progress VALUES('!state',?)",
+                    (canonical(state),),
+                )
+        return self.enabled()
+
+    async def set_enabled(self, enabled):
+        self.config["enabled"] = enabled
+        self.sync_enabled()
+        if enabled:
+            await self.prepare()
+
     async def start(self):
-        if not self.config.get("enabled", True):
-            return
+        if self.sync_enabled():
+            await self.prepare()
+        task = self.agent.track(self.run())
+        jobs = self.agent.host.memory_jobs.setdefault(self.agent.cid, set())
+        jobs.add(task)
+        task.add_done_callback(jobs.discard)
+
+    async def prepare(self):
         self.agent.host.recollection_models[self.agent.cid, self.pid] = self.model
         selected = self.config.get("model")
         if selected and not self.agent.host.is_active(self.agent.cid, selected["plugin"]):
@@ -120,15 +193,14 @@ class Recollector:
             plan = self.agent.host.plan_enable(self.agent.cid, self.pid)
             if plan.ok:
                 await self.agent.host.apply(plan.plan_id)
-        task = self.agent.track(self.run())
-        jobs = self.agent.host.memory_jobs.setdefault(self.agent.cid, set())
-        jobs.add(task)
-        task.add_done_callback(jobs.discard)
 
     async def run(self):
         try:
             while True:
                 await self.clock.sleep(60)
+                if not self.sync_enabled():
+                    continue
+                await self.prepare()
                 for cid in self.agent.instance.get("conversations", {}):
                     entry = self.agent.instance["conversations"][cid]
                     self.conversations.setdefault(
@@ -155,6 +227,8 @@ class Recollector:
             token.cancel("new_activity")
 
     async def process(self, conversation):
+        if not self.sync_enabled():
+            return
         cid = conversation.conversation_id
         if cid in self.current:
             return
@@ -264,6 +338,8 @@ class Recollector:
                     attempt_at=attempt["attempt_at"],
                     failures=attempt.get("failures", 0),
                 )
+            self.sync_enabled()
+            token.raise_if_cancelled()
             return RecollectionCommit(self.store).commit(
                 items,
                 window,

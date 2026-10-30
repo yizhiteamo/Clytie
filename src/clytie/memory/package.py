@@ -20,7 +20,9 @@ from clytie.plugin_host.snapshots import atomic_write, contained, identifier
 from clytie.sdk.types import MemoryRecord
 
 from .crypto import PackageError, b64, decrypt, encrypt, new_recovery, public_key, un64
-from .store import canonical, content_hash
+from .origins import FIELDS as ORIGIN_FIELDS
+from .origins import TABLES as ORIGIN_TABLES
+from .store import canonical, content_hash, fingerprint
 
 # 每个表重新建表并复制值，不复制源库中的触发器、视图或其他表。
 TABLES = {
@@ -42,7 +44,7 @@ FADE_COLUMNS = (
 
 
 def export_tables(version):
-    return {**TABLES, **({"fade": FADE_COLUMNS} if version == 3 else {})}
+    return {**TABLES, **({"fade": FADE_COLUMNS, **ORIGIN_TABLES} if version == 3 else {})}
 
 
 @contextmanager
@@ -180,6 +182,31 @@ def _validate_database(connection, version):
                     or half <= 0
                 ):
                     raise PackageError("淡化状态无效")
+        if version == 3:
+            registry = {}
+            for row in connection.execute("SELECT * FROM conversation_registry"):
+                entry = {k: row[k] for k in ORIGIN_FIELDS}
+                if (
+                    any(not isinstance(v, str) or not v or len(v) > 512 for v in entry.values())
+                    or entry["kind"] not in {"private", "group"}
+                    or entry["category"] not in {"owner_private", "internal", "group"}
+                    or fingerprint(entry) != row["key"]
+                ):
+                    raise PackageError("会话登记无效")
+                registry[row["key"]] = entry
+            referenced = set()
+            for row in connection.execute("SELECT * FROM revision_origins"):
+                chain = history.get(row["record_id"], [])
+                revision = row["revision"]
+                entry = registry.get(row["registry_key"])
+                if type(revision) is not int or not 1 <= revision <= len(chain) or not entry:
+                    raise PackageError("会话登记引用无效")
+                record = MemoryRecord.model_validate_json(chain[revision - 1]["data"])
+                if entry["conversation_id"] != record.origin_conversation_id:
+                    raise PackageError("会话登记与修订不匹配")
+                referenced.add(row["registry_key"])
+            if referenced != set(registry):
+                raise PackageError("会话登记存在未引用条目")
         return connection
     except BaseException:
         connection.close()
