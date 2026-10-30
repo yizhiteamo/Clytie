@@ -4,7 +4,7 @@ A4.1 实现规格见 `../architecture/supervisor-spec.md`；API 与后台启动�
 
 ## 1. 进程结构
 
-A4.1 使用 `python -m clytie supervisor start` 前台运行，Ctrl+C 由守护进程协调安全停止，第二次 Ctrl+C 改为取消任务；子进程独立进程组。A4.2 才提供 `--detach` 与双击启动脚本。以下结构包含后续阶段。
+A4.1 使用 `python -m clytie supervisor start` 启动前端窗口；真正的守护进程脱离控制台运行（Windows DETACHED_PROCESS，Linux setsid）。按 supervisor-spec §1 的用户确认规则，Ctrl+C、关闭窗口和前端 EOF 触发取消模式安全停止，第二次 Ctrl+C 发送 escalate；停止期间再次启动等待锁释放。伴侣子进程独立进程组，Windows 纳入 kill-on-job-close Job Object；子进程通道 EOF 后按取消模式、不等交付，5 秒内退出。A4.2 才提供启动后立即返回的 `--detach` 与双击启动脚本。以下结构包含后续阶段。
 
 ```
 clytie supervisor（单实例，进程锁在 CLYTIE_HOME/run/）
