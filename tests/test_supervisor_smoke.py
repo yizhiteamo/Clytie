@@ -121,6 +121,10 @@ async def test_real_supervisor_crash_restart_then_stop(tmp_path):
         )
         result = await supervisor.stop()
         assert result["companion_a"]["state"] == "stopped"
+    except AssertionError as exc:
+        log = home / "companions/companion_a/logs/process.log"
+        detail = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+        raise AssertionError(str(supervisor.rows) + "\n" + detail) from exc
     finally:
         if supervisor.lock:
             await supervisor.stop()

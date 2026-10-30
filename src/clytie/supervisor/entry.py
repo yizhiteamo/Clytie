@@ -66,6 +66,7 @@ async def companion_main(home, cid):
         runtime.runtime.close()
         return 1
     except Exception:
+        logging.exception("companion.start_failed")
         runtime.runtime.close()
         return 1
     emit("ready")
