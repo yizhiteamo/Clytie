@@ -8,7 +8,7 @@
 
 守护进程运行期间持有 run/supervisor.lock。子进程“同样的锁”指 kernel-spec §14 已有的 companions/<cid>/ledger/.lock，不重复获取父进程持有的 supervisor.lock。Windows msvcrt 字节锁和 Linux flock 沿用插件宿主的稳定文件锁实现，以操作系统锁为存活判据，记录 pid 和进程创建时间，不通过删除锁文件抢锁。
 
-注销/关机是否能保证完整停止窗口仍需核对操作系统限制；本 ADR 不自行降低或扩大已确认保障。
+Issue #48 用户确认：注销/关机仅尽力停止，收到通知后立即停止开始新的发送、写 session_ending 审计，再按取消模式停止；不阻止或推迟关机。被系统中断时沿用 unknown 不重发、interrupted 不重放的账本恢复规则。普通关窗、Ctrl+C 和前端 EOF 仍保证取消模式的完整安全停止。
 
 ## 通信与健康
 
