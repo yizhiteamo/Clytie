@@ -519,3 +519,81 @@ async def test_agent_core_recall_thaws_and_reinforces_frozen_record(tmp_path):
         )
     finally:
         await finish(agent)
+
+
+@pytest.mark.parametrize("kind", ["profile", "jargon"])
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
+    tmp_path, kind, explicit
+):
+    from clytie.memory.presence import bind_presence
+
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool(
+            "core_remember",
+            replaces="[记忆1]",
+            kind="fact",
+            content="修订后的虚构纸船",
+            visibility="relationship",
+            explicit=explicit,
+        ),
+        {"finish": "stop", "text": "记下修订"},
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+        store = agent.memory.store
+        original = store.write(
+            dict(kind=kind, content="原来的虚构纸船", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        with store.transaction():
+            original = store._save(
+                original.model_copy(
+                    update={
+                        "revision": 2,
+                        "tags": ["fictional-tag", *(["core:profile"] if kind == "profile" else [])],
+                        "subject": "member" if kind == "profile" else original.subject,
+                        "origin_conversation_id": None
+                        if kind == "profile"
+                        else original.origin_conversation_id,
+                    }
+                ),
+                operator="core:recollect",
+            )
+        await agent.receive(event(agent, "修订虚构纸船"))
+        await agent.drain()
+        updated = store.get_raw(original.record_id)
+        assert updated.content == "修订后的虚构纸船"
+        assert updated.kind == kind and updated.tags == original.tags
+        assert updated.scope == original.scope
+        assert updated.basis == ("owner_confirmed" if explicit else "owner_stated")
+        assert any(
+            text_parts(m.parts) == "记下了" for m in model.requests[-1].messages if m.role == "tool"
+        )
+        agent.clock.advance(120 * 86_400)
+        assert store.project("owner_private", "owner_private")[0].decay.weight == 1
+        assert "纸船" not in str(
+            await agent.memory.build("unrelated", event(agent).conversation, "晴天雨滴")
+        )
+        group = event(agent, scene="public_group").conversation
+        if kind == "profile":
+            for present in ([], ["member"]):
+                with bind_presence("test_group", present):
+                    assert bool(
+                        await agent.memory.retrieval.search("纸船", "public_group", "test_group")
+                    ) == bool(present)
+                    recalled = await agent.memory.execute(
+                        f"recall-{bool(present)}",
+                        group,
+                        None,
+                        ToolCall(call_id="recall", tool="core_recall", arguments={"query": "纸船"}),
+                        CancelToken(),
+                    )
+                    assert ("修订后的虚构纸船" in recalled.content) == bool(present)
+        else:
+            assert store.visible(updated, "public_group", "test_group")
+            assert not store.visible(updated, "public_group", "other_group")
+    finally:
+        await finish(agent)

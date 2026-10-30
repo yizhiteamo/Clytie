@@ -316,6 +316,13 @@ class MemoryContext:
                             "visibility": args.get("visibility", "private"),
                         }
                     )
+                    original = self.store.get_raw(key)
+                    if (
+                        call.tool == "core_remember"
+                        and original is not None
+                        and original.kind in {"profile", "jargon"}
+                    ):
+                        changes["kind"] = original.kind
                     self.store.revise(
                         key,
                         revision,

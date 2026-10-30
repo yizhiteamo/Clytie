@@ -368,6 +368,9 @@ class MemoryStore:
             update.update(revision=old.revision + 1, updated_at=self.clock.now())
             if explicit and operator == "owner":
                 update.update(basis="owner_confirmed", write_mode="confirmed")
+            elif operator == "owner" and old.kind in {"profile", "jargon"}:
+                if old.basis == "observed":
+                    update["basis"] = "owner_stated"
             new = MemoryRecord.model_validate({**old.model_dump(), **update})
             return self._save(new, operator=operator, trace=trace, reason=reason)
 
