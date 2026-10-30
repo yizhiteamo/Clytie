@@ -64,6 +64,10 @@ def fast_cancel(message, words):
     return None
 
 
+def actor_label(actor):
+    return f"{actor.actor_id}（昵称：{actor.display_name or ''}）"
+
+
 class Boundary:
     def __init__(self, path, config, clock, ledger, log, notifier=None):
         self.path, self.config, self.clock, self.ledger, self.log = path, config, clock, ledger, log
@@ -102,6 +106,29 @@ class Boundary:
             return False
         until = self.state["actors"].get(actor.actor_id, {}).get("until")
         return bool(until and datetime.fromisoformat(until) > self.clock.now())
+
+    def reminder(self, actors):
+        cutoff = self.clock.now() - timedelta(hours=self.config.get("window_hours", 24))
+        recent = []
+        for actor in {a.actor_id: a for a in actors}.values():
+            if actor.role in {"owner", "peer"} or self.paused(actor):
+                continue
+            counts = self.state["actors"].get(actor.actor_id, {}).get("counts", {})
+            times = [
+                datetime.fromisoformat(t)
+                for values in counts.values()
+                for t in values
+                if datetime.fromisoformat(t) > cutoff
+            ]
+            if times:
+                recent.append((max(times), actor))
+        recent.sort(key=lambda item: item[1].actor_id)
+        recent.sort(key=lambda item: item[0], reverse=True)
+        return (
+            "近期试过越界请求的人：" + "、".join(actor_label(a) for _, a in recent[:10])
+            if recent
+            else None
+        )
 
     async def report(self, trace, actor, category, cancel):
         enabled = self.config.get("categories", {})
