@@ -364,3 +364,30 @@ async def test_do_not_remember_rule_in_request_without_granting_non_owner_tools(
         assert not names & {"core_remember", "core_forget"}
     assert not agent.memory.store.all_records()
     await finish(agent)
+
+
+async def test_recall_storage_failure_has_distinct_message_and_no_retry(tmp_path, monkeypatch):
+    import sqlite3
+
+    agent, _, _ = await make_agent(tmp_path)
+    calls = []
+
+    async def failed(*args, **kwargs):
+        calls.append(args)
+        raise sqlite3.OperationalError("fictional storage failure")
+
+    monkeypatch.setattr(agent.memory.retrieval, "search", failed)
+    incoming = event(agent)
+    result = await agent.memory.execute(
+        "recall-error",
+        incoming.conversation,
+        incoming.message.sender,
+        ToolCall(call_id="recall", tool="core_recall", arguments={"query": "虚构问题"}),
+        CancelToken(),
+    )
+    assert result.status == "error" and result.error.code == "memory_unavailable"
+    assert result.content == "暂时想不起来，请稍后再试"
+    assert "没有记住" not in result.content
+    assert len(calls) == 1
+    assert any(e[:2] == ("warning", "memory.operation_failed") for e in agent.log.entries)
+    await finish(agent)

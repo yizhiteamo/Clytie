@@ -330,7 +330,9 @@ class MemoryContext:
         except Exception:
             self.log.warning("memory.operation_failed", tool=call.tool)
             content, status, error = (
-                "这次没有记住，请稍后再试",
+                "暂时想不起来，请稍后再试"
+                if call.tool == "core_recall"
+                else "这次没有记住，请稍后再试",
                 "error",
                 {"code": "memory_unavailable", "message": ""},
             )
