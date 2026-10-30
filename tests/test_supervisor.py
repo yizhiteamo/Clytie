@@ -426,3 +426,80 @@ def test_status_chinese_counts_and_pending_migration(tmp_path, monkeypatch, caps
     assert "还有 3 条消息正在发送 / 1 个任务在执行" in output
     assert "静默待确认（迁移中，尚未连接平台）" in output
     assert "startup_stalled" in output
+
+
+async def assert_latest_exit_reason(svc, notifier, clock, home):
+    import json
+
+    clock.advance(5)
+    await spin()
+    row = svc.rows["companion_0"]
+    assert row["state"] == "restart_stopped"
+    assert row["restart_reason"] == "process_exit"
+    assert (
+        read(home / "run/health.json")["companions"]["companion_0"]["restart_reason"]
+        == "process_exit"
+    )
+    audit = [
+        json.loads(line) for line in (home / "supervisor/audit.jsonl").read_text().splitlines()
+    ]
+    assert [r for r in audit if r["operation"] == "crashed"][-1]["reason"] == "process_exit"
+    notices = [n for n in notifier.calls if n.dedupe_key == "restart_stopped:companion_0"]
+    assert len(notices) == 1 and notices[0].body.endswith("process_exit")
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_heartbeat_restart_does_not_leak_reason_into_next_exit(tmp_path, exit_code):
+    from .test_supervisor_runtime import FakeNotifier
+
+    svc, launcher, clock = await make(
+        tmp_path, config={"restart": {"max_failures": 2, "backoff_seconds": [1]}}
+    )
+    notifier = FakeNotifier(clock)
+    svc.notifications.plugins = [(notifier, False)]
+    clock.advance(30)
+    await spin()
+    assert svc.rows["companion_0"]["restart_reason"] == "heartbeat_timeout"
+    clock.advance(1)
+    await spin()
+    child = launcher.children[-1][1]
+    await child.ready()
+    await spin()
+    # Health may retain the last reason; it is not evidence of a failure this round.
+    assert svc.rows["companion_0"]["restart_reason"] == "heartbeat_timeout"
+    await child.exit(exit_code)
+    await spin()
+    if exit_code:
+        await assert_latest_exit_reason(svc, notifier, clock, tmp_path)
+    else:
+        assert svc.rows["companion_0"]["state"] == "stopped"
+        assert len(launcher.children) == 2
+        assert not notifier.calls
+    await svc.stop()
+
+
+@pytest.mark.parametrize("reason", ["manual", "silence_timeout"])
+async def test_explicit_restart_does_not_leak_reason_into_crash(tmp_path, reason):
+    from .test_supervisor_runtime import FakeNotifier
+
+    svc, launcher, clock = await make(tmp_path, ack=False, config={"restart": {"max_failures": 1}})
+    notifier = FakeNotifier(clock)
+    svc.notifications.plugins = [(notifier, False)]
+    pending = None
+    if reason == "manual":
+        await svc.restart("companion_0")
+    else:
+        pending = asyncio.create_task(svc.silence(True))
+        await spin()
+        clock.advance(5)
+    await spin()
+    child = launcher.children[-1][1]
+    await child.ready()
+    await spin()
+    if pending:
+        await pending
+    assert svc.rows["companion_0"]["restart_reason"] == reason
+    await child.exit(1)
+    await spin()
+    await assert_latest_exit_reason(svc, notifier, clock, tmp_path)
+    await svc.stop()

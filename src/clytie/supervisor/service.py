@@ -104,6 +104,7 @@ class Supervisor:
             startup_elapsed = 0
             accounted = self.clock.monotonic()
             fatal, ready = None, None
+            reason = None
             last = self.clock.monotonic()
             try:
                 child = await self.launcher.launch(cid)
@@ -132,7 +133,7 @@ class Supervisor:
                             self.problems[f"startup_stalled:{cid}"] = f"{cid} startup_stalled"
                             continue
                         await child.kill()
-                        row["restart_reason"] = (
+                        reason = (
                             "startup_timeout"
                             if ready is None and startup_elapsed + now - accounted >= startup_limit
                             else "heartbeat_timeout"
@@ -236,14 +237,14 @@ class Supervisor:
                         and startup_elapsed >= startup_limit
                     ):
                         await child.kill()
-                        row["restart_reason"] = "startup_timeout"
+                        reason = "startup_timeout"
                         break
                 code = await child.wait()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 code = 1
-                row["restart_reason"] = "process_failure"
+                reason = "process_failure"
                 child = self.children.get(cid)
                 if child:
                     await child.kill()
@@ -265,12 +266,12 @@ class Supervisor:
                 }[fatal]
                 self.problems[f"blocked:{cid}:{fatal}"] = f"{cid} {fatal} {action}"
                 return
-            if code == 0 and ready is not None and row["restart_reason"] != "heartbeat_timeout":
+            if code == 0 and ready is not None and reason is None:
                 row["state"] = "stopped"
                 return
             row["state"] = "crashed"
             row["failures"] += 1
-            row["restart_reason"] = row["restart_reason"] or "process_exit"
+            row["restart_reason"] = reason or "process_exit"
             self.audit.append("crashed", cid, reason=row["restart_reason"])
             if row["failures"] >= self.setting("restart", "max_failures", 5):
                 self.pending_health.discard(cid)
