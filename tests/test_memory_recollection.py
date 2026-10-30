@@ -24,7 +24,7 @@ def commit(store, items, **kwargs):
     return RecollectionCommit(store).commit(
         items,
         window(),
-        SnapshotReader(store.project("public_group", "group_a")),
+        kwargs.pop("reader", None) or SnapshotReader(store.project("public_group", "group_a")),
         cid="group_a",
         actors={"speaker_a": "owner", "speaker_b": "member_a"},
         trace="fake-window",
@@ -119,8 +119,17 @@ def test_merge_observed_preserves_oldest_and_revisions_but_rejects_owner(store):
         scene="owner_private",
         conversation_id="owner_chat",
     )
-    item = item.model_copy(update={"merges": ["[记忆1]"]})
-    assert commit(store, [item])["dropped"] == 1
+    reader = SnapshotReader(store.project("public_group", "group_a"))
+    label, confirmed = next(
+        (label, r) for label, r in reader.labels.items() if r.record_id == first.record_id
+    )
+    assert confirmed.basis == "owner_confirmed"
+    assert confirmed.revision == store.get_raw(first.record_id).revision
+    revisions = store.db.execute("SELECT count(*) FROM revisions").fetchone()[0]
+    item = item.model_copy(update={"merges": [label]})
+    assert commit(store, [item], reader=reader)["dropped"] == 1
+    assert store.db.execute("SELECT count(*) FROM revisions").fetchone()[0] == revisions
+    assert store.get_raw(first.record_id) == confirmed
 
 
 def test_owner_jargon_fades_but_owner_episode_does_not(store):

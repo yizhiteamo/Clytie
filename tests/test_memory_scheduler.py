@@ -126,6 +126,12 @@ async def test_retracted_window_raw_chat_unchanged_no_derived_retracted_record(t
         assert record.record_id not in str(request.model_dump())
         assert [r.content for r in store.all_records() if not r.retracted] == ["另一件虚构新事"]
         assert store.meta("recollect_semantic_failures") == 1
+        status = memory_notices(agent, tmp_path)
+        assert (
+            next(n for n in status if n["code"] == "recollect_semantic_unavailable")["count"] == 1
+        )
+        assert "虚构的撤销内容" not in str(status)
+        assert "另一件虚构新事" not in str(status)
         assert agent.recollector.progress("owner_private")["inbound"] > 0
     finally:
         await finish(agent)
@@ -218,6 +224,10 @@ async def test_disable_enable_skips_pending_and_disabled_windows(tmp_path):
             "SELECT data FROM recollect_progress WHERE conversation_id='!state'"
         ).fetchone()
         assert json.loads(row[0])["skipped"] == 1
+        status = memory_notices(agent, tmp_path)
+        assert next(n for n in status if n["code"] == "recollect_skipped")["count"] == 1
+        assert first.message.parts[0].text not in str(status)
+        assert second.message.parts[0].text not in str(status)
         await agent.clock.advance_and_drain(30 * 60)
         assert not model.requests
     finally:
@@ -348,3 +358,19 @@ async def test_reply_to_previous_window_uses_only_verified_author_role(tmp_path,
             assert ("core:with_owner" in record.tags) == (target == "owner")
     finally:
         await finish(agent)
+
+
+def memory_notices(agent, home):
+    from types import SimpleNamespace
+
+    from clytie.memory.status import notices
+
+    return notices(
+        SimpleNamespace(
+            home=home,
+            companions=[{"id": agent.cid}],
+            instance=agent.instance,
+            plugin_configs={agent.cid: {"config": agent.config}},
+        ),
+        clock=agent.clock,
+    )
