@@ -173,6 +173,11 @@
 
 **MemoryHit**：`record_id`、`score: float`、`source: str`（哪个检索器）。
 
+**A3.4 回想类型**（memory-recall-spec §2.2）：
+- `RecollectWindow`：会话场景、按顺序编号的消息（`[消息N] 说话人称呼：原文`）、她在这段里已经用 `core_remember` 记下的记忆，以及本段撤销的条数；撤销的原文和编号不交给扩展或模型（Issue #35 U2）。
+- `RecollectItem`：`kind`、`content`、`visibility`、`evidence: list[消息编号]`，以及可选的 `about`（印象对应的说话人）、`merges`（建议合并的 `[记忆N]`）。
+- 保留标签 `core:` 前缀只能由本体写入；插件和模型提交的 `core:` 标签一律丢弃。出处、合并与保留标签的核对按 memory-recall-spec §2.4–§2.5、§9。
+
 ### 1.8 其他
 
 **BusEvent**：`name`、`payload: dict`、`at`、`source`（发布者：`core` 或插件 id）。
@@ -292,7 +297,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
 | `memory.retriever` | `async search(q: MemoryQuery, candidates: CandidateReader, cancel) -> list[MemoryHit]`；`CandidateReader` 只返回 `q.allowed_visibility` 内的记录 |
 | `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出 `ImportCandidate`（具体字段编码见 ADR 0008），包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
-| `memory.consolidator` | `async run(window_start, window_end, reader, cancel) -> list[MemoryRecord]`（kind=`episode`，由本体写入） |
+| `memory.consolidator` | `async run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`；本体核对、写入，见 memory-recall-spec §2 |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
 | `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；非 GET 必须声明 `audit: true` |
@@ -472,3 +477,14 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 - `services[].handler` 签名：`async (method: str, args: JsonObject) -> JsonObject`。
 - `api_routes` 和 `webui_panels` 在 A1–A3 只做声明和校验，A4 才真正提供服务。
 - 假插件的清单要改为使用上述编码（`fake-model` 声明 `model`，`fake-channel` 声明 `channel`），契约测试通过宿主同样的装配路径（读清单 → 构造 → `start` → `factory`）获得实现对象。
+
+
+Issue #36（用户已确认）：窗口聊天原文保持原样，不从撤销记录派生内容或编号；回想窗口只给撤销条数。只有 memory.embedder 指定的向量模型可为本次比对接收撤销原文：优先复用同一 embedder_id 缓存，没有时临时计算，不落库、不缓存、不记录原文。未配置、出错、超时或候选向量失败时，整段只做规范化相同比对，照常写入并推进进度；status 只显示计数提醒，WARN 每小时最多一次，不使用其他模型身份的向量。
+
+
+### Issue #39 用户确认的同步
+
+- 印象与黑话按普通检索命中后注入，共用 recall_limit / recall_chars，不自动全量前置、不增加预算。群聊不在场的印象，普通检索和 core_recall 都不返回；对内印象按普通检索。
+- owner_confirmed / owner_stated 的印象与黑话不淡化，但核心记忆排除 profile / jargon；修订升级规则不变，使用范围不变。core:with_owner 只用于群聊 episode，主人参与的黑话不因此免淡化。
+- 来源会话按 memory-recall-spec §4.6 的会话登记表处理：本体写入时按配置、导入时按包清单登记；只以 channel + kind + platform_id 在当前配置对应，逻辑 ID 和群名称不参与身份判断。不改 origin_conversation_id，不产生修订、不进内容指纹。未对应时仅对内可见、按登记类别淡化；旧包和无法得知身份的非印象来源不淡化。再次导出保留登记；更换 channel 不自动对应。本地与导入同逻辑 ID、不同平台身份的记录须分别引用自己的登记。
+- 停用回想立即取消进行中的工作且不写入；重新启用时所有会话进度移到现在，停用期间和未完成窗口都跳过，status 只显示跳过段数。

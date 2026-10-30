@@ -14,7 +14,16 @@ def memory(tmp_path):
         tmp_path / "memory.sqlite3",
         clock=MockClock(),
         config={"memory": {"private_scenes": ["owner_private"]}},
-        instance={"conversations": {"owner_chat": {"kind": "private", "scene": "owner_private"}}},
+        instance={
+            "conversations": {
+                "owner_chat": {
+                    "kind": "private",
+                    "scene": "owner_private",
+                    "channel": "fake-channel",
+                    "platform_id": "fake-owner",
+                }
+            }
+        },
     )
     yield store
     store.close()

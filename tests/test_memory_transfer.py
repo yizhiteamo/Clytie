@@ -281,8 +281,12 @@ async def test_missing_conversation_projects_internally_and_snapshot_failure_is_
             await transfers.apply(plan["id"], passphrase=PASSPHRASE)
     assert target.uid is None and not target.all_records()
     await transfers.apply(plan["id"], passphrase=PASSPHRASE)
-    assert target.get_raw(record.record_id).origin_conversation_id is None
-    assert target.meta("missing_origins") == [record.record_id]
+    assert target.get_raw(record.record_id).origin_conversation_id == record.origin_conversation_id
+    from clytie.memory.origins import current_key
+
+    assert target.meta("missing_origins") == [
+        [record.record_id, current_key(target, target.get_raw(record.record_id))]
+    ]
     assert target.project("public_group", "unrelated") == []
     assert target.project("owner_private", "owner_chat")
 
@@ -335,7 +339,12 @@ async def test_new_and_fast_forward_preserve_revision_provenance(homes):
 
 async def test_missing_origin_normalization_does_not_fork_source_only_changes(homes):
     source, home, _ = homes("source")
-    source.instance["conversations"]["source_group"] = {"kind": "group", "scene": "public_group"}
+    source.instance["conversations"]["source_group"] = {
+        "kind": "group",
+        "scene": "public_group",
+        "channel": "fake-channel",
+        "platform_id": "fake-source-group",
+    }
     original = source.write(
         dict(kind="event", content="虚构群经历", visibility="public"),
         scene="public_group",
@@ -345,8 +354,10 @@ async def test_missing_origin_normalization_does_not_fork_source_only_changes(ho
     )
     target, target_home, transfers = homes("target")
     await move(transfers, export(source, home))
-    assert target.get_raw(original.record_id).origin_conversation_id is None
-    assert target.get_raw(original.record_id).revision == 2
+    assert (
+        target.get_raw(original.record_id).origin_conversation_id == original.origin_conversation_id
+    )
+    assert target.get_raw(original.record_id).revision == 1
     current = original
     for index in range(2):
         source.clock.advance(1)
@@ -364,9 +375,12 @@ async def test_missing_origin_normalization_does_not_fork_source_only_changes(ho
         assert plan["records"][0]["action"] == "update"
         await transfers.apply(plan["id"], passphrase=PASSPHRASE)
         local = target.get_raw(original.record_id)
-        assert local.content == current.content and local.origin_conversation_id is None
+        assert (
+            local.content == current.content
+            and local.origin_conversation_id == current.origin_conversation_id
+        )
         assert target.project("public_group", "other_group") == []
-    assert target.db.execute("SELECT count(*) FROM foreign_revisions").fetchone()[0] > 0
+    assert target.db.execute("SELECT count(*) FROM revisions").fetchone()[0] == 3
     # 保留原始来源指纹，导出后仍可通过完整修订链校验再次搬家。
     moved, _, moving = homes("moved")
     await move(moving, export(target, target_home))
@@ -411,3 +425,56 @@ async def test_merge_applies_remote_undo_even_when_content_hash_repeats(homes):
     assert [r[0] for r in target.db.execute("SELECT hash FROM revisions ORDER BY revision")] == [
         r[0] for r in source.db.execute("SELECT hash FROM revisions ORDER BY revision")
     ]
+
+
+async def test_fade_moves_merges_maxima_and_progress_stays_local(homes):
+    from clytie.memory.fade import reinforce, state
+    from clytie.memory.package import payload, unpack
+
+    source, home, _ = homes("fade_source")
+    source.instance["conversations"]["group_a"] = {
+        "kind": "group",
+        "scene": "public_group",
+        "channel": "fake-channel",
+        "platform_id": "fake-source-group",
+    }
+    record = source.write(
+        dict(kind="episode", content="虚构群里的纸船", visibility="relationship"),
+        scene="public_group",
+        conversation_id="group_a",
+    )
+    source.clock.advance(86_400)
+    reinforce(source, [record])
+    with source.transaction():
+        source.db.execute(
+            "INSERT INTO recollect_progress VALUES(?,?)", ("group_a", json.dumps({"inbound": 4}))
+        )
+    _, db = unpack(payload(source, "companion_a", home), home, "companion_a")
+    try:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='recollect_progress'"
+        ).fetchone()
+    finally:
+        db.close()
+    target, _, transfers = homes("fade_target")
+    target.instance["conversations"]["group_a"] = {
+        "kind": "group",
+        "scene": "public_group",
+        "channel": "fake-channel",
+        "platform_id": "fake-source-group",
+    }
+    await move(transfers, export(source, home))
+    assert state(target, target.get_raw(record.record_id)) == state(source, record)
+    target.clock.advance(3 * 86_400)
+    reinforce(target, [target.get_raw(record.record_id)])
+    later = state(target, target.get_raw(record.record_id))
+    reinforce(source, [record])
+    reinforce(source, [record])
+    path = export(source, home, "second.enc")
+    plan = await transfers.plan(path, mode="merge", passphrase=PASSPHRASE)
+    await transfers.apply(plan["id"], passphrase=PASSPHRASE)
+    assert state(target, target.get_raw(record.record_id)) == (later[0], state(source, record)[1])
+    again = await transfers.plan(path, mode="merge", passphrase=PASSPHRASE)
+    assert again["repeated_merge_count"] == 1
+    assert "按上次的选择保留" in again["repeated_merge_message"]
+    assert not target.db.execute("SELECT * FROM recollect_progress").fetchall()

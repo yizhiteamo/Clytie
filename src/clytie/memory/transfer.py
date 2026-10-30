@@ -16,17 +16,21 @@ from clytie.plugin_host.support import HostLog
 from clytie.sdk import CancelToken
 from clytie.sdk.types import ImportCandidate, MemoryRecord
 
+from . import origins
 from .crypto import b64, decrypt, un64
 from .package import TABLES, open_database, snapshot, unpack
 from .store import BASIS, canonical, content_hash, fingerprint
 
 
 def database_fingerprint(store):
-    tables = (*TABLES, "keywords", "vectors")
+    tables = (*TABLES, "keywords", "vectors", "fade", "recollect_progress", *origins.TABLES)
     return fingerprint(
         {
             name: sorted(
-                [list(row) for row in store.db.execute(f"SELECT * FROM {name}")], key=canonical
+                [list(row) for row in store.db.execute(f"SELECT * FROM {name}")]
+                if store.has_table(name)
+                else [],
+                key=canonical,
             )
             for name in tables
         }
@@ -153,6 +157,7 @@ class Transfers:
         source = Path(source).resolve()
         before = source_fingerprint(source)
         histories, source_audit, foreign_history = {}, [], []
+        bindings = {}
         proposals = {key: 0 for key in BASIS}
         if importer:
             self.importer_allowed(importer, before)
@@ -175,7 +180,20 @@ class Transfers:
         else:
             raw = decrypt(source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code)
             manifest, db = unpack(raw, self.home, self.cid)
+            fades = {}
             try:
+                if manifest["version"] == 3:
+                    registry = {
+                        r["key"]: {k: r[k] for k in origins.FIELDS}
+                        for r in db.execute("SELECT * FROM conversation_registry")
+                    }
+                    bindings = {
+                        (r["record_id"], r["revision"]): registry[r["registry_key"]]
+                        for r in db.execute("SELECT * FROM revision_origins")
+                    }
+                    fades = {
+                        row["record_id"]: dict(row) for row in db.execute("SELECT * FROM fade")
+                    }
                 records = {
                     row["id"]: MemoryRecord.model_validate_json(row["data"])
                     for row in db.execute("SELECT * FROM records")
@@ -193,6 +211,7 @@ class Transfers:
         if source_fingerprint(source) != before:
             raise ValueError("源数据发生变化，请重新生成计划")
         return dict(
+            bindings=bindings,
             records=records,
             manifest=manifest,
             histories=histories,
@@ -200,9 +219,12 @@ class Transfers:
             hash=before,
             proposals=proposals,
             foreign_history=foreign_history,
+            fade=fades if not importer else {},
         )
 
-    def _normalized(self, record):
+    def _normalized(self, record, *, preserve_origin=False):
+        if preserve_origin:
+            return record
         if (
             record.origin_conversation_id is not None
             and record.origin_conversation_id not in self.store.instance.get("conversations", {})
@@ -218,12 +240,33 @@ class Transfers:
         seen_packages = self.store.meta("merged_packages", [])
         for key, source in sorted(records.items()):
             current = self.store.get_raw(key)
-            target = self._normalized(source)
+            target = self._normalized(
+                source, preserve_origin=loaded["manifest"].get("version") == 3
+            )
             action = "add" if current is None else "update"
             preserve = False
+            remote_binding = (
+                origins.configured(self.store, target.origin_conversation_id)
+                if importer
+                else loaded["bindings"].get((key, source.revision))
+            )
+            local_binding = origins.binding(self.store, current)
+            if mode == "merge" and loaded["manifest"].get("version", 0) < 3 and local_binding:
+                target = target.model_copy(
+                    update={"origin_conversation_id": current.origin_conversation_id}
+                )
+            identity_conflict = (
+                current is not None
+                and origins.identity(remote_binding) != origins.identity(local_binding)
+                and remote_binding is not None
+            )
             if mode == "merge" and loaded["hash"] in seen_packages:
                 action = "skip"
-            elif current and content_hash(current) == content_hash(target):
+            elif mode == "merge" and identity_conflict:
+                action = "conflict"
+            elif (
+                current and content_hash(current) == content_hash(target) and not identity_conflict
+            ):
                 action = "skip"
             elif current and mode == "merge":
                 local_rows = list(
@@ -345,6 +388,12 @@ class Transfers:
             warnings=["来源包未记录 Clytie 版本（版本未知，旧清单格式）"]
             if not importer and loaded["manifest"]["version"] == 1
             else [],
+            repeated_merge_count=len(rows)
+            if mode == "merge" and loaded["hash"] in self.store.meta("merged_packages", [])
+            else 0,
+            repeated_merge_message=f"这个包已经合并过，{len(rows)} 条按上次的选择保留"
+            if mode == "merge" and loaded["hash"] in self.store.meta("merged_packages", [])
+            else None,
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )
@@ -450,6 +499,9 @@ class Transfers:
             if any(r["action"] == "conflict" and r["choice"] is None for r in rows):
                 raise ValueError("冲突尚未选择")
             self.store.materialize()
+            from .migration import migrate
+
+            migrate(self.store, self.home, self.cid, self.log)
             backup = self._snapshot()
             import_id, changes = uuid4().hex, {}
             with self.store.transaction():
@@ -470,6 +522,22 @@ class Transfers:
                         continue
                     target, preserve = targets[record_id]
                     previous = self.store.get_raw(record_id)
+                    before_origin = origins.binding(self.store, previous)
+                    source = loaded["records"].get(record_id, previous)
+                    remote_origin = (
+                        origins.configured(self.store, target.origin_conversation_id)
+                        if plan["importer"]
+                        else loaded["bindings"].get((record_id, source.revision))
+                        if record_id in loaded["records"]
+                        else before_origin
+                    )
+                    if (
+                        plan["mode"] == "merge"
+                        and not plan["importer"]
+                        and loaded["manifest"].get("version", 0) < 3
+                        and before_origin
+                    ):
+                        remote_origin = before_origin
                     if preserve:
                         for revision in loaded["histories"].get(record_id, []):
                             if previous and revision["revision"] <= previous.revision:
@@ -481,16 +549,33 @@ class Transfers:
                                 reason=revision["reason"],
                                 timestamp=revision["at"],
                                 import_id=import_id,
+                                origin_binding=loaded["bindings"].get(
+                                    (record_id, revision["revision"]),
+                                    remote_origin
+                                    if loaded["manifest"].get("version", 0) < 3
+                                    and plan["mode"] == "merge"
+                                    else None,
+                                ),
                             )
                         current = self.store.get_raw(record_id)
                         if current and content_hash(current) != content_hash(target):
                             target = target.model_copy(update={"revision": current.revision + 1})
-                            self.store._save(target, operator="import", import_id=import_id)
+                            self.store._save(
+                                target,
+                                operator="import",
+                                import_id=import_id,
+                                origin_binding=remote_origin,
+                            )
                     else:
                         target = target.model_copy(
                             update={"revision": previous.revision + 1 if previous else 1}
                         )
-                        self.store._save(target, operator="import", import_id=import_id)
+                        self.store._save(
+                            target,
+                            operator="import",
+                            import_id=import_id,
+                            origin_binding=remote_origin,
+                        )
                         for revision in loaded["histories"].get(record_id, []):
                             self.store.db.execute(
                                 "INSERT OR IGNORE INTO foreign_revisions VALUES(?,?,?,?)",
@@ -502,17 +587,47 @@ class Transfers:
                                 ),
                             )
                     changes[record_id] = {
+                        "before_origin": before_origin,
+                        "after_origin": origins.binding(self.store, self.store.get_raw(record_id)),
                         "before": previous.model_dump(mode="json") if previous else None,
                         "after": self.store.get_raw(record_id).model_dump(mode="json"),
                     }
-                missing = set(self.store.meta("missing_origins", []))
-                missing.update(
-                    key
-                    for key, r in loaded["records"].items()
-                    if r.origin_conversation_id
-                    and r.origin_conversation_id not in self.store.instance.get("conversations", {})
+                from .fade import state as fade_state
+
+                for row in rows:
+                    rid = row["record_id"]
+                    current = self.store.get_raw(rid)
+                    if current is None:
+                        continue
+                    remote = loaded["fade"].get(rid)
+                    if remote:
+                        at, half = fade_state(self.store, current)
+                        if plan["mode"] == "merge":
+                            at = max(at, datetime.fromisoformat(remote["last_recalled_at"]))
+                            half = max(half, remote["half_life_days"])
+                        else:
+                            at, half = (
+                                datetime.fromisoformat(remote["last_recalled_at"]),
+                                remote["half_life_days"],
+                            )
+                        self.store.db.execute(
+                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)", (rid, at.isoformat(), half)
+                        )
+                    elif rid in changes:
+                        self.store.db.execute(
+                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)",
+                            (
+                                rid,
+                                self.store.clock.now().isoformat(),
+                                self.store.config.get("memory", {})
+                                .get("fade", {})
+                                .get("half_life_days", 30),
+                            ),
+                        )
+                self.store.db.execute(
+                    "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
                 )
-                self.store.set_meta("missing_origins", sorted(missing))
+                origins.track(self.store)
                 if plan["mode"] == "merge":
                     self.store.set_meta(
                         "merged_packages",
@@ -562,7 +677,9 @@ class Transfers:
                 if change["before"]
                 else current.model_copy(update={"retracted": True})
             )
-            conflict = current.model_dump(mode="json") != change["after"]
+            conflict = current.model_dump(mode="json") != change["after"] or origins.binding(
+                self.store, current
+            ) != change.get("after_origin")
             choice = choices.get(key)
             if choice not in {None, "current", "package"}:
                 raise ValueError("invalid conflict choice")
@@ -611,7 +728,10 @@ class Transfers:
         return preview
 
     def _apply_undo(self, plan):
-        _, rows, targets = self._undo_data(plan["undo"], plan["choices"])
+        from .migration import migrate
+
+        migrate(self.store, self.home, self.cid, self.log)
+        original, rows, targets = self._undo_data(plan["undo"], plan["choices"])
         if rows != plan["records"] or any(
             r["action"] == "conflict" and r["choice"] is None for r in rows
         ):
@@ -625,11 +745,25 @@ class Transfers:
                 key = row["record_id"]
                 current = self.store.get_raw(key)
                 target = targets[key].model_copy(update={"revision": current.revision + 1})
-                self.store._save(target, operator="undo_import", import_id=import_id)
+                before_origin = origins.binding(self.store, current)
+                change = original["changes"][key]
+                restored_origin = change.get("before_origin") if change["before"] else before_origin
+                self.store._save(
+                    target,
+                    operator="undo_import",
+                    import_id=import_id,
+                    origin_binding=restored_origin,
+                )
                 changes[key] = {
+                    "before_origin": before_origin,
+                    "after_origin": restored_origin,
                     "before": current.model_dump(mode="json"),
                     "after": target.model_dump(mode="json"),
                 }
+            self.store.db.execute(
+                "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
+            )
+            origins.track(self.store)
             self._record_import(import_id, changes, undo=plan["undo"], snapshot=backup.name)
         self._retention()
         return import_id

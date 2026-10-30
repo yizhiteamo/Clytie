@@ -391,3 +391,245 @@ async def test_recall_storage_failure_has_distinct_message_and_no_retry(tmp_path
     assert len(calls) == 1
     assert any(e[:2] == ("warning", "memory.operation_failed") for e in agent.log.entries)
     await finish(agent)
+
+
+async def test_projection_failure_skips_memory_but_guard_failure_blocks(tmp_path, monkeypatch):
+    agent, _, _ = await make_agent(tmp_path)
+    try:
+
+        def unavailable(*args, **kwargs):
+            raise OSError("fake unavailable")
+
+        monkeypatch.setattr(agent.memory.store, "project", unavailable)
+        assert await agent.memory.build("fake", event(agent).conversation, "纸船") == []
+        monkeypatch.setattr(agent.memory.store, "all_records", unavailable)
+        assert agent.memory.guard("虚构的长内容用于检查", "public_group")
+        assert not agent.memory.guard("虚构的长内容用于检查", "owner_private")
+    finally:
+        await finish(agent)
+
+
+async def test_recollection_rules_in_owner_and_group_model_requests(tmp_path):
+    agent, _, model = await make_agent(tmp_path)
+    try:
+        for scene, role in (
+            ("owner_private", "owner"),
+            ("public_group", "owner"),
+            ("public_group", "member"),
+        ):
+            await agent.receive(event(agent, "纸船活动", scene=scene, role=role, mention=True))
+            await agent.drain()
+            text = str(model.requests[-1].model_dump())
+            for rule in (
+                "不当面否认",
+                "不提是在哪个群认识的",
+                "只当作某人说过",
+                "relationship",
+                "别在群里提",
+            ):
+                assert rule in text
+            if role != "owner":
+                assert not any(
+                    tool.name in {"core_remember", "core_forget"}
+                    for tool in model.requests[-1].tools
+                )
+    finally:
+        await finish(agent)
+
+
+async def test_owner_core_forget_retracts_profile_through_agent(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool("core_forget", target="[记忆1]", reason="虚构撤销"),
+        {"finish": "stop", "text": "已经忘记"},
+    )
+    try:
+        store = agent.memory.store
+        record = store.write(
+            dict(kind="profile", content="喜欢虚构纸船", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        with store.transaction():
+            profile = record.model_copy(
+                update={
+                    "revision": 2,
+                    "subject": "member",
+                    "origin_conversation_id": None,
+                    "tags": ["core:profile"],
+                }
+            )
+            store._save(profile, operator="core:recollect")
+        await agent.receive(event(agent, "别记那个喜欢虚构纸船的印象"))
+        await agent.drain()
+        assert store.get_raw(record.record_id).retracted
+        assert any(
+            "已经不会再提了" in text_parts(m.parts)
+            for m in model.requests[-1].messages
+            if m.role == "tool"
+        )
+    finally:
+        await finish(agent)
+
+
+async def test_agent_core_recall_thaws_and_reinforces_frozen_record(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path, tool("core_recall", query="虚构纸船"), {"finish": "stop", "text": "想起了"}
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+
+        class Embedding:
+            async def embed(self, texts, cancel):
+                return [[1, 0] for _ in texts]
+
+        retrieval = agent.memory.retrieval
+        retrieval.embedder = Embedding()
+        retrieval.embedder_id = "fake-only"
+        store = agent.memory.store
+        record = store.write(
+            dict(kind="episode", content="虚构纸船经历", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        await retrieval.rebuild()
+        agent.clock.advance(120 * 86_400)
+        assert next(
+            r
+            for r in store.project("owner_private", "owner_private")
+            if r.record_id == record.record_id
+        ).decay.frozen
+        await agent.receive(event(agent, "想想虚构纸船"))
+        await agent.drain()
+        assert any(
+            "很久以前" in text_parts(m.parts)
+            for m in model.requests[-1].messages
+            if m.role == "tool"
+        )
+        assert not next(
+            r
+            for r in store.project("owner_private", "owner_private")
+            if r.record_id == record.record_id
+        ).decay.frozen
+        assert (
+            store.db.execute(
+                "SELECT half_life_days FROM fade WHERE record_id=?", (record.record_id,)
+            ).fetchone()[0]
+            >= 45
+        )
+    finally:
+        await finish(agent)
+
+
+@pytest.mark.parametrize("kind", ["profile", "jargon"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("visibility", [None, "relationship", "private"])
+async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
+    tmp_path, kind, explicit, visibility
+):
+    from clytie.memory.presence import bind_presence
+
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool(
+            "core_remember",
+            replaces="[记忆1]",
+            kind="fact",
+            content="修订后的虚构纸船",
+            explicit=explicit,
+            **({"visibility": visibility} if visibility is not None else {}),
+        ),
+        {"finish": "stop", "text": "记下修订"},
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+        store = agent.memory.store
+        original = store.write(
+            dict(kind=kind, content="原来的虚构纸船", visibility="relationship"),
+            scene="public_group",
+            conversation_id="test_group",
+        )
+        with store.transaction():
+            original = store._save(
+                original.model_copy(
+                    update={
+                        "revision": 2,
+                        "tags": ["fictional-tag", *(["core:profile"] if kind == "profile" else [])],
+                        "subject": "member" if kind == "profile" else original.subject,
+                        "origin_conversation_id": None
+                        if kind == "profile"
+                        else original.origin_conversation_id,
+                    }
+                ),
+                operator="core:recollect",
+            )
+        await agent.receive(event(agent, "修订虚构纸船"))
+        await agent.drain()
+        updated = store.get_raw(original.record_id)
+        assert updated.content == "修订后的虚构纸船"
+        assert updated.kind == kind and updated.tags == original.tags
+        assert updated.scope == original.scope
+        assert updated.visibility == (visibility or "relationship")
+        assert updated.basis == ("owner_confirmed" if explicit else "owner_stated")
+        assert any(
+            text_parts(m.parts) == "记下了" for m in model.requests[-1].messages if m.role == "tool"
+        )
+        agent.clock.advance(120 * 86_400)
+        assert store.project("owner_private", "owner_private")[0].decay.weight == 1
+        assert "纸船" not in str(
+            await agent.memory.build("unrelated", event(agent).conversation, "晴天雨滴")
+        )
+        group = event(agent, scene="public_group").conversation
+        if kind == "profile":
+            for present in ([], ["member"]):
+                with bind_presence("test_group", present):
+                    assert bool(
+                        await agent.memory.retrieval.search("纸船", "public_group", "test_group")
+                    ) == (bool(present) and visibility != "private")
+                    recalled = await agent.memory.execute(
+                        f"recall-{bool(present)}",
+                        group,
+                        None,
+                        ToolCall(call_id="recall", tool="core_recall", arguments={"query": "纸船"}),
+                        CancelToken(),
+                    )
+                    assert ("修订后的虚构纸船" in recalled.content) == (
+                        bool(present) and visibility != "private"
+                    )
+        else:
+            assert store.visible(updated, "public_group", "test_group") == (visibility != "private")
+            assert bool(
+                await agent.memory.retrieval.search("纸船", "public_group", "test_group")
+            ) == (visibility != "private")
+            assert not store.visible(updated, "public_group", "other_group")
+    finally:
+        await finish(agent)
+
+
+async def test_owner_replaces_fact_omitted_visibility_stays_private_through_agent(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool("core_remember", replaces="[记忆1]", kind="fact", content="修订后的虚构纸船"),
+        {"finish": "stop", "text": "记下修订"},
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+        record = write(agent, "原来的虚构纸船", kind="fact", visibility="relationship")
+        await agent.receive(event(agent, "修订虚构纸船"))
+        await agent.drain()
+        store = agent.memory.store
+        updated = store.get_raw(record.record_id)
+        assert updated.content == "修订后的虚构纸船"
+        assert updated.kind == "fact" and updated.visibility == "private"
+        assert updated.basis == "owner_stated"
+        assert any(
+            text_parts(m.parts) == "记下了" for m in model.requests[-1].messages if m.role == "tool"
+        )
+        agent.clock.advance(120 * 86_400)
+        assert store.project("owner_private", "owner_private")[0].decay.weight == 1
+        assert "纸船" not in str(
+            await agent.memory.build("unrelated", event(agent).conversation, "晴天雨滴")
+        )
+        assert not store.visible(updated, "public_group", "test_group")
+    finally:
+        await finish(agent)

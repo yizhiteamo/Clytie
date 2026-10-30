@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -21,13 +20,14 @@ from clytie.sdk.types import (
     Invocation,
     MemoryHit,
     MemoryQuery,
-    MemoryRecord,
     ModelFeatures,
     ModelRequest,
     ModelTurn,
     Notice,
     Plan,
     Receipt,
+    RecollectItem,
+    RecollectWindow,
     Tick,
     TokenUsage,
     ToolCall,
@@ -218,17 +218,16 @@ class FakeReranker:
 
 
 class FakeConsolidator:
-    def __init__(self, records: tuple[MemoryRecord, ...], ctx: FakeContext | None = None) -> None:
+    def __init__(self, records: tuple[RecollectItem, ...], ctx: FakeContext | None = None) -> None:
         self.records = records
         self.ctx = ctx or FakeContext()
 
     async def run(
         self,
-        window_start: datetime,
-        window_end: datetime,
+        window: RecollectWindow,
         reader: object,
         cancel: CancelToken,
-    ) -> list[MemoryRecord]:
+    ) -> list[RecollectItem]:
         await cancellable_wait(self.ctx.clock, 0, cancel)
         return list(self.records)
 

@@ -138,6 +138,12 @@ def samples():
         t.PluginChangedPayload(plugin_id="fake-plugin", companion_id="companion_a"),
     ]
     return [
+        t.RecollectMessage(number=1, speaker="speaker_1", role="owner", text="fictional"),
+        t.RecollectRemembered(
+            label="[记忆1]", kind="episode", content="fictional", visibility="private"
+        ),
+        t.RecollectWindow(scene="owner_private", conversation_kind="private", messages=[]),
+        t.RecollectItem(kind="episode", content="fictional", evidence=[1]),
         *new_models,
         actor,
         conversation,

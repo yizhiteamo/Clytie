@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "default-consolidator",
+  "name": "默认回想整理",
+  "summary": "按投影后的新对话提议经历、印象和黑话。",
+  "category": "memory",
+  "version": "0.2.0",
+  "requires": {
+    "sdk": ">=0.7,<0.8"
+  },
+  "dependencies": {},
+  "conflicts": [],
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "contributes": {
+    "memory": {
+      "consolidator": {
+        "factory": "create_consolidator"
+      }
+    }
+  },
+  "permissions": [
+    "model.invoke"
+  ],
+  "config": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}

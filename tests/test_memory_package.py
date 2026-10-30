@@ -163,14 +163,14 @@ async def test_manifest_software_version_legacy_and_unknown_formats(export_case)
     exports.export(home / "new.enc", passphrase=PASSPHRASE)
     raw = decrypt((home / "new.enc").read_bytes(), passphrase=PASSPHRASE)
     plain = json.loads(raw)
-    assert plain["manifest"]["version"] == 2
+    assert plain["manifest"]["version"] == 3
     assert plain["manifest"]["clytie_version"] == version("clytie")
     for value in (None, "invalid version", 42):
         altered = json.loads(raw)
         altered["manifest"]["clytie_version"] = value
         with pytest.raises(PackageError):
             unpack(canonical(altered).encode(), home, "companion_a")
-    for format_version in (0, 3, True, "2"):
+    for format_version in (0, 4, True, "2"):
         altered = json.loads(raw)
         altered["manifest"]["version"] = format_version
         with pytest.raises(PackageError, match="版本"):
@@ -179,6 +179,22 @@ async def test_manifest_software_version_legacy_and_unknown_formats(export_case)
     with pytest.raises(PackageError, match="字段"):
         unpack(canonical(plain).encode(), home, "companion_a")
     del plain["manifest"]["clytie_version"]
+    import hashlib
+    import sqlite3
+
+    from clytie.memory.crypto import b64, un64
+
+    legacy_db = home / "legacy-test.sqlite3"
+    legacy_db.write_bytes(un64(plain["files"]["memory.sqlite3"]["data"]))
+    with sqlite3.connect(legacy_db) as connection:
+        connection.execute("DROP TABLE fade")
+        connection.execute("DROP TABLE revision_origins")
+        connection.execute("DROP TABLE conversation_registry")
+    data = legacy_db.read_bytes()
+    plain["files"]["memory.sqlite3"] = {
+        "data": b64(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
     manifest, db = unpack(canonical(plain).encode(), home, "companion_a")
     db.close()
     assert manifest["version"] == 1 and "clytie_version" not in manifest

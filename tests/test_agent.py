@@ -107,6 +107,8 @@ async def make_agent(tmp_path, *turns, changes=None):
             },
         }
     }
+    for cid, conversation in instance["conversations"].items():
+        conversation["platform_id"] = "fictional-" + cid
     persona = tmp_path / "companions/companion_a/persona"
     persona.mkdir(parents=True)
     (persona / "base.md").write_text(

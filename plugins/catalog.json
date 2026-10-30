@@ -1,6 +1,24 @@
 {
   "plugins": [
     {
+      "category": "memory",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "default-consolidator",
+      "name": "默认回想整理",
+      "permissions": [
+        "model.invoke"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "按投影后的新对话提议经历、印象和黑话。",
+      "version": "0.2.0"
+    },
+    {
       "category": "notifier",
       "conflicts": [],
       "dependencies": {},

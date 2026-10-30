@@ -116,6 +116,24 @@
 | `embedder` | 插件 id 或 null（null：只用关键词） |
 | `reranker` | 插件 id 或 null（null） |
 
+**A3.4 `memory` 新增字段**（memory-recall-spec §8，全部可选）：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `recollect.enabled` | 布尔（`true`） |
+| `recollect.idle_minutes` | 整数 5–1440（30） |
+| `recollect.daily_limit` | 整数 1–100（12） |
+| `recollect.window_chars` | 整数 2000–100_000（12_000） |
+| `recollect.max_items` | 整数 1–30（8） |
+| `recollect.model` | 与伴侣 `model` 同结构的模型配置，或 `null`（`null`：跟随当前聊天模型） |
+| `recollect.retracted_similarity` | 数值 0–1（0.85）；本体内部拦截与本窗口撤销内容的余弦相似度严格大于此值的候选，真实模型选型时校准 |
+| `recollect.group_visibility` | `private` \| `relationship` \| `public`（`relationship`） |
+| `recollect.consolidator` | 插件 id（内置默认实现） |
+| `fade.half_life_days` | 数值 1–3650（30） |
+| `fade.reinforce` | 数值 1–5（1.5） |
+| `fade.max_half_life_days` | 数值 1–36_500（365） |
+| `fade.freeze_below` | 数值 0–0.5（0.1） |
+
 `embedder`、`reranker` 指向的插件必须已启用并实现对应扩展点，否则配置无效（memory-spec §10）。
 
 `private_scenes` 的校验规则（不满足时配置无效）：
@@ -210,3 +228,14 @@ python -m clytie status [--home PATH] [--json]
 - 输出：每个伴侣一段：配置是否有效、模型插件、平台插件、启用的插件（找到 / 缺失 / 清单无效）、人设文件状态；最后列出全部错误。`--json` 输出同样的内容。
 - 退出码：`0` 全部有效；`1` 存在错误；`2` 找不到实例目录。
 - **边界**：不连接任何平台、不启动任何进程、不调用模型、不访问网络；不打开或创建数据库；对 `secrets/` 只检查文件是否存在，不读取内容；不修改实例目录中的任何文件。依赖解析和版本冲突检查属于 A2，A1 不做。
+
+
+### Issue #39 用户确认的同步
+
+- 印象与黑话按普通检索命中后注入，共用 recall_limit / recall_chars，不自动全量前置、不增加预算。群聊不在场的印象，普通检索和 core_recall 都不返回；对内印象按普通检索。
+- owner_confirmed / owner_stated 的印象与黑话不淡化，但核心记忆排除 profile / jargon；修订升级规则不变，使用范围不变。core:with_owner 只用于群聊 episode，主人参与的黑话不因此免淡化。
+- 来源会话按 memory-recall-spec §4.6 的会话登记表处理：本体写入时按配置、导入时按包清单登记；只以 channel + kind + platform_id 在当前配置对应，逻辑 ID 和群名称不参与身份判断。不改 origin_conversation_id，不产生修订、不进内容指纹。未对应时仅对内可见、按登记类别淡化；旧包和无法得知身份的非印象来源不淡化。再次导出保留登记；更换 channel 不自动对应。本地与导入同逻辑 ID、不同平台身份的记录须分别引用自己的登记。
+- 停用回想立即取消进行中的工作且不写入；重新启用时所有会话进度移到现在，停用期间和未完成窗口都跳过，status 只显示跳过段数。
+
+
+Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 三项完全相同的重复会话校验失败，错误指出配置文件与重复会话字段；群聊与私聊 platform_id 相同时可按 kind 分别对应。逻辑 ID 和平台群名称不参与身份。

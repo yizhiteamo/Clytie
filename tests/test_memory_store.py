@@ -23,6 +23,8 @@ def store(tmp_path):
             "family_chat": {"scene": "family", "kind": "group"},
         }
     }
+    for cid, entry in instance["conversations"].items():
+        entry.update(channel="fake-channel", platform_id="fake-" + cid)
     result = MemoryStore(
         tmp_path / "memory.sqlite3", clock=MockClock(), config=config, instance=instance
     )

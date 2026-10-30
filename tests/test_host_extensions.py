@@ -49,8 +49,8 @@ SOURCE_ALL = (
         return FakeImporter((sample_import_candidate(self.ctx.clock),), self.ctx)
     def create_consolidator(self):
         from clytie.sdk.testing import FakeConsolidator
-        from clytie.sdk.testing.samples import sample_memory
-        return FakeConsolidator((sample_memory(self.ctx.clock, kind="episode"),), self.ctx)
+        from clytie.sdk.types import RecollectItem
+        return FakeConsolidator((RecollectItem(kind="episode", content="fictional", evidence=[1]),), self.ctx)
     def create_notifier(self):
         from clytie.sdk.testing import FakeNotifier
         return FakeNotifier(self.ctx)
@@ -193,8 +193,9 @@ async def test_new_plugin_all_points_and_dispatch_without_core_modification(tmp_
     assert await call(
         "memory.consolidator",
         "consolidator",
-        h.clock.now(),
-        h.clock.now(),
+        __import__("clytie.sdk.types", fromlist=["RecollectWindow"]).RecollectWindow(
+            scene="owner_private", conversation_kind="private", messages=[]
+        ),
         reader,
         CancelToken(),
         method="run",
