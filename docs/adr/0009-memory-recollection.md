@@ -1,0 +1,64 @@
+# ADR 0009：回想、印象与淡化的本体边界
+
+状态：实现前技术约定；撤销窗口和语义比对不可用时的隐私取舍另记 Issue，确认前不实现。需求以 memory-recall-spec 和 Issue #35 的用户确认意见为准。本 ADR 不宣称功能已经实现。
+
+## 窗口与候选
+
+consolidator 使用新签名 `run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`，替代旧时间范围参数，按 SDK 0.x 次版本记录不兼容变更。CandidateReader 的原协议不变；任何临时编号只在本次回想有效，提交前重新核对目标修订，不用模型提供的身份建立信任。
+
+窗口消息编号和说话人身份由本体建立，依据结构化 sender、reply_to 和 mention 判断出处，不凭昵称或文本声称的身份。已记下的记录也先投影。撤销原文和编号不交给回想扩展或生成模型，仅给本段撤销条数；规范化相同比对留在本体内部，语义拦截按用户确认的新阈值，不记录撤销原文。
+
+§10.7 的私聊经历群内不可见，是指 private 等级（含缺省）；relationship 的私聊经历按 §10.16 可见。private_scenes 仍按场景、成员和 internal_scenes 子集限制校验，不因回想放宽。
+
+## 共用投影与合并
+
+印象仍先过 visibility，再应用 core:profile 跨群例外和在场约束。上下文、主动回想、插件记忆视图、CandidateReader、重排和回想读取器共用本体投影；无绑定会话或在场身份时不能读到对外印象。普通批次按发送者、可见引用作者及结构化 mention 建立在场集合；回想只能更新窗口中实际说过话的人的印象。
+
+近似合并限定同 kind、subject、visibility、origin_conversation_id、scope 和 core: 标签集合分区，且全部 observed，避免把群来源内容并入私聊来源后传播到别的群。保留最早记录，其他记录追加撤销修订，提交时核对读取时修订；不覆盖历史，不后台修改主人记录。
+
+core: 标签只由本体计算，插件和模型提交的保留标签丢弃。插件写入 jargon 时 scope 由本体绑定当前会话，不能指定其他群。这是黑话字段的明确例外，不改变其他说明字段的可信性。
+
+## 触发与进度
+
+只处理服务开始接收后的新对话；首次建立进度从当前账本位置开始，导入和恢复不能触发历史回溯。窗口写入、审计与进度更新属于同一个记忆数据库事务，事务中不调用扩展、不跨 await。取消在提交前检查，迟到结果不能写入。
+
+没有主人或伴侣参与、也没有回复或提到他们的群窗口，直接推进进度，不为印象或黑话另外调用模型。与他们无关的部分只能在符合触发条件的窗口内参与印象和黑话整理。
+
+## 淡化与修订
+
+淡化状态独立于 records/revisions，以 record_id 为键保存 last_recalled_at 和 half_life_days；读取时计算 weight/frozen。原始记录与修订不因时间推进或加深而改写，不把运行时权重带入内容指纹，不重算既有修订 hash/parent。
+
+永不淡化优先，家庭群来源经历与黑话不淡化；跨群印象按会淡处理。冻结不删除记录。想起时更新单独状态表，不生成内容修订。
+
+导出格式必须显式升级，并继续明确支持旧包。淡化状态在认证加密范围内，回想进度不导出；迁移前自动加密快照并校验，测试仅使用临时库。具体编码见下文。
+
+
+## 模式版本与迁移
+
+采用 SQLite user_version=2，A3.3 为 1。新增 recollect_progress(conversation_id TEXT PRIMARY KEY, data TEXT NOT NULL) 和 fade(record_id TEXT PRIMARY KEY, last_recalled_at TEXT NOT NULL, half_life_days REAL NOT NULL)。淡化状态不批量回填，缺行时按创建时间与当前配置的初始半衰期计算；首次加深写入状态。外部导入旧包的新增或改动记录按导入时刻初始化。
+
+构造函数不再每次可写打开都设置版本。新库建 v2，v2 直接使用，v1 先兼容读取，未知更高版本拒绝。只读 status/plan 不迁移，缺少新表按空集合读取；导出不能未经锁迁移。生产迁移入口为宿主取得 memory/.lock 后、接收事件前，以及导入 apply 取得同一锁后。
+
+迁移前用 SQLite backup 获取整个库（包括关键词与派生表），使用现有实例备份密钥和认证加密保存到 backups/memory/<cid>/pre-migrate-<UTC>-<hex>.enc；不是导出包的表白名单快照。解密后验证 quick_check 和模式版本，再在一个事务中建新表并更新 user_version。DDL 与版本更新一起提交，异常全部回滚；不新增跨事务迁移日志，不以空库恢复。迁移快照保留，不混入 pre-import 的最近五份清理，不自动删除。测试只使用临时实例和生成的测试密钥。
+
+## 导出格式与兼容
+
+清单版本 3 在原有六张导出表之外增加 fade；清单 1、2 按各自既有字段与表集合显式读取。外层认证加密仍为版本 1，算法、密钥包裹和 AAD 不变。未知版本拒绝；淡化行核对 record_id、有限正数半衰期及带时区时间，不接受任意表。recollect_progress 不导出，进度也不放入整表导出的 metadata。
+
+库指纹加入 fade 与 recollect_progress，旧库缺表按空集合计算。导入新版状态时按已定规则取较晚想起时间与较长半衰期；旧包仅为本次新增或改动项按导入时刻初始化，跳过项不刷新。导入内容修订始终使用 get_raw，不把投影中计算的 decay 写回原始记录。既有修订 hash/parent 保持不变。
+
+## SDK 编码
+
+RecollectWindow 使用 scene、conversation_kind、messages、remembered、retracted_count。消息结构包含 number、speaker（窗口内标签）、role（owner/self/peer/member）、text、reply_to（窗口内消息编号或空）、mentions（说话人标签）；不带平台账号、真实 actor_id 或追踪号。unknown 出站文字必须标注不确定，不能冒充确定发送。
+
+记忆候选读取器冻结本次可见快照，全集按 record_id 升序编号。`[记忆N]` 是全集序号，不因 kinds 等过滤重新编号；remembered 复用同一映射。CandidateReader 保留原协议，不新增另一种返回记录类型。RecollectItem 的 with_owner 布尔提议默认 false，本体按出处核对后生成保留标签；about 只用于 profile，必须对应出处作者且不是主人或自身。source_ref 用首尾追踪号以两个点连接，仅本体填写。
+
+## 调度与提交
+
+账本没有统一序号，进度使用 inbound、intent 的 rowid 高水位对，约定这两张表不执行会改变 rowid 的 VACUUM。intent 未终结时不能跨过它推进出站高水位。首次启动持久化基线（进度表保留键 *），以后无独立进度的会话采用该基线；重启不重建基线，未提交窗口可重新处理。
+
+每日次数按 clock.local_tz，拆段按调用次数计，失败调用也计次数；无关群跳过不耗模型次数。失败后重新等待 idle_minutes，仍受每日上限，避免热重试。扩展调用失败不能伪装成空候选：宿主对此扩展抛 PluginFailure，内置插件非 stop 结果视为失败；条目核对不通过则丢弃、审计并正常推进。
+
+选窗口、模型调用和向量计算均在事务外；提交时重验修订、完整可见投影去重（包括冻结记录）、写记录与进度，事务内不 await。recollect.model 的宿主路由仍须在实现时显式绑定配置的模型单元，不能假设 ctx.model 可以选择任意模型。
+
+以上编码来自只读技术核对，不改变用户决定的场景、来源、撤销、可信程度及不回溯规则。有关窗口原话恰好等于撤销内容、以及无可用缓存向量时的行为属于待用户决定的隐私边界，不采用隐含降级或额外授权。
