@@ -566,6 +566,7 @@
         "notifier": {
           "type": "object",
           "properties": {
+          "outward": {"type": "boolean", "default": false},
             "factory": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"

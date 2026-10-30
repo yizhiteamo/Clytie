@@ -138,6 +138,7 @@ def samples():
         t.PluginChangedPayload(plugin_id="fake-plugin", companion_id="companion_a"),
     ]
     return [
+        t.ChannelState(),
         t.RecollectMessage(number=1, speaker="speaker_1", role="owner", text="fictional"),
         t.RecollectRemembered(
             label="[记忆1]", kind="episode", content="fictional", visibility="private"

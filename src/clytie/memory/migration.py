@@ -11,11 +11,21 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from clytie.plugin_host.snapshots import UpgradeSnapshots, atomic_write, contained
 
 from .crypto import b64, un64
+from .errors import MemoryStartupError
 from .package import temporary_database
 from .store import canonical
 
 
 def migrate(store, home, companion_id, log):
+    try:
+        _migrate(store, home, companion_id, log)
+    except MemoryStartupError:
+        raise
+    except Exception as exc:
+        raise MemoryStartupError("memory migration blocked") from exc
+
+
+def _migrate(store, home, companion_id, log):
     version = store.db.execute("PRAGMA user_version").fetchone()[0]
     if version == 2:
         return

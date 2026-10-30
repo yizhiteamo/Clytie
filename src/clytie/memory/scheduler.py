@@ -20,6 +20,15 @@ class RecollectionModel:
 
     async def generate(self, request, cancel, *, purpose):
         agent = self.agent
+        if (
+            getattr(agent, "model_health", "unknown") == "auth_invalid"
+            or agent.kernel.delivery.silenced
+        ):
+            from clytie.sdk.types import ModelTurn
+
+            return ModelTurn(
+                finish="error", usage={}, error={"code": "model_unavailable", "message": ""}
+            )
         config = agent.config.get("memory", {}).get("recollect", {})
         selected = config.get("model")
         request = request.model_copy(

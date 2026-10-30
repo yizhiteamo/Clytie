@@ -237,6 +237,117 @@
         "^x-": {}
       },
       "additionalProperties": false
+    },
+    "supervisor": {
+      "type": "object",
+      "properties": {
+        "heartbeat_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 5
+        },
+        "hang_seconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 600,
+          "default": 30
+        },
+        "restart": {
+          "type": "object",
+          "properties": {
+            "backoff_seconds": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "minItems": 1,
+              "maxItems": 10,
+              "default": [
+                10,
+                30,
+                60,
+                120,
+                300
+              ]
+            },
+            "max_failures": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 5
+            },
+            "stable_seconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 8.64e4,
+              "default": 600
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          }
+        },
+        "stop": {
+          "type": "object",
+          "properties": {
+            "delivery_wait_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600,
+              "default": 30
+            },
+            "task_mode": {
+              "type": "string",
+              "enum": [
+                "cancel",
+                "wait"
+              ],
+              "default": "cancel"
+            },
+            "timeout_seconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 3600,
+              "default": 120
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          }
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      }
+    },
+    "notify": {
+      "type": "object",
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "cooldown_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 6
+        }
+      },
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      }
     }
   },
   "patternProperties": {

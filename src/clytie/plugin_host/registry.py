@@ -57,7 +57,7 @@ FACTORIES = {
 }
 
 
-def assemble(runtime, *, role=None, primary=True):
+def assemble(runtime, *, role=None, primary=True, scope="companion"):
     manifest, plugin = runtime.manifest, runtime.plugin
     contributions = manifest.data["contributes"]
     registrations = []
@@ -95,7 +95,7 @@ def assemble(runtime, *, role=None, primary=True):
         )
 
     for point in ("channel", "model", "embedder", "notifier"):
-        if point not in contributions:
+        if point not in contributions or (scope == "instance" and point != "notifier"):
             continue
         if point in {"channel", "model"} and role is not None and role != point:
             continue
@@ -107,7 +107,7 @@ def assemble(runtime, *, role=None, primary=True):
             contributions[point],
             True,
         )
-    if not primary:
+    if not primary or scope == "instance":
         return tuple(registrations)
     for declaration in contributions.get("tools", ()):
         add("tool", declaration["name"], declaration, True)
