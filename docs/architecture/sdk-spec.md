@@ -477,3 +477,6 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 - `services[].handler` 签名：`async (method: str, args: JsonObject) -> JsonObject`。
 - `api_routes` 和 `webui_panels` 在 A1–A3 只做声明和校验，A4 才真正提供服务。
 - 假插件的清单要改为使用上述编码（`fake-model` 声明 `model`，`fake-channel` 声明 `channel`），契约测试通过宿主同样的装配路径（读清单 → 构造 → `start` → `factory`）获得实现对象。
+
+
+Issue #36（用户已确认）：窗口聊天原文保持原样，不从撤销记录派生内容或编号；回想窗口只给撤销条数。只有 memory.embedder 指定的向量模型可为本次比对接收撤销原文：优先复用同一 embedder_id 缓存，没有时临时计算，不落库、不缓存、不记录原文。未配置、出错、超时或候选向量失败时，整段只做规范化相同比对，照常写入并推进进度；status 只显示计数提醒，WARN 每小时最多一次，不使用其他模型身份的向量。
