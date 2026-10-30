@@ -226,17 +226,20 @@ class Transfers:
             elif current and content_hash(current) == content_hash(target):
                 action = "skip"
             elif current and mode == "merge":
-                local_chain = [
-                    row[0]
-                    for row in self.store.db.execute(
-                        "SELECT hash FROM revisions WHERE record_id=? ORDER BY revision", (key,)
+                local_rows = list(
+                    self.store.db.execute(
+                        "SELECT hash,data FROM revisions WHERE record_id=? ORDER BY revision",
+                        (key,),
                     )
-                ]
-                remote_chain = [row["hash"] for row in loaded["histories"][key]]
+                )
+                remote_rows = loaded["histories"][key]
+                local_chain = self._comparison_chain(local_rows)
+                remote_chain = self._comparison_chain(remote_rows)
                 if remote_chain[-1] in local_chain:
                     action = "skip"
                 elif local_chain[-1] in remote_chain:
-                    preserve = local_chain == remote_chain[: len(local_chain)]
+                    original = [r["hash"] for r in local_rows]
+                    preserve = original == [r["hash"] for r in remote_rows[: len(original)]]
                 else:
                     action = "conflict"
             elif current is None and not importer:
@@ -275,6 +278,15 @@ class Transfers:
                         False,
                     )
         return rows, targets
+
+    def _comparison_chain(self, rows):
+        # 仅用于合并判定；原始 hash/parent 和包历史始终保留来源字段。
+        chain = []
+        for row in rows:
+            value = content_hash(self._normalized(MemoryRecord.model_validate_json(row["data"])))
+            if not chain or chain[-1] != value:
+                chain.append(value)
+        return chain
 
     async def plan(
         self,

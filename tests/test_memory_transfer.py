@@ -331,3 +331,56 @@ async def test_new_and_fast_forward_preserve_revision_provenance(homes):
     )
     await transfers.apply(plan["id"], passphrase=PASSPHRASE)
     assert provenance(target) == provenance(source)
+
+
+async def test_missing_origin_normalization_does_not_fork_source_only_changes(homes):
+    source, home, _ = homes("source")
+    source.instance["conversations"]["source_group"] = {"kind": "group", "scene": "public_group"}
+    original = source.write(
+        dict(kind="event", content="虚构群经历", visibility="public"),
+        scene="public_group",
+        conversation_id="source_group",
+        owner="owner",
+        operator="owner",
+    )
+    target, target_home, transfers = homes("target")
+    await move(transfers, export(source, home))
+    assert target.get_raw(original.record_id).origin_conversation_id is None
+    assert target.get_raw(original.record_id).revision == 2
+    current = original
+    for index in range(2):
+        source.clock.advance(1)
+        current = source.revise(
+            current.record_id,
+            current.revision,
+            {"content": f"源端修订{index}"},
+            scene="public_group",
+            conversation_id="source_group",
+            operator="owner",
+        )
+        plan = await transfers.plan(
+            export(source, home, f"source-{index}.enc"), mode="merge", passphrase=PASSPHRASE
+        )
+        assert plan["records"][0]["action"] == "update"
+        await transfers.apply(plan["id"], passphrase=PASSPHRASE)
+        local = target.get_raw(original.record_id)
+        assert local.content == current.content and local.origin_conversation_id is None
+        assert target.project("public_group", "other_group") == []
+    assert target.db.execute("SELECT count(*) FROM foreign_revisions").fetchone()[0] > 0
+    # 保留原始来源指纹，导出后仍可通过完整修订链校验再次搬家。
+    moved, _, moving = homes("moved")
+    await move(moving, export(target, target_home))
+    assert moved.get_raw(local.record_id) == local
+    revise(target, local, "目标端真实修改")
+    source.revise(
+        current.record_id,
+        current.revision,
+        {"content": "源端真实修改"},
+        scene="public_group",
+        conversation_id="source_group",
+        operator="owner",
+    )
+    plan = await transfers.plan(
+        export(source, home, "fork.enc"), mode="merge", passphrase=PASSPHRASE
+    )
+    assert plan["records"][0]["action"] == "conflict"
