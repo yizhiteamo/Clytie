@@ -308,7 +308,7 @@ class Agent:
             specs.append(
                 ToolSpec(
                     name="core_report_boundary",
-                    description="登记恋人关系、修改人设、指定亲密台词、亲密或暗示性图像、主人隐私类越界请求；正常玩笑、好奇、转述和讨论不计入。",
+                    description="登记恋人关系、修改人设、指定亲密台词、亲密或暗示性图像、主人隐私类越界请求；主人隐私类明确拒绝后仍反复追问、转弯打听也计入。正常玩笑、好奇、转述和讨论不计入。",
                     when_not_to_use="玩笑、好奇、转述或讨论",
                     parameters={
                         "type": "object",

@@ -55,6 +55,7 @@ async def test_relationship_exact_system_position_scope_and_stability(
             assert first.index(RULES) < first.index(principle()) < first.index("Fictional persona")
         spec = next(t for t in model.requests[0].tools if t.name == "core_report_boundary")
         assert len(spec.description) < 100
+        assert "主人隐私类明确拒绝后仍反复追问、转弯打听也计入" in spec.description
         assert "玩笑、好奇、转述和讨论不计入" in spec.description
         assert principle() not in spec.description
     finally:
