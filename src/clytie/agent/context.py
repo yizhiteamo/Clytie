@@ -6,9 +6,9 @@ from datetime import datetime, timedelta
 from pydantic import TypeAdapter
 
 from clytie.kernel.projection import visible
-from clytie.sdk.types import ChatMessage, ContextRequest, MessagePart, TextPart
+from clytie.sdk.types import Actor, ChatMessage, ContextRequest, MessagePart, TextPart
 
-from .policy import text_parts
+from .policy import actor_label, text_parts
 
 PART = TypeAdapter(MessagePart)
 
@@ -31,11 +31,13 @@ class Context:
             ),
         )
 
-    def quote(self, ref, conversation):
+    def quote(self, ref, conversation, authors=None):
         ledger = self.agent.ledger
         for row in ledger.rows("inbound"):
             if row.get("message") and row["message"]["ref"] == ref.model_dump(mode="json"):
                 if row.get("reason") != "boundary_paused" and self.visible(row, conversation):
+                    if authors is not None:
+                        authors.append(Actor.model_validate(row["message"]["sender"]))
                     return text_parts(
                         [PART.validate_python(p) for p in row["message"]["parts"] or []]
                     )
@@ -154,13 +156,14 @@ class Context:
                 or not self.visible(row, conversation)
             ):
                 continue
-            sender = row["message"]["sender"]
+            sender = Actor.model_validate(row["message"]["sender"])
             content = text_parts([PART.validate_python(p) for p in row["message"]["parts"] or []])
             history.append(
                 (
                     row["received_at"],
                     "user",
-                    f"{sender['role']} {sender['actor_id']}（昵称：{sender.get('display_name') or ''}）：{content}",
+                    f"{sender.role} {actor_label(sender)}：{content}",
+                    sender,
                 )
             )
         for row in ledger.rows("intent"):
@@ -179,12 +182,13 @@ class Context:
                     row.get("created_at", record["created_at"]),
                     "assistant",
                     ("[不确定是否发出]" if row["status"] == "unknown" else "") + content,
+                    None,
                 )
             )
         limits = agent.config.get("context", {})
         memory_query = "\n".join(
             [text_parts(e.message.parts) for e in events if e.message]
-            + [text for _, _, text in sorted(history, key=lambda r: r[0])[-3:]]
+            + [text for _, _, text, _ in sorted(history, key=lambda r: r[0])[-3:]]
         )
         if agent.memory_context:
             memory_messages = await agent.memory_context(conversation, actor)
@@ -194,24 +198,27 @@ class Context:
             )
         result[memory_position:memory_position] = memory_messages
         remaining, kept = limits.get("max_chars", 20_000), []
-        for _, role, content in sorted(history, key=lambda r: r[0])[
+        for _, role, content, sender in sorted(history, key=lambda r: r[0])[
             -limits.get("max_messages", 100) :
         ][::-1]:
             content = content[: limits.get("max_single_message_chars", 2000)]
             if len(content) > remaining:
                 break
-            kept.append(message(role, content))
+            kept.append((message(role, content), sender))
             remaining -= len(content)
-        result.extend(reversed(kept))
+        reminder_position = len(result)
+        authors = [sender for _, sender in reversed(kept) if sender is not None]
+        result.extend(msg for msg, _ in reversed(kept))
         for event in events:
             msg = event.message
-            text = (
-                f"{msg.sender.role} {msg.sender.actor_id}（昵称：{msg.sender.display_name or ''}）："
-                + text_parts(msg.parts)
-            )
+            text = f"{msg.sender.role} {actor_label(msg.sender)}：" + text_parts(msg.parts)
             if msg.reply_to:
-                text += "\n引用：" + self.quote(msg.reply_to, conversation)
+                text += "\n引用：" + self.quote(msg.reply_to, conversation, authors)
+            authors.append(msg.sender)
             result.append(message("user", text))
+        reminder = agent.boundary.reminder(authors)
+        if reminder:
+            result.insert(reminder_position, message("system", reminder))
         if extra:
             result.append(message("system" if proactive else "user", extra))
         return result
