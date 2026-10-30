@@ -282,7 +282,7 @@ class Recollector:
         with bind_presence(cid, actors_present):
             reader = SnapshotReader(self.store.project(conversation.scene, cid))
             window, actors, retracted, trace = build_window(
-                selected, conversation, reader, self.store
+                selected, conversation, reader, self.store, ledger=self.agent.ledger
             )
             items, rejected = [], set()
             relevant = conversation.kind == "private" or involved(

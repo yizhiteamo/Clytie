@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from .test_agent import event, finish, make_agent
 
 
@@ -278,4 +280,71 @@ async def test_disable_cancels_inflight_and_ignores_late_candidates(tmp_path, mo
         assert agent.recollector.progress("owner_private")["inbound"] > 0
     finally:
         released.set()
+        await finish(agent)
+
+
+@pytest.mark.parametrize("target", ["owner", "self", "paused", "other_group"])
+async def test_reply_to_previous_window_uses_only_verified_author_role(tmp_path, target):
+    agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": "[]"})
+    try:
+        if target == "self":
+            model.turns.append({"finish": "stop", "text": "[]"})
+            first = event(agent, "窗口外虚构旧内容", scene="public_group", mention=True)
+            await agent.receive(first)
+            await agent.drain()
+            attempt = next(a for a in agent.ledger.rows("attempt") if a.get("receipt"))
+            ref = dict(
+                channel_id="fake",
+                conversation_id="test_group",
+                platform_message_id=attempt["receipt"]["platform_message_id"],
+            )
+        else:
+            first = event(
+                agent,
+                "窗口外虚构旧内容",
+                scene="public_group",
+                cid="other_group" if target == "other_group" else None,
+            )
+            agent.ledger.claim_inbound(first)
+            agent.ledger.ignore(
+                first.event_id, **({"reason": "boundary_paused"} if target == "paused" else {})
+            )
+            ref = first.message.ref.model_dump(mode="json")
+        await agent.clock.advance_and_drain(30 * 60)
+        prior_calls = len(model.requests)
+        model.turns.clear()
+        model.turns.append(
+            {
+                "finish": "stop",
+                "text": json.dumps(
+                    [
+                        dict(
+                            kind="episode",
+                            content="虚构回复经历",
+                            evidence=[1],
+                            with_owner=target == "owner",
+                        )
+                    ]
+                ),
+            }
+        )
+        reply = event(agent, "虚构的本次回复", role="member", scene="public_group", reply_to=ref)
+        agent.ledger.claim_inbound(reply)
+        agent.ledger.ignore(reply.event_id)
+        await agent.clock.advance_and_drain(30 * 60)
+        if target in {"paused", "other_group"}:
+            assert len(model.requests) == prior_calls
+            assert not agent.memory.store.all_records()
+        else:
+            assert len(model.requests) == prior_calls + 1
+            request = model.requests[-1].model_dump_json()
+            assert "窗口外虚构旧内容" not in request
+            assert ref["platform_message_id"] not in request
+            body = json.loads(model.requests[-1].messages[-1].parts[0].text)
+            assert len(body["window"]["messages"]) == 1
+            assert body["window"]["messages"][0]["reply_to"] is None
+            record = agent.memory.store.all_records()[0]
+            assert record.content == "虚构回复经历"
+            assert ("core:with_owner" in record.tags) == (target == "owner")
+    finally:
         await finish(agent)

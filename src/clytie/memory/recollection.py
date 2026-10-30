@@ -84,6 +84,7 @@ class RecollectionCommit:
                 m.role in roles
                 or bool(labels.intersection(m.mentions))
                 or (m.reply_to in messages and messages[m.reply_to].role in roles)
+                or getattr(actors, "reply_roles", {}).get(m.number) in roles
             )
 
         owner = any(involves(m, {"owner"}) for m in evidence)

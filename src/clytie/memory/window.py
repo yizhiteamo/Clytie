@@ -71,8 +71,51 @@ def fresh_rows(ledger, progress, cid, *, skipping=False):
     return merged, end
 
 
-def build_window(rows, conversation, reader, store):
-    labels, actors, messages, refs, traces = {}, {}, [], {}, []
+class WindowActors(dict):
+    """本体持有的身份依据，不属于交给扩展的 RecollectWindow。"""
+
+    def __init__(self):
+        super().__init__()
+        self.reply_roles = {}
+
+
+def reply_role(ledger, ref, conversation, store):
+    if not ref or ref.get("conversation_id") != conversation.conversation_id:
+        return None
+    from clytie.kernel.projection import visible
+
+    def readable(row):
+        return row is not None and visible(
+            row,
+            scene=conversation.scene,
+            conversation_id=conversation.conversation_id,
+            private_scenes=store.config.get("memory", {}).get("private_scenes", ["owner_private"]),
+        )
+
+    for row in ledger.rows("inbound"):
+        msg = row.get("message")
+        if msg and msg["ref"] == ref:
+            if row.get("reason") != "boundary_paused" and readable(row):
+                return msg["sender"]["role"]
+            return None
+    for attempt in ledger.rows("attempt"):
+        receipt = attempt.get("receipt")
+        if not receipt or receipt.get("platform_message_id") != ref.get("platform_message_id"):
+            continue
+        intent = ledger.get("intent", attempt["intent_id"])
+        if (
+            receipt.get("status") == "sent"
+            and intent is not None
+            and intent["channel_id"] == ref.get("channel_id")
+            and intent["conversation_id"] == ref["conversation_id"]
+            and readable(ledger.get("record", intent["trace_id"]))
+        ):
+            return "self"
+    return None
+
+
+def build_window(rows, conversation, reader, store, *, ledger=None):
+    labels, actors, messages, refs, traces = {}, WindowActors(), [], {}, []
 
     def label(actor):
         if actor not in labels:
@@ -90,6 +133,10 @@ def build_window(rows, conversation, reader, store):
             role = role if role in {"owner", "peer", "member"} else "member"
             parts = msg.get("parts") or []
             reply_to = refs.get(json.dumps(msg.get("reply_to"), sort_keys=True))
+            if reply_to is None and ledger is not None:
+                actors.reply_roles[len(messages) + 1] = reply_role(
+                    ledger, msg.get("reply_to"), conversation, store
+                )
             refs[json.dumps(msg["ref"], sort_keys=True)] = len(messages) + 1
             trace = row.get("trace_id")
         else:
@@ -154,7 +201,10 @@ def involved(window, actors, instance):
         if actor == "self" or instance.get("people", {}).get(actor, {}).get("role") == "owner"
     )
     return any(
-        m.role in {"owner", "self"} or bool(labels.intersection(m.mentions))
+        m.role in {"owner", "self"}
+        or bool(labels.intersection(m.mentions))
+        or any(n.number == m.reply_to and n.role in {"owner", "self"} for n in window.messages)
+        or getattr(actors, "reply_roles", {}).get(m.number) in {"owner", "self"}
         for m in window.messages
     )
 
