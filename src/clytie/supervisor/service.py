@@ -50,6 +50,7 @@ class Supervisor:
         self.last_write = None
         self.last_content = None
         self.problems = {}
+        self.pending_health = set(self.companions)
         self.silenced = read(self.home / "supervisor/silence.json", {"on": False})["on"]
         self.notifications.silenced = self.silenced
         self.ticker = None
@@ -60,11 +61,18 @@ class Supervisor:
     def setting(self, group, key, default):
         return self.config.get(group, {}).get(key, default)
 
-    async def start(self):
+    async def start(self, prepare=None):
         self.lock = file_lock(
             self.home / "run/supervisor.lock", {**process_identity(), "operation": "supervisor"}
         )
         self.update_lock = self.lock.__enter__()
+        try:
+            if prepare:
+                await prepare()
+        except BaseException:
+            self.lock.__exit__(None, None, None)
+            self.lock = None
+            raise
         self.audit.append("start")
         for cid in self.companions:
             self.rows[cid] = dict(
@@ -148,6 +156,12 @@ class Supervisor:
                         phase = msg.get("phase", row["phase"])
                         if phase in {"starting", "migrating", "running", "stopping"}:
                             row["phase"] = phase
+                        if phase == "running":
+                            self.pending_health.discard(cid)
+                            self.problems = {
+                                k: v for k, v in self.problems.items()
+                                if not k.startswith(f"auth_invalid:{cid}:")
+                            }
                         row["migration_stalled"] = False
                         self.problems.pop(f"startup_stalled:{cid}", None)
                         for key in ("inflight_tasks", "sending"):
@@ -231,6 +245,7 @@ class Supervisor:
             if self.stopping:
                 return
             if fatal:
+                self.pending_health.discard(cid)
                 row["state"] = "blocked"
                 self.ready_events[cid].set()
                 row["restart_reason"] = fatal
@@ -253,6 +268,7 @@ class Supervisor:
             row["restart_reason"] = row["restart_reason"] or "process_exit"
             self.audit.append("crashed", cid, reason=row["restart_reason"])
             if row["failures"] >= self.setting("restart", "max_failures", 5):
+                self.pending_health.discard(cid)
                 row["state"] = "restart_stopped"
                 self.ready_events[cid].set()
                 self.problems[f"restart_stopped:{cid}"] = (
@@ -268,7 +284,7 @@ class Supervisor:
     async def tick(self):
         while True:
             try:
-                await self.notifications.update(self.problems)
+                await self.notifications.update(self.problems, pending=self.pending_health)
                 await self.flush_health()
             except OSError as exc:
                 # A transient Windows file sharing violation must not kill monitoring.
@@ -349,6 +365,7 @@ class Supervisor:
             await child.kill()
             await child.wait()
         self.problems = {k: v for k, v in self.problems.items() if k.split(":")[1] != cid}
+        self.pending_health.add(cid)
         self.ready_events[cid].clear()
         self.rows[cid].update(state="starting", failures=0, restart_reason=reason)
         self.rows[cid]["restart_count"] += 1
@@ -447,7 +464,7 @@ class Supervisor:
         result = dict(
             zip(self.companions, await asyncio.gather(*(one(cid) for cid in self.companions)))
         )
-        await self.notifications.update(self.problems)
+        await self.notifications.update(self.problems, pending=self.pending_health)
         for task in (*self.monitors.values(), self.ticker):
             if task:
                 task.cancel()

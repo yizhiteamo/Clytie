@@ -26,14 +26,18 @@ class Notifications:
     def undelivered(self):
         return sum(v["state"] == "failed" for v in self.states.values())
 
-    async def update(self, problems):
+    async def update(self, problems, *, pending=()):
         async with self._lock:
-            await self._update(dict(problems))
+            await self._update(dict(problems), set(pending))
 
-    async def _update(self, problems):
+    async def _update(self, problems, pending):
         self.problems = dict(problems)
         for key in tuple(self.states):
-            if self.states[key]["state"] == "failed" and key not in problems:
+            if (
+                self.states[key]["state"] == "failed"
+                and key not in problems
+                and key.split(":")[1] not in pending
+            ):
                 self.states.pop(key)
         for key, body in problems.items():
             previous = self.states.get(key)

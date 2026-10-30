@@ -156,6 +156,51 @@ async def test_notification_persistence_retry_and_outward_silence(tmp_path):
     assert len(local.calls) == 3
 
 
+async def test_notification_restart_initialization_keeps_retry_deadline(tmp_path):
+    clock, log = MockClock(), HostLog()
+    audit = Audit(tmp_path, clock)
+    notifier = FakeNotifier(clock, False)
+    problem = {"auth_invalid:companion_a:fake-model": "companion_a fake-model"}
+    first = Notifications(tmp_path, clock, log, audit, [(notifier, False)])
+    await first.update(problem)
+    clock.advance(100)
+    second = Notifications(tmp_path, clock, log, audit, [(notifier, False)])
+    await second.update({}, pending={"companion_a"})
+    assert second.undelivered == 1
+    await second.update(problem)
+    assert len(notifier.calls) == 1
+    clock.advance(499)
+    await second.update(problem)
+    assert len(notifier.calls) == 1
+    clock.advance(1)
+    await second.update(problem)
+    assert len(notifier.calls) == 2
+    await second.update({})
+    assert second.undelivered == 0
+
+
+async def test_notifiers_prepared_before_any_child_or_notification_tick(tmp_path):
+    from clytie.supervisor.service import Supervisor
+
+    from .test_supervisor import FakeLauncher, spin
+
+    clock, launcher = MockClock(), FakeLauncher()
+    svc = Supervisor(tmp_path, ["companion_a"], launcher, clock)
+    notifier = FakeNotifier(clock)
+
+    async def prepare():
+        assert not launcher.children and svc.ticker is None
+        assert svc.lock is not None
+        svc.notifications.plugins = [(notifier, False)]
+        svc.problems["blocked:companion_a:config_invalid"] = "companion_a config_invalid"
+
+    await svc.start(prepare)
+    await spin()
+    assert len(notifier.calls) == 1
+    assert svc.notifications.undelivered == 0
+    await svc.stop()
+
+
 async def test_instance_context_and_desktop_fake_backend(tmp_path):
     h = host(tmp_path)
 

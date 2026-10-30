@@ -215,18 +215,20 @@ async def daemon_main(home):
     from .signals import SessionEvents
 
     session_events = SessionEvents(ending)
+    async def prepare():
+        await notifiers.start(
+            instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
+        )
+        supervisor.notifications.plugins = notifiers.notifiers
+        supervisor.finalize = notifiers.close
+
     try:
-        await supervisor.start()
+        await supervisor.start(prepare)
     except OperationBusy:
         frame(sys.stdout.buffer, dict(type="error", seq=0, code="already_running"))
         session_events.close()
         launcher.close()
         return 1
-    await notifiers.start(
-        instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
-    )
-    supervisor.notifications.plugins = notifiers.notifiers
-    supervisor.finalize = notifiers.close
     frame(sys.stdout.buffer, dict(type="ready", seq=0))
     stopping = None
     try:
