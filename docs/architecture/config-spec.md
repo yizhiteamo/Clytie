@@ -116,6 +116,23 @@
 | `embedder` | 插件 id 或 null（null：只用关键词） |
 | `reranker` | 插件 id 或 null（null） |
 
+**A3.4 `memory` 新增字段**（memory-recall-spec §8，全部可选）：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `recollect.enabled` | 布尔（`true`） |
+| `recollect.idle_minutes` | 整数 5–1440（30） |
+| `recollect.daily_limit` | 整数 1–100（12） |
+| `recollect.window_chars` | 整数 2000–100_000（12_000） |
+| `recollect.max_items` | 整数 1–30（8） |
+| `recollect.model` | 与伴侣 `model` 同结构的模型配置，或 `null`（`null`：跟随当前聊天模型） |
+| `recollect.group_visibility` | `private` \| `relationship` \| `public`（`relationship`） |
+| `recollect.consolidator` | 插件 id（内置默认实现） |
+| `fade.half_life_days` | 数值 1–3650（30） |
+| `fade.reinforce` | 数值 1–5（1.5） |
+| `fade.max_half_life_days` | 数值 1–36_500（365） |
+| `fade.freeze_below` | 数值 0–0.5（0.1） |
+
 `embedder`、`reranker` 指向的插件必须已启用并实现对应扩展点，否则配置无效（memory-spec §10）。
 
 `private_scenes` 的校验规则（不满足时配置无效）：

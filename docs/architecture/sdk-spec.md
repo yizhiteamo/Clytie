@@ -173,6 +173,11 @@
 
 **MemoryHit**：`record_id`、`score: float`、`source: str`（哪个检索器）。
 
+**A3.4 回想类型**（memory-recall-spec §2.2）：
+- `RecollectWindow`：会话场景、按顺序编号的消息（`[消息N] 说话人称呼：原文`）、她在这段里已经用 `core_remember` 记下和用 `core_forget` 撤销的记忆。
+- `RecollectItem`：`kind`、`content`、`visibility`、`evidence: list[消息编号]`，以及可选的 `about`（印象对应的说话人）、`merges`（建议合并的 `[记忆N]`）。
+- 保留标签 `core:` 前缀只能由本体写入；插件和模型提交的 `core:` 标签一律丢弃。出处、合并与保留标签的核对按 memory-recall-spec §2.4–§2.5、§9。
+
 ### 1.8 其他
 
 **BusEvent**：`name`、`payload: dict`、`at`、`source`（发布者：`core` 或插件 id）。
@@ -292,7 +297,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
 | `memory.retriever` | `async search(q: MemoryQuery, candidates: CandidateReader, cancel) -> list[MemoryHit]`；`CandidateReader` 只返回 `q.allowed_visibility` 内的记录 |
 | `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出 `ImportCandidate`（具体字段编码见 ADR 0008），包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
-| `memory.consolidator` | `async run(window_start, window_end, reader, cancel) -> list[MemoryRecord]`（kind=`episode`，由本体写入） |
+| `memory.consolidator` | `async run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`；本体核对、写入，见 memory-recall-spec §2 |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
 | `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；非 GET 必须声明 `audit: true` |
