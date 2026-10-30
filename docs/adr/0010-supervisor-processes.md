@@ -4,11 +4,11 @@
 
 ## 进程与锁
 
-前端窗口负责日志显示和停止操作，真正的守护进程按 Issue #47 以脱离控制台方式启动：Windows DETACHED_PROCESS，Linux setsid。Ctrl+C、普通关闭窗口和前端通道 EOF 触发取消模式安全停止；第二次 Ctrl+C 发 escalate。Windows 伴侣子进程纳入守护进程持有的 kill-on-job-close Job Object，子进程用独立进程组；所有平台的伴侣子进程在标准输入 EOF 后按规格取消、不等交付，5 秒内退出。
+前端窗口负责日志显示和停止操作，真正的守护进程按 Issue #47 以脱离控制台方式启动：Windows DETACHED_PROCESS，Linux setsid。Ctrl+C 按配置 task_mode 停止，普通关闭窗口和前端通道 EOF 固定触发取消模式安全停止；第二次 Ctrl+C 发 escalate。Windows 伴侣子进程纳入守护进程持有的 kill-on-job-close Job Object，子进程用独立进程组；所有平台的伴侣子进程在标准输入 EOF 后按规格取消、不等交付，非迁移阶段 5 秒内退出；迁移中等待本次迁移及既定恢复完成。
 
 守护进程运行期间持有 run/supervisor.lock。子进程“同样的锁”指 kernel-spec §14 已有的 companions/<cid>/ledger/.lock，不重复获取父进程持有的 supervisor.lock。Windows msvcrt 字节锁和 Linux flock 沿用插件宿主的稳定文件锁实现，以操作系统锁为存活判据，记录 pid 和进程创建时间，不通过删除锁文件抢锁。
 
-Issue #48 用户确认：注销/关机仅尽力停止，收到通知后立即停止开始新的发送、写 session_ending 审计，再按取消模式停止；不阻止或推迟关机。被系统中断时沿用 unknown 不重发、interrupted 不重放的账本恢复规则。普通关窗、Ctrl+C 和前端 EOF 仍保证取消模式的完整安全停止。
+Issue #48 用户确认：注销/关机仅尽力停止，收到通知后立即停止开始新的发送、写 session_ending 审计，再按取消模式停止；不阻止或推迟关机。被系统中断时沿用 unknown 不重发、interrupted 不重放的账本恢复规则。普通关窗和前端 EOF 仍保证取消模式的完整安全停止；Ctrl+C 按配置 task_mode，第二次改为取消。
 
 ## 通信与健康
 
@@ -58,3 +58,8 @@ health.json 保持每五秒最多写一次。持锁者开始停止时更新 supe
 只读技术核对确认：Windows venv 的 python.exe 可能只是重定向启动器，其 PID 与实际持锁解释器不同。若 `_base_executable` 与 `sys.executable` 不同，伴侣及守护进程直接启动基础解释器，在复制的子进程环境中设置 `__PYVENV_LAUNCHER__=sys.executable` 保留虚拟环境；不改系统环境。系统 Python 和 Linux 保持原路径。它们是 CPython 私有接口，双平台冒烟直接断言账本锁持有者 PID 与 Popen PID 一致，Windows 另验证 Job 关闭后可取得账本锁。
 
 仍先加入 Job 再发送 boot；基础解释器在 boot 前不打开实例，不需要另行挂起创建进程。此修复只落实既定进程管理语义，不改变启动或停止规则。
+
+
+Issue #51/#53 同步：Ctrl+C/Ctrl+Break 按配置 task_mode，第二次升级为取消；关窗及前端 EOF 固定取消。子进程迁移中 stdin EOF 等待本次迁移与既定恢复完成后退出，不启动插件、不连接平台；其他阶段仍限 5 秒。迁移中静默未确认返回 pending_migrating，不能说成已确认，连接平台前重读 silence.json。
+
+独立线程只发送线程安全健康缓存与 phase，迁移阶段不依赖事件循环刷新；其他阶段缓存过期则停止心跳，保留事件循环卡死检测。全部协议帧共用锁。控制读线程先登记停止、静默与 EOF，迁移完成后检查标志，不进入后续启动阶段。

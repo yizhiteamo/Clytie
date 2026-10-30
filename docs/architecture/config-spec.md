@@ -247,6 +247,7 @@ Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 
 | 字段 | 类型（默认值） |
 |---|---|
 | `supervisor.heartbeat_seconds` | 整数 1–60（5） |
+| `supervisor.startup_seconds` | 整数 30–3600（300）；只计 starting 阶段，不计迁移 |
 | `supervisor.hang_seconds` | 整数 10–600（30），必须大于心跳间隔的 2 倍 |
 | `supervisor.restart.backoff_seconds` | 正整数列表，1–10 项（`[10, 30, 60, 120, 300]`） |
 | `supervisor.restart.max_failures` | 整数 1–100（5） |

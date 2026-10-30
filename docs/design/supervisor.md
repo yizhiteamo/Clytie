@@ -4,7 +4,7 @@ A4.1 实现规格见 `../architecture/supervisor-spec.md`；API 与后台启动�
 
 ## 1. 进程结构
 
-A4.1 使用 `python -m clytie supervisor start` 启动前端窗口；真正的守护进程脱离控制台运行（Windows DETACHED_PROCESS，Linux setsid）。按 supervisor-spec §1 的用户确认规则，Ctrl+C、关闭窗口和前端 EOF 触发取消模式安全停止，第二次 Ctrl+C 发送 escalate；停止期间再次启动等待锁释放。伴侣子进程独立进程组，Windows 纳入 kill-on-job-close Job Object；子进程通道 EOF 后按取消模式、不等交付，5 秒内退出。A4.2 才提供启动后立即返回的 `--detach` 与双击启动脚本。以下结构包含后续阶段。
+A4.1 使用 `python -m clytie supervisor start` 启动前端窗口；真正的守护进程脱离控制台运行（Windows DETACHED_PROCESS，Linux setsid）。按 supervisor-spec §1 的用户确认规则，Ctrl+C 按配置 task_mode，关闭窗口和前端 EOF 固定触发取消模式安全停止，第二次 Ctrl+C 发送 escalate；停止期间再次启动等待锁释放。伴侣子进程独立进程组，Windows 纳入 kill-on-job-close Job Object；子进程通道 EOF 后按取消模式、不等交付，非迁移阶段 5 秒内退出，迁移阶段等待本次迁移和既定恢复完成。A4.2 才提供启动后立即返回的 `--detach` 与双击启动脚本。以下结构包含后续阶段。
 
 ```
 clytie supervisor（单实例，进程锁在 CLYTIE_HOME/run/）
@@ -46,3 +46,6 @@ clytie supervisor（单实例，进程锁在 CLYTIE_HOME/run/）
 ## 5. 维护任务
 
 运行时负责：备份与保留策略清理、恢复校验、日志轮转、软遗忘扫描。
+
+
+Issue #51/#53 同步：Ctrl+C/Ctrl+Break 按配置 task_mode，第二次升级为取消；关窗及前端 EOF 固定取消。子进程迁移中 stdin EOF 等待本次迁移与既定恢复完成后退出，不启动插件、不连接平台；其他阶段仍限 5 秒。迁移中静默未确认返回 pending_migrating，不能说成已确认，连接平台前重读 silence.json。
