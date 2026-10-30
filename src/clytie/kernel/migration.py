@@ -248,7 +248,8 @@ class LedgerRuntime:
                 self.log.warning("ledger.retention_failed", error=type(exc).__name__)
 
     def version(self):
-        db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+        # Called under the runtime lock: SQLite must recover hot journals first.
+        db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True)
         try:
             return db.execute("PRAGMA user_version").fetchone()[0]
         finally:

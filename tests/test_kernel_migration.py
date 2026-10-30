@@ -267,3 +267,41 @@ async def test_runtime_content_and_snapshot_retention_keeps_newest_two(tmp_path)
     assert not any(p.exists() for p in snapshots) and not failed.exists()
     runtime.close()
     await clock.drain()
+
+
+async def test_runtime_recovers_hot_sqlite_journal_before_version_read(tmp_path):
+    import subprocess
+    from pathlib import Path
+
+    from clytie.supervisor.processes import python_process
+
+    clock = MockClock()
+    runtime = LedgerRuntime(tmp_path, "companion_a", clock)
+    ledger = await runtime.open()
+    with ledger.db:
+        ledger.db.execute("CREATE TABLE fictional_recovery(value TEXT)")
+        ledger.db.executemany(
+            "INSERT INTO fictional_recovery VALUES (?)", [("original" * 200,)] * 200
+        )
+    runtime.close()
+    executable, env = python_process()
+    code = """
+import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA cache_size=1')
+db.execute('BEGIN IMMEDIATE')
+db.execute("UPDATE fictional_recovery SET value = 'uncommitted'")
+os._exit(0)
+"""
+    result = subprocess.run([executable, "-c", code, str(runtime.path)], env=env, timeout=15)
+    assert result.returncode == 0
+    assert Path(str(runtime.path) + "-journal").exists()
+    restarted = LedgerRuntime(tmp_path, "companion_a", clock)
+    try:
+        ledger = await restarted.open()
+        assert ledger.db.execute("SELECT DISTINCT value FROM fictional_recovery").fetchall() == [
+            ("original" * 200,)
+        ]
+        assert not restarted.journal.exists()
+    finally:
+        restarted.close()
