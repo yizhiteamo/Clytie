@@ -271,6 +271,16 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     runtime.runtime = SimpleNamespace(close=a.ledger.close)
     calls = []
     original = runtime.host.close
+    entered = asyncio.Event()
+
+    async def subscriber(event):
+        entered.set()
+        await a.clock.sleep(100)
+
+    a.kernel.bus.subscribers = lambda cid, event: (subscriber,)
+    a.kernel.bus.publish(a.cid, "fictional_shutdown_event")
+    await entered.wait()
+    worker = a.kernel.bus.workers[a.cid]
 
     async def close():
         calls.append("close")
@@ -280,6 +290,8 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     first, second = await asyncio.gather(runtime.stop(), runtime.stop())
     assert first == second and first["state"] == "stopped"
     assert calls == ["close"] and model.requests == []
+    assert worker.cancelled() and a.kernel.bus.closed
+    assert not a.kernel.bus.publish(a.cid, "after_shutdown")
 
 
 async def test_health_counts_without_loading_ledger_bodies(tmp_path, monkeypatch):
