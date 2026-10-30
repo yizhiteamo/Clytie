@@ -92,29 +92,48 @@ class Supervisor:
     async def monitor(self, cid):
         row = self.rows[cid]
         while not self.stopping:
-            row["state"] = "starting"
+            row.update(state="starting", phase="starting", migration_stalled=False)
+            startup_elapsed = 0
+            accounted = self.clock.monotonic()
             fatal, ready = None, None
             last = self.clock.monotonic()
             try:
                 child = await self.launcher.launch(cid)
                 self.children[cid] = child
                 while True:
+                    now = self.clock.monotonic()
+                    if row["phase"] == "starting" and ready is None:
+                        startup_elapsed += now - accounted
+                    accounted = now
+                    hang = self.config.get("hang_seconds", 30)
+                    startup_limit = self.config.get("startup_seconds", 300)
+                    budget = max(0, last + hang - now)
+                    if row["phase"] == "migrating" or self.stopping:
+                        budget = hang
+                    elif ready is None:
+                        budget = min(budget, max(0, startup_limit - startup_elapsed))
                     try:
-                        msg = await timed(
-                            child.receive(),
-                            self.clock,
-                            max(
-                                0,
-                                last + self.config.get("hang_seconds", 30) - self.clock.monotonic(),
-                            ),
-                        )
+                        msg = await timed(child.receive(), self.clock, budget)
                     except TimeoutError:
+                        now = self.clock.monotonic()
                         if self.stopping:
-                            last = self.clock.monotonic()
+                            last = now
+                            continue
+                        if row["phase"] == "migrating":
+                            row["migration_stalled"] = True
+                            self.problems[f"startup_stalled:{cid}"] = f"{cid} startup_stalled"
                             continue
                         await child.kill()
-                        row["restart_reason"] = "heartbeat_timeout"
+                        row["restart_reason"] = (
+                            "startup_timeout"
+                            if ready is None and startup_elapsed + now - accounted >= startup_limit
+                            else "heartbeat_timeout"
+                        )
                         break
+                    now = self.clock.monotonic()
+                    if row["phase"] == "starting" and ready is None:
+                        startup_elapsed += now - accounted
+                    accounted = now
                     if msg is None:
                         break
                     kind = msg.get("type")
@@ -122,9 +141,15 @@ class Supervisor:
                         ready = self.clock.monotonic()
                         last = ready
                         row["state"] = "running"
+                        row["phase"] = "running"
                         self.ready_events[cid].set()
                     elif kind == "heartbeat":
                         last = self.clock.monotonic()
+                        phase = msg.get("phase", row["phase"])
+                        if phase in {"starting", "migrating", "running", "stopping"}:
+                            row["phase"] = phase
+                        row["migration_stalled"] = False
+                        self.problems.pop(f"startup_stalled:{cid}", None)
                         for key in ("inflight_tasks", "sending"):
                             row[key] = max(0, int(msg.get(key, 0)))
                         row["channels"] = {
@@ -141,7 +166,9 @@ class Supervisor:
                         row["silenced"] = bool(msg.get("silenced", False))
                         row["warnings"] = list(msg.get("warnings", []))
                         row["quota"] = msg.get("quota", "unknown")
-                        if not self.stopping:
+                        if row["phase"] != "migrating" and row["silenced"] == self.silenced:
+                            row["silence_status"] = "confirmed"
+                        if not self.stopping and ready is not None:
                             row["state"] = (
                                 "degraded" if row["model"] == "auth_invalid" else "running"
                             )
@@ -176,17 +203,21 @@ class Supervisor:
                         pending = self.acks.get(cid)
                         if pending and msg.get("seq") == pending[0]:
                             pending[1].set()
+                        row["silence_status"] = "confirmed"
                     else:
                         self.log.warning("supervisor.unknown_type")
                     if ready is not None:
                         row["uptime"] = self.clock.monotonic() - ready
                         if row["uptime"] >= self.setting("restart", "stable_seconds", 600):
                             row["failures"] = 0
-                    if not self.stopping and self.clock.monotonic() - last > self.config.get(
-                        "hang_seconds", 30
+                    if (
+                        not self.stopping
+                        and ready is None
+                        and row["phase"] == "starting"
+                        and startup_elapsed >= startup_limit
                     ):
                         await child.kill()
-                        row["restart_reason"] = "heartbeat_timeout"
+                        row["restart_reason"] = "startup_timeout"
                         break
                 code = await child.wait()
             except asyncio.CancelledError:
@@ -282,20 +313,29 @@ class Supervisor:
             self.acks[cid] = (seq, ack)
             try:
                 await child.send(dict(type="silence", seq=seq, on=bool(on)))
+                if self.rows[cid].get("phase") == "migrating":
+                    self.rows[cid]["silence_status"] = "pending_migrating"
+                    return cid, "pending_migrating"
                 await timed(ack.wait(), self.clock, 5)
             except (TimeoutError, OSError):
+                if self.rows[cid].get("phase") == "migrating":
+                    self.rows[cid]["silence_status"] = "pending_migrating"
+                    return cid, "pending_migrating"
                 await self.restart(cid, "silence_timeout")
                 await self.ready_events[cid].wait()
             finally:
                 self.acks.pop(cid, None)
+            self.rows[cid]["silence_status"] = "confirmed"
+            return cid, "confirmed"
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 apply(cid, child)
                 for cid, child in tuple(self.children.items())
                 if self.rows[cid]["state"] in {"running", "degraded", "starting"}
             )
         )
+        return dict(results)
 
     async def restart(self, cid, reason="manual"):
         if self.stopping:

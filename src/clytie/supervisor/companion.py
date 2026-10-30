@@ -43,6 +43,8 @@ class Companion:
         self._closing = None
         self.orphan = False
         self.report = None
+        self.on_phase = lambda phase: None
+        self.stop_requested = lambda: False
 
     async def start(self):
         report = load_home(self.home, repo_root=self.root)
@@ -65,12 +67,15 @@ class Companion:
         self.report = report
         self.config = thaw(report.instance.get("supervisor", {}))
         config = thaw(report.plugin_configs[self.cid]["config"])
+        self.on_phase("migrating")
         try:
             ledger = await self.runtime.open()
         except OperationBusy:
             raise StartupBlocked("lock_held") from None
         except LedgerError:
             raise StartupBlocked("migration_blocked") from None
+        if self.stop_requested():
+            return False
         # Restart correction precedes plugin start; reactions are initialized by Agent.start.
         interrupted = ledger.restart()
         self.host.configure_report(report)
@@ -80,11 +85,16 @@ class Companion:
             raise StartupBlocked("lock_held") from None
         except MemoryStartupError:
             raise StartupBlocked("migration_blocked") from None
+        self.on_phase("starting")
+        if self.stop_requested():
+            return False
         required = {config["model"]["plugin"], *(c["plugin"] for c in config["channels"])}
         selected = required | {
             pid for pid, v in config.get("plugins", {}).items() if v.get("enabled", True)
         }
         for pid in sorted(selected):
+            if self.stop_requested():
+                return False
             plan = self.host.plan_enable(self.cid, pid)
             if not plan.ok:
                 if pid in required:
@@ -105,6 +115,8 @@ class Companion:
                 if reason:
                     raise StartupBlocked(reason)
                 raise RuntimeError("required_plugin_failed")
+        if self.stop_requested():
+            return False
         self.channels = {
             r.key: r.implementation for r in self.host.registrations(self.cid, "channel")
         }
@@ -133,6 +145,11 @@ class Companion:
         await self.agent.start()
         await self.kernel.reactions.restart(interrupted)
         for channel in self.channels.values():
+            if self.stop_requested():
+                return False
+            self.kernel.delivery.silenced = read(
+                self.home / "supervisor/silence.json", {"on": False}
+            )["on"]
             try:
                 await channel.connect()
             except PluginUnavailable as exc:
@@ -142,6 +159,7 @@ class Companion:
                 raise
         for channel in self.channels.values():
             self.feeds.append(asyncio.create_task(self.consume(channel)))
+        return True
 
     async def consume(self, channel):
         async for event in channel.events():

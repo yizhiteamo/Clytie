@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 class Lines:
-    def __init__(self, stream):
+    def __init__(self, stream, on_message=None):
         self.queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -38,10 +38,14 @@ class Lines:
                                 continue
                         except (ValueError, UnicodeError):
                             continue
+                        if on_message:
+                            on_message(value)
                         loop.call_soon_threadsafe(self.queue.put_nowait, value)
             except (OSError, RuntimeError):
                 pass
             finally:
+                if on_message:
+                    on_message(None)
                 try:
                     loop.call_soon_threadsafe(self.queue.put_nowait, None)
                 except RuntimeError:

@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from clytie.clock import SystemClock
@@ -44,39 +45,84 @@ def status(home):
 
 
 async def companion_main(home, cid):
+    from .heartbeat import Heartbeat
+
     clock = SystemClock()
-    lines = Lines(sys.stdin.buffer)
-    first = await lines.receive()
-    if first is None:
-        return 0
-    runtime = Companion(home, cid, clock)
     protocol = sys.stdout.buffer
     sys.stdout = sys.stderr
+    output_lock = threading.Lock()
     seq = 0
 
     def emit(kind, **fields):
         nonlocal seq
-        seq += 1
-        frame(protocol, dict(type=kind, seq=seq, **fields))
+        with output_lock:
+            seq += 1
+            frame(protocol, dict(type=kind, seq=seq, **fields))
 
+    heartbeat = Heartbeat(clock, emit)
+    stop_requested, orphan = threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    startup = None
+
+    def observed(message):
+        if message is None or message.get("type") in {"stop", "session_ending"}:
+            stop_requested.set()
+            if message is None:
+                orphan.set()
+            if startup and not startup.done() and heartbeat.phase != "migrating":
+                loop.call_soon_threadsafe(startup.cancel)
+
+    lines = Lines(sys.stdin.buffer, observed)
+    first = await lines.receive()
+    if first is None:
+        return 0
+    runtime = Companion(home, cid, clock)
+    runtime.on_phase = lambda phase: heartbeat.update(phase=phase)
+    runtime.stop_requested = stop_requested.is_set
+    heartbeat.start()
+
+    async def refresh():
+        while True:
+            heartbeat.update(
+                runtime.health(),
+                interval=runtime.config.get("heartbeat_seconds", 5),
+                hang=runtime.config.get("hang_seconds", 30),
+            )
+            await clock.sleep(runtime.config.get("heartbeat_seconds", 5))
+
+    heartbeat_task = asyncio.create_task(refresh())
+    startup = asyncio.create_task(runtime.start())
     try:
-        await runtime.start()
+        started = await startup
+    except asyncio.CancelledError:
+        started = False
     except StartupBlocked as exc:
         emit("fatal", reason=exc.reason)
-        runtime.runtime.close()
+        heartbeat.close()
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await runtime.stop()
         return 1
     except Exception:
         logging.exception("companion.start_failed")
-        runtime.runtime.close()
+        heartbeat.close()
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await runtime.stop()
         return 1
+    if not started or stop_requested.is_set():
+        heartbeat.update(phase="stopping")
+        try:
+            result = await runtime.stop("cancel", orphan=orphan.is_set())
+            if not orphan.is_set():
+                emit("stop_result", result=result)
+        finally:
+            heartbeat.close()
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+        return 0
     emit("ready")
-
-    async def heartbeat():
-        while True:
-            emit("heartbeat", **runtime.health())
-            await clock.sleep(runtime.config.get("heartbeat_seconds", 5))
-
-    heartbeat_task = asyncio.create_task(heartbeat())
+    heartbeat.update(runtime.health(), phase="running")
     stopping = None
     try:
         while True:
@@ -102,6 +148,7 @@ async def companion_main(home, cid):
                 os._exit(0)
             kind = msg["type"]
             if kind == "stop" and stopping is None:
+                heartbeat.update(phase="stopping")
                 stopping = asyncio.create_task(runtime.stop(msg.get("task_mode", "cancel")))
             elif kind == "escalate":
                 runtime.escalated.set()
@@ -110,10 +157,12 @@ async def companion_main(home, cid):
                 runtime.escalated.set()
             elif kind == "silence":
                 runtime.silence(msg["on"])
-                frame(protocol, dict(type="silence_ack", seq=msg["seq"]))
+                with output_lock:
+                    frame(protocol, dict(type="silence_ack", seq=msg["seq"]))
             else:
                 runtime.log.warning("companion.unknown_type")
     finally:
+        heartbeat.close()
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
 

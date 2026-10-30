@@ -23,10 +23,10 @@ async def test_real_companion_ready_heartbeat_stop(tmp_path):
     clock = SystemClock()
     messages = []
     try:
-        for _ in range(3):
+        for _ in range(20):
             msg = await timed(child.receive(), clock, 25)
             messages.append(msg)
-            if msg is None or msg["type"] == "heartbeat":
+            if msg is None or (msg["type"] == "heartbeat" and msg.get("phase") == "running"):
                 break
         assert any(m and m["type"] == "ready" for m in messages), (messages, child.log.name)
         assert any(m and m["type"] == "heartbeat" for m in messages)
@@ -148,7 +148,7 @@ async def test_real_child_eof_exits_and_lock_released(tmp_path):
     child = await launcher.launch("companion_a")
     clock = SystemClock()
     try:
-        assert (await timed(child.receive(), clock, 25))["type"] == "ready"
+        await receive_ready(child, clock)
         child.process.stdin.close()
         assert await timed(child.wait(), clock, 6) == 0
         with file_lock(home / "companions/companion_a/ledger/.lock", process_identity()):
@@ -223,7 +223,7 @@ async def test_real_job_close_terminates_windows_child(tmp_path):
     child = await launcher.launch("companion_a")
     clock = SystemClock()
     try:
-        assert (await timed(child.receive(), clock, 25))["type"] == "ready"
+        await receive_ready(child, clock)
         import os
 
         from clytie.plugin_host.locking import _owner, file_lock, process_identity
@@ -242,3 +242,72 @@ async def test_real_job_close_terminates_windows_child(tmp_path):
     finally:
         await child.kill()
         launcher.close()
+
+
+async def receive_ready(child, clock):
+    while True:
+        msg = await timed(child.receive(), clock, 25)
+        assert msg is not None
+        if msg["type"] == "ready":
+            return
+
+
+async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start(tmp_path):
+    import subprocess
+
+    from clytie.supervisor.processes import Child, creation, frame, python_process
+
+    home = tmp_path / "fictional-home"
+    shutil.copytree(ROOT / "examples/home", home)
+    release = tmp_path / "release-migration"
+    code = """
+import asyncio, sys, threading
+from pathlib import Path
+import clytie.supervisor.entry as entry
+Original = entry.Companion
+class Blocking(Original):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        original = self.host.memory_store
+        def blocked(cid):
+            while not Path(sys.argv[2]).exists():
+                threading.Event().wait(0.01)
+            return original(cid)
+        self.host.memory_store = blocked
+entry.Companion = Blocking
+raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_a")))
+"""
+    executable, env = python_process()
+    log = (tmp_path / "child-log.txt").open("wb")
+    process = subprocess.Popen(
+        [executable, "-c", code, str(home), str(release)],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=log,
+        **creation(),
+    )
+    child = Child(process, log)
+    clock = SystemClock()
+    try:
+        frame(process.stdin, dict(type="boot", seq=0))
+        migrating = 0
+        while migrating < 2:
+            msg = await timed(child.receive(), clock, 12)
+            assert msg and msg["type"] != "ready"
+            migrating += msg.get("phase") == "migrating"
+        process.stdin.close()
+        await clock.sleep(6)
+        assert process.poll() is None
+        release.write_text("continue", encoding="utf-8")
+        assert await timed(child.wait(), clock, 12) == 0
+        assert not (home / "companions/companion_a/plugin-versions.json").exists()
+        while True:
+            msg = await timed(child.receive(), clock, 5)
+            if msg is None:
+                break
+            assert msg["type"] != "ready"
+    finally:
+        release.write_text("continue", encoding="utf-8")
+        await child.kill()
+        child.close()
