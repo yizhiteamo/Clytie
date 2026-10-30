@@ -217,6 +217,9 @@ async def daemon_main(home):
 
 
 def frontend(home):
+    # Redirected Windows stdout may use an ANSI codepage unable to encode this notice.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     print("关闭这个窗口会安全停止所有伴侣", flush=True)
     clock = SystemClock()
     while status(home)["running"]:

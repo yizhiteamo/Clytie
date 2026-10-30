@@ -53,6 +53,7 @@ async def wait_until(predicate, clock, timeout=25):
 
 
 async def test_real_frontend_disappears_daemon_stops(tmp_path):
+    import os
     import subprocess
     import sys
 
@@ -69,6 +70,7 @@ async def test_real_frontend_disappears_daemon_stops(tmp_path):
             stdin=subprocess.DEVNULL,
             stdout=output,
             stderr=output,
+            env={**os.environ, "PYTHONIOENCODING": "ascii"},
             **creation(),
         )
         try:
@@ -78,6 +80,10 @@ async def test_real_frontend_disappears_daemon_stops(tmp_path):
                     for r in read(home / "run/health.json", {}).get("companions", {}).values()
                 ),
                 clock,
+            )
+            output.flush()
+            assert "关闭这个窗口会安全停止所有伴侣" in (tmp_path / "frontend-output.txt").read_text(
+                encoding="utf-8"
             )
             front.kill()
             await asyncio.to_thread(front.wait)
