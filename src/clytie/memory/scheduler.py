@@ -20,10 +20,7 @@ class RecollectionModel:
 
     async def generate(self, request, cancel, *, purpose):
         agent = self.agent
-        if (
-            getattr(agent, "model_health", "unknown") == "auth_invalid"
-            or agent.kernel.delivery.silenced
-        ):
+        if getattr(agent, "model_health", "unknown") == "auth_invalid":
             from clytie.sdk.types import ModelTurn
 
             return ModelTurn(

@@ -337,3 +337,47 @@ async def test_shutdown_finishes_started_split_and_fails_unstarted(tmp_path):
     assert len(channel.sent) == 3
     assert all(a.ledger.get("intent", i.intent_id)["status"] == "sent" for i in intents)
     a.ledger.close()
+
+
+async def test_silence_during_task_keeps_model_loop_and_internal_recollection(tmp_path):
+    import asyncio
+
+    from clytie.memory.scheduler import RecollectionModel
+    from clytie.sdk import CancelToken
+    from clytie.sdk.testing.samples import sample_request
+    from clytie.sdk.types import ModelTurn
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def first(request, cancel):
+        entered.set()
+        await release.wait()
+        return ModelTurn(
+            finish="tool_calls",
+            usage={},
+            tool_calls=[{"call_id": "call_a", "tool": "echo", "arguments": {"text": "fictional"}}],
+        )
+
+    a, channel, model = await make_agent(
+        tmp_path, first, {"finish": "stop", "text": "fictional done"}
+    )
+    try:
+        trace = await a.receive(event(a))
+        await entered.wait()
+        a.kernel.delivery.silenced = True
+        release.set()
+        await a.drain()
+        assert len(model.requests) == 2
+        assert a.ledger.get("record", trace)["exec_status"] == "ok"
+        intents = a.ledger.rows("intent")
+        assert intents and all(i["error"]["code"] == "silenced" for i in intents)
+        assert not channel.sent
+        result = await RecollectionModel(a).generate(
+            sample_request(a.clock), CancelToken(), purpose="test"
+        )
+        assert result.finish == "stop" and len(model.requests) == 3
+        a.model_health = "auth_invalid"
+        await RecollectionModel(a).generate(sample_request(a.clock), CancelToken(), purpose="test")
+        assert len(model.requests) == 3
+    finally:
+        await finish(a)

@@ -150,14 +150,12 @@ class Agent:
     async def model_call(self, method, *args, scene="public_group", conversation_id=None):
         from clytie.sdk.types import ModelTurn
 
-        if method == "generate" and (
-            self.model_health == "auth_invalid" or self.kernel.delivery.silenced
-        ):
+        if method == "generate" and self.model_health == "auth_invalid":
             return ModelTurn(
                 finish="error",
                 usage={},
                 error={
-                    "code": "auth_invalid" if self.model_health == "auth_invalid" else "silenced",
+                    "code": "auth_invalid",
                     "message": "",
                 },
             )
