@@ -236,8 +236,12 @@ class Supervisor:
 
     async def tick(self):
         while True:
-            await self.notifications.update(self.problems)
-            await self.flush_health()
+            try:
+                await self.notifications.update(self.problems)
+                await self.flush_health()
+            except OSError as exc:
+                # A transient Windows file sharing violation must not kill monitoring.
+                self.log.warning("supervisor.health_write_failed", error=type(exc).__name__)
             await self.clock.sleep(1)
 
     async def flush_health(self):

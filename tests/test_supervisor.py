@@ -347,3 +347,30 @@ async def test_stop_uses_total_budget_not_heartbeat_budget(tmp_path):
     clock.advance(90)
     await spin()
     assert (await closing)["companion_0"]["reason"] == "timeout_killed"
+
+
+async def test_health_file_write_failure_does_not_end_monitoring(tmp_path, monkeypatch):
+    import clytie.supervisor.service as service
+
+    svc, _, clock = await make(tmp_path)
+    original = service.write
+    attempts = []
+
+    def busy_once(path, value):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise PermissionError("fictional sharing violation")
+        original(path, value)
+
+    monkeypatch.setattr(service, "write", busy_once)
+    try:
+        clock.advance(5)
+        await spin()
+        assert len(attempts) == 1
+        assert not svc.ticker.done()
+        clock.advance(1)
+        await spin()
+        assert len(attempts) == 2
+        assert read(tmp_path / "run/health.json")["companions"]["companion_0"]["state"] == "running"
+    finally:
+        await svc.stop()
