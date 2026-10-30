@@ -167,6 +167,70 @@ async def companion_main(home, cid):
         await asyncio.gather(heartbeat_task, return_exceptions=True)
 
 
+class FrontendSignals:
+    """Console adapters share a serialized pipe; close is never an interrupt toggle."""
+
+    def __init__(self, stream):
+        self.stream, self.seq, self.interrupts = stream, 0, 0
+        self.lock = threading.Lock()
+
+    def send(self, source):
+        with self.lock:
+            self.seq += 1
+            if source == "interrupt":
+                self.interrupts += 1
+            kind = (
+                "session_ending"
+                if source == "session_ending"
+                else "escalate"
+                if source == "interrupt" and self.interrupts > 1
+                else "stop"
+            )
+            try:
+                frame(self.stream, dict(type=kind, seq=self.seq, source=source))
+            except (OSError, BrokenPipeError):
+                pass
+
+    def interrupt(self, *_):
+        self.send("interrupt")
+
+    def windows(self, event):
+        if event not in {0, 1, 2, 5, 6}:
+            return False
+        self.send(
+            "interrupt" if event in {0, 1} else "session_ending" if event in {5, 6} else "close"
+        )
+        return True
+
+
+class FrontendCommands:
+    def __init__(self, supervisor):
+        self.supervisor = supervisor
+        self.stopping = None
+
+    async def receive(self, message):
+        svc = self.supervisor
+        if message is None or message["type"] == "stop":
+            interrupt = message is not None and message.get("source") == "interrupt"
+            if self.stopping is None:
+                self.stopping = asyncio.create_task(
+                    svc.stop(None if interrupt else "cancel", source="terminal")
+                )
+            elif not interrupt:
+                await svc.escalate()
+            if message is None:
+                await self.stopping
+                return True
+        elif message["type"] == "session_ending":
+            # session_ending also escalates an already-running wait-mode stop.
+            self.stopping = asyncio.create_task(svc.session_ending(source="terminal"))
+        elif message["type"] == "escalate":
+            await svc.escalate()
+        else:
+            svc.log.warning("supervisor.frontend_unknown_type")
+        return False
+
+
 async def daemon_main(home):
     clock = SystemClock()
     report = load_home(home)
@@ -215,6 +279,7 @@ async def daemon_main(home):
     from .signals import SessionEvents
 
     session_events = SessionEvents(ending)
+
     async def prepare():
         await notifiers.start(
             instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
@@ -230,38 +295,27 @@ async def daemon_main(home):
         launcher.close()
         return 1
     frame(sys.stdout.buffer, dict(type="ready", seq=0))
-    stopping = None
+    control = FrontendCommands(supervisor)
     try:
         while True:
             task = asyncio.create_task(lines.receive())
-            if stopping:
-                done, _ = await asyncio.wait({task, stopping}, return_when=asyncio.FIRST_COMPLETED)
-                if stopping in done:
+            if control.stopping:
+                done, _ = await asyncio.wait(
+                    {task, control.stopping}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if control.stopping in done:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
                     try:
                         frame(
                             sys.stdout.buffer,
-                            dict(type="stop_result", seq=1, result=stopping.result()),
+                            dict(type="stop_result", seq=1, result=control.stopping.result()),
                         )
                     except (OSError, BrokenPipeError):
                         pass
                     return 0
-            msg = await task
-            if msg is None or msg["type"] == "stop":
-                if stopping is None:
-                    stopping = asyncio.create_task(supervisor.stop("cancel", source="terminal"))
-                if msg is None:
-                    await stopping
-                    return 0
-            elif msg["type"] == "session_ending":
-                ending_stop = asyncio.create_task(supervisor.session_ending(source="terminal"))
-                if stopping is None:
-                    stopping = ending_stop
-            elif msg["type"] == "escalate":
-                await supervisor.escalate()
-            else:
-                supervisor.log.warning("supervisor.frontend_unknown_type")
+            if await control.receive(await task):
+                return 0
     finally:
         session_events.close()
         await notifiers.close()
@@ -292,26 +346,11 @@ def frontend(home):
             env=env,
             **creation(detached=True),
         )
-        count = 0
-
-        def stop(*_, ending=False):
-            nonlocal count
-            count += 1
-            try:
-                frame(
-                    process.stdin,
-                    dict(
-                        type="session_ending" if ending else "stop" if count == 1 else "escalate",
-                        seq=count,
-                    ),
-                )
-            except (OSError, BrokenPipeError):
-                pass
-
-        signal.signal(signal.SIGINT, stop)
+        controls = FrontendSignals(process.stdin)
+        signal.signal(signal.SIGINT, controls.interrupt)
         if hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, stop)
-        signal.signal(signal.SIGTERM, lambda *_: stop(ending=True))
+            signal.signal(signal.SIGBREAK, controls.interrupt)
+        signal.signal(signal.SIGTERM, lambda *_: controls.send("session_ending"))
         handler = None
         if sys.platform == "win32":
             import ctypes
@@ -320,8 +359,7 @@ def frontend(home):
 
             @callback
             def handler(event):
-                stop(ending=event in {5, 6})
-                return True
+                return controls.windows(event)
 
             ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
         try:
