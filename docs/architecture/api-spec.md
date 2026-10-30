@@ -1,0 +1,269 @@
+# 本机管理接口实现规格（A4.2：API、登录、审计、CLI、后台运行、插件路由）
+
+本文件是 roadmap A4.2 的实现契约。A4.1 的进程、停止、静默规则见 `supervisor-spec.md`，本文件不改变它们，只为它们加上管理入口。
+
+用户已确认（2026-10-31）：
+
+- **E3、E4**：命令行自动登录，网页用口令登录；守护进程没有运行时，管理命令提示先启动。
+- **F1**：A4.2 支持启用、停用和卸载插件，并写回配置文件。
+- **F2**：命令行窗口作为调试模式。A4.2 的双击脚本暂时打开前端窗口；WebUI 完成后，日常方式改为后台启动并打开网页。
+- **F3**：登录自动续期；最危险的几项操作需要重新输入口令。
+- **F4**：静默的开启和解除都要确认，并且显眼地显示静默状态。
+
+全部验收离线完成：临时实例、假插件、假平台、假模型、MockClock，加上真实本机回环地址的测试。不连接真实账号，不调用线上模型。
+
+## 0. 原则
+
+- **只在本机**：只监听 `127.0.0.1`，不提供修改地址的配置，不提供局域网或外网访问。
+- **一条路**：所有管理操作都通过 API 完成。CLI 是 API 的客户端，以后的 WebUI 也是。业务规则只写在 API 层，CLI 只负责参数、交互和显示。
+- **会改变东西的操作都写审计**；审计、日志和错误信息中不出现口令、通行证、密钥或私密原文。
+- **凭据只显示状态，不显示内容**。
+
+## 1. 服务
+
+- API 服务运行在守护进程里，随守护进程启动和停止。端口取 `api.port`，默认 `8765`。
+- **默认端口被占用时自动顺延**：没有在配置里写 `api.port` 时，从默认端口开始，依次尝试后面的 9 个端口，用第一个能绑定的。实际使用的端口写进 `run/api.json`，CLI 和以后的 WebUI 启动脚本都从这里读取，所以端口变了也不影响使用；`status` 显示实际端口。主人在配置里明确写了 `api.port` 时，只用这一个端口，不顺延。
+- 默认端口选在 1024–9999 之间：这一段不在 Windows 和 Linux 默认的临时端口范围内，不会和本机程序向外连接时临时占用的端口冲突。
+- 端口（包括顺延的全部候选）都不可用，或者服务启动失败时：
+  - 前端窗口模式：守护进程照常运行，前端显示"管理接口未启动：<原因码>"，`status` 和健康汇总里有提醒。这时只能通过前端窗口停止。
+  - 后台模式（第 6 节）：**拒绝启动**，因为没有接口就无法停止它。
+- 服务就绪后写入 `run/api.json`：`{port, pid, started_at}`，原子替换写入。CLI 通过它找到端口。
+- 所有路径以 `/api/v1/` 开头，请求和响应都是 JSON。响应格式统一：
+  - 成功：`{"ok": true, "result": ...}`；
+  - 失败：`{"ok": false, "error": {"code": str, "message": str}}`。`message` 是给人看的固定说明，不包含原文或凭据。
+- 技术实现（HTTP 库、异步框架）由实现者选择并写 ADR，遵守 ADR 0003 的依赖规则。
+
+## 2. 登录
+
+### 2.1 CLI 通行证
+
+- 守护进程每次启动时，生成新的随机通行证（至少 32 字节，加密安全），写入 `run/api-token`，只有当前系统用户可读（Linux 权限 0600；Windows 位于用户自己的实例目录，不放宽权限）。
+- CLI 读取这个文件，把它放进标准的 `Authorization` 请求头（Bearer 方案）访问。比较时使用常数时间比较。
+- 守护进程停止后，旧通行证立即失效：服务只认这次启动时内存中的值，不需要删除文件。
+- 通行证只证明"请求来自这台电脑上的当前系统用户"，所以 CLI 登录不需要口令；最危险的几项操作仍按第 2.3 节要求口令。
+
+### 2.2 管理口令与网页登录（用户已确认 F3）
+
+- 管理口令由主人用 CLI 设置：`clytie admin set-password`。命令要求输入两次，不回显。保存在 `secrets/admin.json`，只存加盐的 scrypt 哈希及其参数，不存原文。**不自动生成**。没有设置口令时，网页登录不可用，只能使用 CLI。
+- **首次提醒**（用户已确认，2026-10-31）：没有设置口令时，前端窗口启动时显示一行提醒"还没有设置管理口令：网页登录不可用，危险操作没有口令保护。运行 clytie admin set-password 设置"。只提醒，不阻止启动。
+- **修改口令**：已经设置过口令时，必须先输入旧口令。
+- **忘记口令**：停止守护进程后，由主人手动删除 `secrets/admin.json` 这一个文件，再重新设置。程序不提供绕过旧口令的重置命令，也不替主人删除这个文件。删除后，所有网页会话一并失效（会话随口令一起作废）。
+- **管理口令的定位**：它防止误操作和他人顺手操作，**不是**本机数据的加密；本机数据的安全依赖操作系统账户。README 中用一句话说明即可。
+- 登录：`POST /api/v1/auth/login`，请求体为 `{password}`。成功后发放会话凭证，放在 Cookie 中，属性为 `HttpOnly`、`SameSite=Strict`、`Path=/api/`，网页脚本读不到。
+- **自动续期**：每次使用会话，都把它的到期时间顺延为最后一次使用后 `api.session_idle_days`（默认 30 天）。用着就不会过期，连续 30 天没用才需要重新登录。
+- **重启不掉登录**：会话保存在 `secrets/sessions.json`，只存会话标识的哈希、创建时间、最后使用时间和最后一次输入口令的时间，原子替换写入。守护进程重启后会话照常有效。它在 `secrets/` 下，所以不进常规备份；从备份恢复后需要重新登录。
+- **失败锁定**：连续 `api.login_lockout.failures`（默认 5）次口令错误后，锁定 `api.login_lockout.seconds`（默认 60）秒，期间登录一律拒绝。成功登录后计数清零。每次失败都写审计，但不记录输入的内容。
+- **注销**：`POST /api/v1/auth/logout` 注销当前会话。修改口令，或者执行 `clytie admin logout-all`，会让所有网页会话失效。
+- **防跨站**：
+  - 请求的 `Host` 必须是 `127.0.0.1:<端口>` 或 `localhost:<端口>`，否则返回 403，`host_rejected`。这一条防止 DNS 重绑定。
+  - 带 `Origin` 的请求，`Origin` 必须与上面相同。
+  - 用 Cookie 认证的非 GET 请求，必须带请求头 `X-Clytie-CSRF`，值是登录时发给页面的防伪值，否则返回 403，`csrf_rejected`。
+  - 用通行证认证的请求不使用 Cookie，不需要防伪值。
+
+### 2.3 再次确认与重新输入口令（用户已确认 F3、F4）
+
+- **确认**：第 4 节中标为"确认"的操作，请求体必须带 `"confirm": true`。没带时返回 428，错误码 `confirmation_required`，`result` 中附一份固定格式的说明，例如"将停止伴侣 companion_a，2 个任务会被取消"，供界面展示后再提交。
+  - CLI 先显示这份说明，再问 `y/N`；加 `--yes` 跳过询问。
+- **重新输入口令**：第 4 节中标为"口令"的操作，如果是网页会话发起，要求这个会话在最近 `api.reauth_minutes`（默认 15 分钟）内输入过口令；否则返回 401，错误码 `reauth_required`。网页通过 `POST /api/v1/auth/reauth` 提交口令，刷新这个时间，失败同样计入锁定。
+  - **CLI 同样要求口令**（用户已确认，2026-10-31）：已经设置管理口令时，用 CLI 通行证发起这几项操作，CLI 会提示输入管理口令（不回显），随请求的 `admin_password` 字段提交，由服务端校验。每次操作都要输入，CLI 不缓存口令。输错计入第 2.2 节的失败锁定。还没有设置口令时，只要求确认，并在确认提示中附一句"建议设置管理口令"。`--yes` 只跳过确认，不跳过口令。
+- 需要重新输入口令的操作：记忆恢复（导入的 `restore` 模式）、撤销导入、生成恢复码、卸载插件、修改管理口令，以及 A4.3 的导出备份密钥。
+
+## 3. 审计
+
+- 所有非 GET 请求都写审计，包括被拒绝的（未登录、防伪失败、需要确认、需要口令、权限不足）。另外，登录成功、登录失败和注销也写审计。
+- 写入 `supervisor/audit.jsonl`，与 A4.1 共用同一个文件和格式，增加以下字段：
+  - `actor`：`cli`、`webui:<会话标识哈希的前 8 位>`、`terminal`、`internal`；
+  - `route`、`target`（伴侣 id、插件 id、计划 id 等编号）、`result`（`ok` 或错误码）。
+- 不记录请求体中的口令、导出口令、恢复码、通行证，也不记录记忆、聊天等原文。路径参数只记编号。
+- 插件的非 GET 路由（第 5 节）由宿主统一写审计，插件自己无法跳过。
+
+## 4. 路由（v1）
+
+"运行中"表示该伴侣的子进程处于 `running` 或 `degraded`。
+
+### 4.1 状态与守护进程
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `GET /status` | 健康汇总（supervisor-spec §3.2）、静默状态、提醒、未送达通知的计数 | | |
+| `POST /supervisor/stop` | `{task_mode?}`，安全停止整个守护进程（supervisor-spec §6.2）；先返回已受理，停止在后台进行 | 是 | |
+| `POST /supervisor/escalate` | 等待模式改为取消模式 | | |
+| `POST /silence` | `{on: bool}`；返回逐个伴侣的 `confirmed` / `pending_migrating`（supervisor-spec §7） | 是（开启和解除都要） | |
+| `POST /companions/<cid>/start` | 启动一个停止中的伴侣；对 `blocked` 和 `restart_stopped` 的伴侣，相当于 supervisor-spec §4.2 的手动重启 | | |
+| `POST /companions/<cid>/stop` | `{task_mode?}`，只安全停止这个伴侣；停止后不会被自动重启 | 是 | |
+| `POST /companions/<cid>/restart` | 安全停止后再启动 | 是 | |
+
+- 静默状态必须显眼（用户已确认 F4）：`GET /status` 的顶层带 `silence: {on, since}`；CLI 在任何命令的输出最前面，都加一行"全部静默中（自某时起）"；前端窗口每 60 秒重复显示一次这行提示。
+
+### 4.2 任务与边界
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `GET /companions/<cid>/tasks/<task_id>` | 与现有 `clytie task` 的结果相同；`?full=1` 对应 `--full` | | |
+| `GET /companions/<cid>/boundary` | 正在暂停的人：`actor_id`、昵称、暂停到什么时候；不含计数和原文 | | |
+| `POST /companions/<cid>/boundary/release` | `{actor_id}`，即 `boundary.release`（agent-spec §7.3）；伴侣运行中时转交给子进程执行 | 是 | |
+
+### 4.3 记忆
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `POST /companions/<cid>/memory/export` | 与现有 `memory export` 相同；导出口令属于敏感字段 | | |
+| `POST /companions/<cid>/memory/thaw` | `{record_id}` | | |
+| `POST /companions/<cid>/memory/recovery-code` | 生成恢复码 | 是 | 是 |
+| `POST /companions/<cid>/memory/import/plan` | 与现有 `import plan` 相同，只读，生成计划 | | |
+| `GET /memory/import/plans/<plan_id>` | 计划元数据，不含内容 | | |
+| `POST /memory/import/plans/<plan_id>/content` | `{passphrase \| recovery_code}`，临时解密显示内容（对应现有 `--show-content`，ADR 0008）；只读，不写入日志 | | |
+| `POST /memory/import/apply` | `{plan_id, ...}` | 是 | 仅 `restore` 模式 |
+| `POST /companions/<cid>/memory/import/undo` | `{import_id}` | 是 | 是 |
+
+- **在哪里执行**：伴侣运行中时，请求转交给那个伴侣的子进程，由它用自己持有的记忆库执行，不与它争抢锁；伴侣停止时，由守护进程用同一组 `MemoryAPI` 函数直接执行。要求伴侣已停止的操作（`restore`），在运行中时返回 409，错误码 `companion_running`，提示先停止这个伴侣。
+- 导入导出的规则全部沿用 memory-spec 和 ADR 0007、0008，本文件不改变。
+
+### 4.4 插件（用户已确认 F1）
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `GET /companions/<cid>/plugins` | 插件列表：id、版本、启用状态、启动失败原因码 | | |
+| `POST /companions/<cid>/plugins/plan` | `{op: enable \| disable \| uninstall, target, restore_cascaded?}`，调用插件宿主的 `plan_*`，返回只读计划 | | |
+| `POST /companions/<cid>/plugins/apply` | `{plan_id}`，调用宿主的 `apply` | 停用和卸载要确认 | 卸载要口令 |
+
+- 插件操作要求该伴侣正在运行，否则返回 409，错误码 `companion_not_running`。计划过期时返回宿主的 `PlanStale`（409，`plan_stale`）。
+- **写回配置**：`apply` 成功后，守护进程把宿主返回的 `patch` 写回 `companions/<cid>/companion.yaml`：
+  - 必须保留文件中没有改动部分的注释、键的顺序和格式。实现可以选用支持保留注释的 YAML 库，写 ADR 说明。文件中用了无法安全保留的写法（例如锚点、合并键）时，**不写入**，返回 `config_not_writable`，并告诉主人需要手动修改哪一项。
+  - 写入前先把旧文件复制到 `companions/<cid>/config-history/companion.yaml.<时间>`，然后原子替换。`config-history/` 只保留最近 10 份，更早的逐个删除明确的文件。
+  - 写入后，重新按配置校验一次。校验失败时立即用刚才的副本还原，返回 `config_invalid_after_write`。
+  - 运行时已经生效、但写回失败时，返回错误码 `applied_not_saved`，说明"已生效，但没有保存，下次启动会恢复原状"，并在 `status` 中提醒，直到下一次成功写入或伴侣重启。
+- 需要重启才能生效的插件（不支持热加载），按宿主的 `restart_required` 返回，由主人决定何时重启伴侣。
+
+### 4.5 管理口令
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `POST /admin/password` | `{old_password?, new_password}`；已经设置过口令时必须提供正确的旧口令（CLI 和网页都一样）；成功后所有网页会话失效 | | 是（旧口令） |
+| `POST /admin/logout-all` | 使所有网页会话失效 | 是 | |
+
+## 5. 插件提供的路由与面板
+
+- 清单中的 `api_routes` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/` 之下：清单里写的 `/plugins/<pid>/<子路径>` 对应 `.../plugins/<pid>/<子路径>`。sdk-spec 中"路径固定在 `/plugins/<id>/` 下"的含义保持不变，只是对外再加上伴侣前缀。
+- 请求转交给该伴侣的子进程，由宿主调用插件的 `handler`。处理函数的签名是 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主为它加 10 秒超时，响应大小上限 1 MB。
+- 登录、防伪、确认的规则与本体路由相同。非 GET 路由必须在清单中声明 `audit: true`，宿主写审计；插件没有声明确认或口令的方式，因此非 GET 路由一律不能作为"确认"或"口令"级操作使用。
+- 伴侣没有运行，或者插件没有启用时，返回 404，错误码 `plugin_unavailable`。
+- `webui_panels` 的 `data_route` 必须是同一个插件的 GET 路由（现有校验）。A4.2 提供 `GET /companions/<cid>/panels`，返回声明了的面板列表；页面的渲染在阶段三实现。
+- **插件的 CLI 命令**：`cli_commands` 挂在 `clytie plugin <pid> <命令名>` 之下。CLI 进程加载插件的清单和模块，只把绑定了 CLI 通行证的 `ApiClient` 交给 `run`，不提供 `ctx`。插件只能通过 API 做事。
+
+## 6. CLI
+
+### 6.1 命令
+
+| 命令 | 对应 |
+|---|---|
+| `clytie supervisor start [--detach]` | 前端窗口模式（A4.1），或后台模式（第 6.2 节） |
+| `clytie supervisor stop [--wait-tasks] [--yes]` | `POST /supervisor/stop` |
+| `clytie supervisor status [--json]` | 运行中时调用 `GET /status`，没有运行时读取 `run/health.json`（A4.1 行为） |
+| `clytie supervisor silence on\|off [--yes]` | `POST /silence` |
+| `clytie companion start\|stop\|restart <cid> [--yes]` | 第 4.1 节 |
+| `clytie boundary list\|release <cid> [<actor_id>] [--yes]` | 第 4.2 节 |
+| `clytie memory ...` | 现有子命令保持原有参数和输出，改为调用第 4.3 节的 API |
+| `clytie plugin list\|enable\|disable\|uninstall <cid> [<pid>] [--yes]` | 先请求计划并显示，确认后再 apply |
+| `clytie admin set-password \| logout-all` | 第 4.5 节 |
+| `clytie task <task_id>` | 守护进程运行中时调用 API；没有运行时按 A3.1 的方式只读打开账本（E4 例外） |
+| `clytie status` | 离线检查配置，不需要守护进程（E4 例外） |
+
+- **守护进程没有运行时**：除了上表中的 `supervisor start`、`supervisor status`、`task`、`status`，其他命令一律显示"守护进程没有运行，请先运行 clytie supervisor start"，以退出码 3 退出，不自己打开记忆库或账本（E4）。
+- 交互式输入的口令（导出口令、管理口令）不回显，不出现在命令行参数中。
+- **调试窗口开头的提示**（用户已确认，2026-10-31）：前端窗口启动时，只显示一次："这是调试模式窗口。命令行操作会直接作用于伴侣的数据，请确认了解每条命令的作用后再执行。关闭这个窗口会安全停止所有伴侣。"它取代 supervisor-spec §1 中原有的单行提示。
+- **确认提示写清后果**：第 2.3 节的说明必须写出这次操作的对象和影响，例如"将撤销导入 <编号>，影响 N 条记忆；此操作会写入审计"，不能只问"确定吗"。
+- **README**：新增"命令行使用须知"一节，说明哪些操作需要确认、哪些需要口令，以及管理口令的定位（第 2.2 节，一句话带过）。
+- 退出码：0 成功；1 操作失败；2 参数错误；3 守护进程没有运行；4 被拒绝（需要确认却没有确认、权限不足）。
+
+### 6.2 后台运行（`--detach`）
+
+- `supervisor start --detach` 以脱离控制台的方式启动守护进程，不显示前端窗口，最多等待 30 秒，直到 API 就绪（`run/api.json` 出现并且 `GET /status` 成功）。之后显示"已在后台运行，用 clytie supervisor stop 停止"，以退出码 0 退出。超时或 API 启动失败时，让刚启动的守护进程安全停止，显示原因，以非 0 退出码退出。
+- 后台模式的日志只写 `logs/supervisor/`。停止只能通过 API（CLI 或以后的 WebUI）。注销和关机仍按 supervisor-spec §1 的"尽力停止"处理。
+- 已经有守护进程在运行时（不管哪种模式），报"已在运行"并退出，不启动第二个。
+
+### 6.3 双击启动脚本（用户已确认 F2）
+
+- 仓库提供 `scripts/start-clytie.cmd`（Windows）和 `scripts/start-clytie.sh`（Linux）。脚本的作用是：切换到 UTF-8 输出，优先使用仓库内的 `.venv` 中的 Python，运行 `python -m clytie supervisor start`，打开前端窗口。
+- 脚本不创建快捷方式、计划任务或系统服务，也不修改系统设置。README 里写明：可以手动把脚本的快捷方式放到桌面。
+- WebUI 完成后（阶段三），日常脚本改为"后台启动并打开网页"，命令行窗口作为调试模式保留。到时网页上要有醒目的运行状态和停止按钮，并注明"关闭浏览器不会停止伴侣"。
+
+## 7. 与子进程的转交
+
+- A4.1 的标准输入输出通道增加请求和响应两种消息：
+  - `request`：`{id, op, args}`；
+  - `response`：`{id, ok, result | error}`。
+  
+  每个请求都有超时：记忆导出、导入和插件 apply 为 600 秒，其他为 30 秒。超时返回 504，错误码 `companion_timeout`，但不终止子进程。
+- A4.1 §2 中"通道消息不含原文"的规则，在这里有一个限定的例外：主人通过 API 明确请求显示的内容（例如临时解密显示的导入内容、导出结果的路径），可以出现在对应的 `response` 中。这些内容不写入日志和审计，也不出现在心跳里。请求中的敏感字段（口令、恢复码）同样不记录。
+- 子进程处于 `migrating`、`starting` 或 `stopping` 时，转交的请求返回 409，错误码 `companion_busy`。
+
+## 8. 配置
+
+全局配置新增以下字段，都可以省略：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `api.port` | 整数，1024 起的有效 TCP 端口号（8765） |
+| `api.session_idle_days` | 整数 1–365（30） |
+| `api.reauth_minutes` | 整数 1–1440（15） |
+| `api.login_lockout.failures` | 整数 3–20（5） |
+| `api.login_lockout.seconds` | 整数 10–3600（60） |
+
+## 9. 数据
+
+| 路径 | 内容 | 备份 |
+|---|---|---|
+| `run/api.json` | 端口、pid、启动时间 | 否 |
+| `run/api-token` | 这次启动的 CLI 通行证 | 否 |
+| `secrets/admin.json` | 管理口令的 scrypt 哈希及参数 | 否（凭据） |
+| `secrets/sessions.json` | 网页会话（只存标识的哈希） | 否（凭据） |
+| `companions/<cid>/config-history/` | 写回配置前的旧文件，最近 10 份 | 是（A4.3） |
+
+## 10. 离线验收
+
+1. **只在本机**：服务只绑定 127.0.0.1；`Host` 是其他值时返回 403；`Origin` 不符时返回 403；配置里没有能改监听地址的字段。
+2. **通行证**：没有通行证或通行证错误时返回 401；守护进程重启后，旧通行证失效；使用常数时间比较（检查实现方式）；文件权限在 Linux 上是 0600。
+3. **口令与会话**（MockClock）：
+   - 口令只以 scrypt 哈希保存；
+   - 登录后每次使用都顺延，30 天没用才过期；
+   - 守护进程重启后会话仍有效；
+   - 连续 5 次错误后锁定 60 秒，到期后可以重试；
+   - 修改口令或执行 `logout-all` 后，所有会话失效；
+   - Cookie 带 `HttpOnly` 和 `SameSite=Strict`；Cookie 认证的非 GET 请求缺少防伪值时返回 403。
+4. **确认与口令**：表中每个标为"确认"的路由，缺少 `confirm` 时都返回 428 和说明；每个标为"口令"的路由，网页会话超过 15 分钟没有输入口令时返回 `reauth_required`；CLI 在设置了口令时同样要求口令（缺少或错误时拒绝，`--yes` 不能跳过），没有设置口令时只要求确认并附建议；口令错误计入锁定。修改口令必须提供正确的旧口令。没有口令时前端窗口显示首次提醒；调试窗口开头的提示只显示一次；确认说明写出对象和影响（逐条断言说明文本包含目标编号）。
+5. **审计**：每个非 GET 请求（包括被拒绝的）和登录事件都写审计；用含虚构口令、恢复码和敏感词的请求断言审计、日志和错误信息中都没有这些内容。
+6. **守护进程操作**：stop、escalate、silence 与 A4.1 的内部入口行为一致（复用 A4.1 的断言）；静默的开启和解除都要求确认；`GET /status` 和所有 CLI 输出都显示静默提示；单个伴侣的 start、stop、restart 正确，停止后不被自动重启。
+7. **记忆**：伴侣运行中时，导出、解冻、导入计划都转交给子进程执行，守护进程不打开记忆库（用锁断言）；停止时由守护进程直接执行；`restore` 在运行中返回 `companion_running`；临时解密显示的内容不出现在日志和审计中。
+8. **插件**：
+   - plan 和 apply 正确；
+   - 写回配置时保留注释和键的顺序（用带注释的虚构配置断言前后差异只有目标项）；
+   - 写入前有副本，`config-history/` 超过 10 份时逐个删除最旧的；
+   - 写后校验失败会还原；
+   - 不能安全保留的写法返回 `config_not_writable`；
+   - `applied_not_saved` 会有提醒；
+   - 伴侣没有运行时返回 `companion_not_running`。
+9. **插件路由**：挂在伴侣前缀下；非 GET 必须声明 audit 并写审计；超时和响应大小上限生效；插件未启用时返回 404；插件 CLI 命令只能拿到 `ApiClient`。
+10. **CLI**：每个管理命令都通过 API 完成（用假 API 服务器断言每条命令对应的请求）；守护进程没有运行时，除了四个例外命令，其他都以退出码 3 退出，并且不打开记忆库或账本；退出码符合第 6.1 节。
+11. **后台运行**：`--detach` 等 API 就绪后返回；API 启动失败时守护进程不会留在后台；已经在运行时拒绝；`supervisor stop` 通过 API 安全停止。Windows 和 Linux 都用真实进程做冒烟测试。
+12. **转交**：请求超时返回 504，不终止子进程；子进程处于迁移、启动或停止中时返回 `companion_busy`；`response` 之外的通道消息仍然不含原文。
+13. **端口占用**：未配置 `api.port` 时，默认端口被占用会顺延到下一个可用端口，`run/api.json` 和 `status` 显示实际端口，CLI 能正常连接；明确配置了 `api.port` 时不顺延；全部候选都不可用时，前端窗口模式下有提醒并继续运行，后台模式下拒绝启动。
+14. **启动脚本**：脚本内容只运行 `supervisor start`，不创建快捷方式、计划任务或服务（静态检查脚本文本）。
+
+## 11. 需要同步修改的其他文档
+
+| 文档 | 修改 |
+|---|---|
+| roadmap A4.2 | 范围与验收引用本文件第 10 节 |
+| supervisor-spec | §1 后台运行一段指向本文件第 6.2、6.3 节；§1 前台提示改为本文件第 6.1 节的调试窗口提示；§2 加入 `request` / `response` 消息及第 7 节的限定例外 |
+| sdk-spec §5、§7.3 | `api_route` 的实际挂载前缀、handler 签名、超时和大小上限；`cli_command` 只拿到 `ApiClient`；路由清单见本文件 |
+| config-spec | 第 8 节中的字段 |
+| data-and-backup §1 | 第 9 节中的路径 |
+| design/webui.md | 原则一节注明登录、确认和口令规则见本文件；静默状态的显眼提示；"关闭浏览器不停止伴侣"的提示 |
+| plugin-host-spec | `apply` 返回的 `patch` 由 API 写回配置，写回规则见第 4.4 节 |
+
+## 12. 不在 A4.2 范围
+
+- 备份、保留策略、恢复校验、副本目录、日志轮转、导出密钥（A4.3）。
+- WebUI 页面本身、托盘图标（阶段三）。
+- 局域网或手机访问（不在计划内）。
