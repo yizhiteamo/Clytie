@@ -126,6 +126,7 @@
 | `recollect.window_chars` | 整数 2000–100_000（12_000） |
 | `recollect.max_items` | 整数 1–30（8） |
 | `recollect.model` | 与伴侣 `model` 同结构的模型配置，或 `null`（`null`：跟随当前聊天模型） |
+| `recollect.retracted_similarity` | 数值 0–1（0.85）；本体内部拦截与本窗口撤销内容的余弦相似度严格大于此值的候选，真实模型选型时校准 |
 | `recollect.group_visibility` | `private` \| `relationship` \| `public`（`relationship`） |
 | `recollect.consolidator` | 插件 id（内置默认实现） |
 | `fade.half_life_days` | 数值 1–3650（30） |

@@ -174,7 +174,7 @@
 **MemoryHit**：`record_id`、`score: float`、`source: str`（哪个检索器）。
 
 **A3.4 回想类型**（memory-recall-spec §2.2）：
-- `RecollectWindow`：会话场景、按顺序编号的消息（`[消息N] 说话人称呼：原文`）、她在这段里已经用 `core_remember` 记下和用 `core_forget` 撤销的记忆。
+- `RecollectWindow`：会话场景、按顺序编号的消息（`[消息N] 说话人称呼：原文`）、她在这段里已经用 `core_remember` 记下的记忆，以及本段撤销的条数；撤销的原文和编号不交给扩展或模型（Issue #35 U2）。
 - `RecollectItem`：`kind`、`content`、`visibility`、`evidence: list[消息编号]`，以及可选的 `about`（印象对应的说话人）、`merges`（建议合并的 `[记忆N]`）。
 - 保留标签 `core:` 前缀只能由本体写入；插件和模型提交的 `core:` 标签一律丢弃。出处、合并与保留标签的核对按 memory-recall-spec §2.4–§2.5、§9。
 

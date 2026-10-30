@@ -393,3 +393,5 @@ async submit(conversation_id, *, topic: str | None = None, material: JsonObject 
 记忆段格式按 memory-recall-spec §3.2、§4.4、§5：群友印象只在本批次说话人、被引用作者或被提到的人对应时注入，不带来源群；冻结记录主动回想时标注“很久以前的事，记不太清了”；所属群黑话作为“这个群里的说法”，对内标注“群里的说法，听懂就好，不主动用”。
 
 投影读取与出站守卫读取错误、重复合并处理按 memory-recall-spec §6。
+
+Issue #35 U1：private_scenes 仍只限成员为主人和本部署伴侣的对内场景，按场景整体开启，影响该场景全部会话的私密记忆、人设私密段落及 kernel-spec §13.1 可见的主人私聊账本；普通群不能加入，分享私聊经历靠 relationship 等级和主人的口头修订。

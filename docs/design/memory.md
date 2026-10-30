@@ -72,3 +72,6 @@
 ## 9. 接口
 
 A3.3 的本体工具为 `core_remember`、`core_forget`、`core_recall`（memory-spec §2、§5）；所有读取经过本体 `project(scene, conversation_id)`，出站守卫读取见 §7。插件的 search/get/write/revise/retract 按 sdk-spec §7.5 裁剪权限和绑定会话。加密导出、两步导入与撤销导入见 memory-spec §8–§9。所有修改保留修订或审计；回想、档案、软遗忘接口见 memory-recall-spec。
+
+
+Issue #35（用户已确认）：private_scenes 规则不变，只限成员为主人和本部署伴侣的对内场景，普通群的私聊经历分享靠 relationship 及主人口头修订。撤销原文及编号不进入回想扩展或模型，只给条数；本体内部拦截规范化相同的候选，配置向量模型时也拦截余弦相似度严格大于 recollect.retracted_similarity（默认 0.85）的候选，不在日志或审计中写撤销原文。淡化分类同时命中时永不淡化优先，家庭群来源的经历与黑话不淡化；跨群印象一律会淡。
