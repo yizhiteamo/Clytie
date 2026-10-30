@@ -113,10 +113,12 @@
 | `POST /companions/<cid>/memory/import/plan` | 与现有 `import plan` 相同，只读，生成计划 | | |
 | `GET /memory/import/plans/<plan_id>` | 计划元数据，不含内容 | | |
 | `POST /memory/import/plans/<plan_id>/content` | `{passphrase \| recovery_code}`，临时解密显示内容（对应现有 `--show-content`，ADR 0008）；只读，不写入日志 | | |
-| `POST /memory/import/apply` | `{plan_id, ...}` | 是 | 仅 `restore` 模式 |
-| `POST /companions/<cid>/memory/import/undo` | `{import_id}` | 是 | 是 |
+| `POST /memory/import/apply` | `{plan_id, ...}`；执行导入计划或撤销计划 | 是 | `restore` 模式的导入计划和撤销计划 |
+| `POST /companions/<cid>/memory/import/undo` | `{import_id}`；只生成撤销计划（`kind = undo`），不执行，与现有 CLI 的两步流程相同 | | |
 
-- **在哪里执行**：伴侣运行中时，请求转交给那个伴侣的子进程，由它用自己持有的记忆库执行，不与它争抢锁；伴侣停止时，由守护进程用同一组 `MemoryAPI` 函数直接执行。要求伴侣已停止的操作（`restore`），在运行中时返回 409，错误码 `companion_running`，提示先停止这个伴侣。
+- **撤销导入分两步**（用户已确认，Issue #56 U2）：`undo` 路由只生成计划，真正的撤销在 `apply` 中执行，确认和口令都在 `apply` 这一步要求。是否需要口令由服务端读取已保存计划的 `kind` 和 `mode` 决定，不信任客户端声明的类型。
+
+- **在哪里执行**：伴侣运行中时，请求转交给那个伴侣的子进程，由它用自己持有的记忆库执行，不与它争抢锁；伴侣停止时，由守护进程用同一组 `MemoryAPI` 函数直接执行。要求伴侣已停止的操作（`restore`，以及按 memory-spec §9.3 执行撤销导入），在运行中时返回 409，错误码 `companion_running`，提示先停止这个伴侣（用户已确认，Issue #56 U1）。`new`、`merge` 模式在运行中由子进程执行。
 - 导入导出的规则全部沿用 memory-spec 和 ADR 0007、0008，本文件不改变。
 
 ### 4.4 插件（用户已确认 F1）
@@ -128,6 +130,10 @@
 | `POST /companions/<cid>/plugins/apply` | `{plan_id}`，调用宿主的 `apply` | 停用和卸载要确认 | 卸载要口令 |
 
 - 插件操作要求该伴侣正在运行，否则返回 409，错误码 `companion_not_running`。计划过期时返回宿主的 `PlanStale`（409，`plan_stale`）。
+- **卸载与其他伴侣**（用户已确认，Issue #56 U4）：卸载是实例级的，由守护进程协调。
+  - 其他**运行中**的伴侣仍启用这个插件时，按 plugin-host-spec §2 要求先确认它们的停用计划。
+  - 其他**已停止**、但配置中仍启用这个插件的伴侣，不阻止卸载，也不修改它们的配置；卸载计划和确认说明中逐个列出这些伴侣，写明"下次启动时这个插件不会加载"。它们下次启动时，按插件已卸载处理并在 `status` 中提醒。
+  - 例外：如果这个插件是某个已停止伴侣的**必需插件**（它的平台或模型插件），拒绝卸载，返回 409，错误码 `required_by_stopped_companion`，列出伴侣编号。否则那个伴侣下次会因缺少必需插件而无法启动。
 - **写回配置**：`apply` 成功后，守护进程把宿主返回的 `patch` 写回 `companions/<cid>/companion.yaml`：
   - 必须保留文件中没有改动部分的注释、键的顺序和格式。实现可以选用支持保留注释的 YAML 库，写 ADR 说明。文件中用了无法安全保留的写法（例如锚点、合并键）时，**不写入**，返回 `config_not_writable`，并告诉主人需要手动修改哪一项。
   - 写入前先把旧文件复制到 `companions/<cid>/config-history/companion.yaml.<时间>`，然后原子替换。`config-history/` 只保留最近 10 份，更早的逐个删除明确的文件。
@@ -149,7 +155,7 @@
 - 登录、防伪、确认的规则与本体路由相同。非 GET 路由必须在清单中声明 `audit: true`，宿主写审计；插件没有声明确认或口令的方式，因此非 GET 路由一律不能作为"确认"或"口令"级操作使用。
 - 伴侣没有运行，或者插件没有启用时，返回 404，错误码 `plugin_unavailable`。
 - `webui_panels` 的 `data_route` 必须是同一个插件的 GET 路由（现有校验）。A4.2 提供 `GET /companions/<cid>/panels`，返回声明了的面板列表；页面的渲染在阶段三实现。
-- **插件的 CLI 命令**：`cli_commands` 挂在 `clytie plugin <pid> <命令名>` 之下。CLI 进程加载插件的清单和模块，只把绑定了 CLI 通行证的 `ApiClient` 交给 `run`，不提供 `ctx`。插件只能通过 API 做事。
+- **插件的 CLI 命令**：`cli_commands` 挂在 `clytie plugin <pid> <命令名>` 之下。只允许加载至少在一个伴侣配置中启用、且没有被卸载的插件（用户已确认，Issue #56 U3）；其他插件的命令不出现在帮助中，调用时以退出码 2 报"插件未启用"。CLI 进程加载插件的清单和模块，只把绑定了 CLI 通行证的 `ApiClient` 交给 `run`，不提供 `ctx`。插件只能通过 API 做事。
 
 ## 6. CLI
 
@@ -243,6 +249,8 @@
    - 不能安全保留的写法返回 `config_not_writable`；
    - `applied_not_saved` 会有提醒；
    - 伴侣没有运行时返回 `companion_not_running`。
+   - Issue #56：卸载时，运行中的其他伴侣需先停用；已停止伴侣不阻止卸载并在说明中列出；是已停止伴侣的必需插件时返回 `required_by_stopped_companion`；两个伴侣跨进程同时启用与卸载时不丢写、无竞态。
+7a. **Issue #56 记忆**：运行中撤销导入返回 `companion_running`；`undo` 只生成计划；`apply` 撤销计划时要求确认与口令（由服务端按计划类型判断，伪造类型无效）；`new`、`merge` 运行中由子进程执行。插件 CLI 只加载已启用且未卸载的插件。
 9. **插件路由**：挂在伴侣前缀下；非 GET 必须声明 audit 并写审计；超时和响应大小上限生效；插件未启用时返回 404；插件 CLI 命令只能拿到 `ApiClient`。
 10. **CLI**：每个管理命令都通过 API 完成（用假 API 服务器断言每条命令对应的请求）；守护进程没有运行时，除了四个例外命令，其他都以退出码 3 退出，并且不打开记忆库或账本；退出码符合第 6.1 节。
 11. **后台运行**：`--detach` 等 API 就绪后返回；API 启动失败时守护进程不会留在后台；已经在运行时拒绝；`supervisor stop` 通过 API 安全停止。Windows 和 Linux 都用真实进程做冒烟测试。
