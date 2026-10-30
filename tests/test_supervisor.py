@@ -375,3 +375,21 @@ async def test_health_file_write_failure_does_not_end_monitoring(tmp_path, monke
         assert read(tmp_path / "run/health.json")["companions"]["companion_0"]["state"] == "running"
     finally:
         await svc.stop()
+
+
+@pytest.mark.parametrize("session", [False, True])
+async def test_terminal_stop_audit_source(tmp_path, session):
+    import json
+
+    svc, _, _ = await make(tmp_path)
+    if session:
+        await svc.session_ending(source="terminal")
+    else:
+        await svc.stop(source="terminal")
+    rows = [
+        json.loads(line) for line in (tmp_path / "supervisor/audit.jsonl").read_text().splitlines()
+    ]
+    actions = {"stop", "session_ending"} if session else {"stop"}
+    selected = [r for r in rows if r["operation"] in actions]
+    assert len(selected) == len(actions)
+    assert all(r["source"] == "terminal" for r in selected)

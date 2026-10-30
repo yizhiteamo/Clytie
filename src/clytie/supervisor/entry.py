@@ -248,12 +248,12 @@ async def daemon_main(home):
             msg = await task
             if msg is None or msg["type"] == "stop":
                 if stopping is None:
-                    stopping = asyncio.create_task(supervisor.stop("cancel"))
+                    stopping = asyncio.create_task(supervisor.stop("cancel", source="terminal"))
                 if msg is None:
                     await stopping
                     return 0
             elif msg["type"] == "session_ending":
-                ending_stop = asyncio.create_task(supervisor.session_ending())
+                ending_stop = asyncio.create_task(supervisor.session_ending(source="terminal"))
                 if stopping is None:
                     stopping = ending_stop
             elif msg["type"] == "escalate":

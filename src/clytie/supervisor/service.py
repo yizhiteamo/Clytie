@@ -362,20 +362,20 @@ class Supervisor:
             except (OSError, BrokenPipeError):
                 pass
 
-    async def session_ending(self):
+    async def session_ending(self, source="internal"):
         for child in tuple(self.children.values()):
             try:
                 await self.command(child, "session_ending")
             except (OSError, BrokenPipeError):
                 pass
-        self.audit.append("session_ending")
+        self.audit.append("session_ending", source=source)
         self.escalation.set()
-        return await self.stop("cancel")
+        return await self.stop("cancel", source=source)
 
-    async def stop(self, task_mode=None):
+    async def stop(self, task_mode=None, *, source="internal"):
         if self._closing is None:
             self._closing = asyncio.create_task(
-                self._stop(task_mode or self.setting("stop", "task_mode", "cancel"))
+                self._stop(task_mode or self.setting("stop", "task_mode", "cancel"), source)
             )
 
         async def join():
@@ -383,7 +383,7 @@ class Supervisor:
 
         return await finish_shutdown(join())
 
-    async def _stop(self, mode):
+    async def _stop(self, mode, source):
         self.stopping = True
         for event in self.ready_events.values():
             event.set()
@@ -439,7 +439,7 @@ class Supervisor:
                 await child.kill()
                 await child.wait()
                 reason = "timeout_killed" if isinstance(exc, TimeoutError) else "stop_failed"
-                self.audit.append("force_stop", cid, reason=reason)
+                self.audit.append("force_stop", cid, reason=reason, source=source)
                 self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"
                 row["state"] = "stopped"
                 return dict(state="not_stopped", stopped=[], not_stopped={}, reason=reason)
@@ -456,7 +456,7 @@ class Supervisor:
         )
         if self.finalize:
             await self.finalize()
-        self.audit.append("stop")
+        self.audit.append("stop", source=source)
         await self.flush_health()
         if self.lock:
             self.lock.__exit__(None, None, None)
