@@ -44,3 +44,17 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
 
 
 __all__ = ["local_status", "local_task", "task_exit_code"]
+
+
+def local_supervisor_status(home=None):
+    from clytie.config import resolve_home
+    from clytie.supervisor.entry import status
+
+    return status(resolve_home(home))
+
+
+def local_supervisor_start(home=None):
+    from clytie.config import resolve_home
+    from clytie.supervisor.entry import frontend
+
+    return frontend(resolve_home(home))

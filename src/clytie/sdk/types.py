@@ -739,3 +739,9 @@ class RecollectItem(SDKModel):
     about: str | None = None
     merges: FrozenList[str] = Field(default_factory=list)
     with_owner: bool = False
+
+
+class ChannelState(SDKModel):
+    status: Literal["online", "connecting", "offline", "auth_invalid", "unknown"] = "unknown"
+    since: datetime | None = None
+    code: str | None = None

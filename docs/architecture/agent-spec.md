@@ -444,3 +444,9 @@ Issue #35 U1：private_scenes 仍只限成员为主人和本部署伴侣的对�
 - owner_confirmed / owner_stated 的印象与黑话不淡化，但核心记忆排除 profile / jargon；修订升级规则不变，使用范围不变。core:with_owner 只用于群聊 episode，主人参与的黑话不因此免淡化。
 - 来源会话按 memory-recall-spec §4.6 的会话登记表处理：本体写入时按配置、导入时按包清单登记；只以 channel + kind + platform_id 在当前配置对应，逻辑 ID 和群名称不参与身份判断。不改 origin_conversation_id，不产生修订、不进内容指纹。未对应时仅对内可见、按登记类别淡化；旧包和无法得知身份的非印象来源不淡化。再次导出保留登记；更换 channel 不自动对应。本地与导入同逻辑 ID、不同平台身份的记录须分别引用自己的登记。
 - 停用回想立即取消进行中的工作且不写入；重新启用时所有会话进度移到现在，停用期间和未完成窗口都跳过，status 只显示跳过段数。
+
+## A4.1 运行中失效与静默同步
+
+按 `supervisor-spec.md` §4.3，运行中模型报告 auth_invalid 后伴侣进入 degraded，直到伴侣重新启动前不再调用模型；新消息照常写入 dedupe 和 inbound，ignored 原因为 model_auth_invalid，不回复、不发兜底回复。quota_exhausted 不重启，保障模式和失败回应仍按原规则。
+
+按该规格 §7，全部静默包括主人私聊，入站 ignored 原因为 silenced，不调用模型；主动消息不创建、直接丢弃并审计。静默只由守护进程入口解除，不能在聊天里解除。

@@ -10,8 +10,16 @@ from clytie.api import local_status, local_task, task_exit_code
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"companion", "_supervisor"}:
+        from clytie.supervisor.entry import internal
+
+        return internal(argv)
     parser = argparse.ArgumentParser(prog="clytie")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    supervisor_parser = subcommands.add_parser("supervisor", help="守护进程")
+    supervisor_parser.add_argument("action", choices=["start", "status"])
+    supervisor_parser.add_argument("--home")
+    supervisor_parser.add_argument("--json", action="store_true")
     status_parser = subcommands.add_parser("status", help="离线检查实例配置")
     status_parser.add_argument("--home")
     status_parser.add_argument("--json", action="store_true")
@@ -31,6 +39,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if exc.code and argv and "task" in argv:
             return 4
         raise
+    if arguments.command == "supervisor":
+        from clytie.supervisor.entry import run
+
+        return run(arguments)
     if arguments.command == "memory":
         return memory_run(arguments)
     if arguments.command == "task":

@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.8.0（A4.1，待验收）
+
+- 新增可选 Channel.state、ChannelState、PluginUnavailable 结构化启动错误及 notifier.outward；原有平台无需实现 state。
+- 新增本机守护进程、子进程健康与重启、实例通知、安全停止和持久静默。
+- 官方插件兼容范围扩为 >=0.7,<0.9；既有 0.7 接口保持兼容。
+
 ## 0.7.0（A3.4，待验收）
 
 - Issue #35：撤销内容仅由本体内部比对，窗口只给撤销条数；新增 recollect.retracted_similarity（0–1，默认 0.85）。private_scenes 既有隐私边界不变；永不淡化优先，跨群印象仍会淡。

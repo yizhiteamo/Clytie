@@ -42,6 +42,10 @@ class Delivery:
         self._locks = {}
         self.active_tokens = {}
         self.log = log
+        self.silenced = False
+        self.session_ending = False
+        self.channel_errors = {}
+        self.workers = set()
 
     def _receipt(self, intent, status, code):
         return Receipt(
@@ -133,6 +137,20 @@ class Delivery:
             row = self.ledger.get("intent", intent_id)
             if row["status"] in INTENT_TERMINAL:
                 return row["status"]
+            if (
+                self.silenced
+                or self.session_ending
+                or self.channel_errors.get(intent.channel_id) == "auth_invalid"
+            ):
+                self.ledger.fail_intent(
+                    intent_id,
+                    "silenced"
+                    if self.silenced
+                    else "shutdown_before_send"
+                    if self.session_ending
+                    else "auth_invalid",
+                )
+                return "failed"
             started = group in self.groups if group else False
             if not row["status_reaction"] and not started and self._cancelled(row):
                 self.ledger.fail_intent(
@@ -165,10 +183,26 @@ class Delivery:
             if previous and self.clock.monotonic() >= first + self.window:
                 self.ledger.fail_intent(intent_id, row["error"]["code"])
                 return "failed"
+            if (
+                self.silenced
+                or self.session_ending
+                or self.channel_errors.get(intent.channel_id) == "auth_invalid"
+            ):
+                self.ledger.fail_intent(
+                    intent_id,
+                    "silenced"
+                    if self.silenced
+                    else "shutdown_before_send"
+                    if self.session_ending
+                    else "auth_invalid",
+                )
+                return "failed"
             n = self.ledger.begin_attempt(intent_id)
             receipt = await self._call(intent, channel, token, cutoff, n)
             if receipt.intent_id != intent_id and self.log:
                 self.log.warning("delivery.receipt_mismatch", intent_id=intent_id, attempt=n)
+            if receipt.error and receipt.error.code in {"auth_invalid", "quota_exhausted"}:
+                self.channel_errors[intent.channel_id] = receipt.error.code
             delay = self.backoff[min(n - 1, len(self.backoff) - 1)] if self.backoff else 0
             retry = (
                 not row["status_reaction"]
@@ -194,6 +228,14 @@ class Delivery:
             await self.clock.sleep(delay)
 
     async def deliver(self, trace):
+        task = asyncio.current_task()
+        self.workers.add(task)
+        try:
+            return await self._deliver(trace)
+        finally:
+            self.workers.discard(task)
+
+    async def _deliver(self, trace):
         rows = [r for r in self.ledger.intents(trace) if not r["status_reaction"]]
         groups = {}
         for r in rows:
@@ -213,7 +255,15 @@ class Delivery:
                     error = self.ledger.get("intent", row["intent_id"])["error"]
                     stopped = (
                         error["code"]
-                        if error and error["code"] in {"group_timeout", "cancelled_before_send"}
+                        if error
+                        and error["code"]
+                        in {
+                            "group_timeout",
+                            "cancelled_before_send",
+                            "silenced",
+                            "shutdown_before_send",
+                            "auth_invalid",
+                        }
                         else "skipped_after_failure"
                     )
         if self.on_complete:

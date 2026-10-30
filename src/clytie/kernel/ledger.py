@@ -70,6 +70,16 @@ class Ledger:
                         "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))"
                     )
                     self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            if not readonly:
+                with self.db:
+                    self.db.execute(
+                        "CREATE INDEX IF NOT EXISTS health_tasks ON record("
+                        "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))"
+                    )
+                    self.db.execute(
+                        "CREATE INDEX IF NOT EXISTS health_sending ON intent("
+                        "json_extract(data,'$.status'))"
+                    )
         except BaseException:
             self.db.close()
             raise
@@ -98,6 +108,19 @@ class Ledger:
         return [
             json.loads(r[0]) for r in self.db.execute(f'SELECT data FROM "{table}" ORDER BY rowid')
         ]
+
+    def health_counts(self):
+        terminal = sorted(EXEC_TERMINAL)
+        marks = ",".join("?" for _ in terminal)
+        tasks = self.db.execute(
+            "SELECT count(*) FROM record WHERE json_extract(data,'$.kind')='task' "
+            f"AND json_extract(data,'$.exec_status') NOT IN ({marks})",
+            terminal,
+        ).fetchone()[0]
+        sending = self.db.execute(
+            "SELECT count(*) FROM intent WHERE json_extract(data,'$.status')='sending'"
+        ).fetchone()[0]
+        return dict(inflight_tasks=tasks, sending=sending)
 
     def put(self, table, key, value):
         assert table in TABLES

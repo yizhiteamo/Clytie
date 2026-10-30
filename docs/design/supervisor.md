@@ -1,6 +1,10 @@
 # 守护进程
 
+A4.1 实现规格见 `../architecture/supervisor-spec.md`；API 与后台启动在 A4.2，备份与日志轮转在 A4.3。
+
 ## 1. 进程结构
+
+A4.1 使用 `python -m clytie supervisor start` 启动前端窗口；真正的守护进程脱离控制台运行（Windows DETACHED_PROCESS，Linux setsid）。按 supervisor-spec §1 的用户确认规则，Ctrl+C 按配置 task_mode，关闭窗口和前端 EOF 固定触发取消模式安全停止，第二次 Ctrl+C 发送 escalate；停止期间再次启动等待锁释放。伴侣子进程独立进程组，Windows 纳入 kill-on-job-close Job Object；子进程通道 EOF 后按取消模式、不等交付，非迁移阶段 5 秒内退出，迁移阶段等待本次迁移和既定恢复完成。A4.2 才提供启动后立即返回的 `--detach` 与双击启动脚本。以下结构包含后续阶段。
 
 ```
 clytie supervisor（单实例，进程锁在 CLYTIE_HOME/run/）
@@ -33,12 +37,15 @@ clytie supervisor（单实例，进程锁在 CLYTIE_HOME/run/）
 
 - 关闭期间被取消时，先完成所有伴侣的关闭处理，再向调用方传播取消，不能装作正常返回。同时保留完整关闭结果，包括每个伴侣的 `stopped` / `not_stopped` 及未停止原因，调用方在收到取消后仍能取得这些结果（#7）。
 - 同一伴侣内某个插件停止出错时，继续尝试停止其余插件，仍按依赖方先停的顺序；最终在该伴侣的 `not_stopped` 中列出失败插件及原因。一个伴侣的失败不阻止其他伴侣关闭（#10）。
-- 上述两项计划在 A4 实现；取消与关闭结果的具体接口表示在 A4 实现前细化，不改变本次确认的行为。
+- 上述两项在 A4.1 实现，接口见 supervisor-spec §6：关闭被取消时，在全部伴侣关闭完成后抛出携带完整 `.result` 的 `ShutdownCancelled`。
 
 ## 4. 通知
 
-通知渠道是插件（扩展点 `notifier`，由 SDK 定义），例如：通过另一位在线伴侣的平台账号私聊通知主人、Windows 桌面通知。同一问题在冷却时间内只通知一次。
+通知渠道是插件（扩展点 `notifier`，由 SDK 定义），例如：通过另一位在线伴侣的平台账号私聊通知主人、Windows 桌面通知。A4.1 在守护进程内装配实例级通知插件，配置为 `notify.plugins`；上下文只有 config、log、clock、subprocess。同一问题默认 6 小时内只通知一次，冷却持久化；未送达不进入冷却，只在问题仍存在时最多每 10 分钟重试。静默期间暂停 outward 通知，其他通知照常。
 
 ## 5. 维护任务
 
 运行时负责：备份与保留策略清理、恢复校验、日志轮转、软遗忘扫描。
+
+
+Issue #51/#53 同步：Ctrl+C/Ctrl+Break 按配置 task_mode，第二次升级为取消；关窗及前端 EOF 固定取消。子进程迁移中 stdin EOF 等待本次迁移与既定恢复完成后退出，不启动插件、不连接平台；其他阶段仍限 5 秒。迁移中静默未确认返回 pending_migrating，不能说成已确认，连接平台前重读 silence.json。

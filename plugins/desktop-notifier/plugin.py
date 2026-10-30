@@ -1,6 +1,7 @@
 """Windows 桌面通知；只通过注入的子进程能力执行固定命令。"""
 
 import asyncio
+from uuid import uuid4
 
 from clytie.sdk.types import Receipt
 
@@ -36,7 +37,7 @@ class DesktopNotifier:
             cancel.raise_if_cancelled()
             result = await operation
             return Receipt(
-                intent_id=f"{self.ctx.random.getrandbits(128):032x}",
+                intent_id=uuid4().hex,
                 status="sent" if result.returncode == 0 else "unknown",
                 at=self.ctx.clock.now(),
             )

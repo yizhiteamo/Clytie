@@ -134,6 +134,9 @@ class Agent:
         self.memory_context = memory_context
         self.batches, self.background, self.warnings = {}, set(), []
         self.filtered_count = 0
+        self.model_health = "unknown"
+        self.model_error_code = None
+        self.shutting_down = False
         kernel.config = config
         kernel.permissions = lambda actor, tool: (
             self.reason(actor, tool)
@@ -145,19 +148,38 @@ class Agent:
         )
 
     async def model_call(self, method, *args, scene="public_group", conversation_id=None):
+        from clytie.sdk.types import ModelTurn
+
+        if method == "generate" and self.model_health == "auth_invalid":
+            return ModelTurn(
+                finish="error",
+                usage={},
+                error={
+                    "code": "auth_invalid",
+                    "message": "",
+                },
+            )
         if self.model_registration is None:
-            return await getattr(self.model, method)(*args)
-        reg = self.model_registration
-        return await self.host.invoke(
-            self.cid,
-            reg.plugin_id,
-            "model",
-            reg.key,
-            *args,
-            method=method,
-            scene=scene,
-            conversation_id=conversation_id,
-        )
+            result = await getattr(self.model, method)(*args)
+        else:
+            reg = self.model_registration
+            result = await self.host.invoke(
+                self.cid,
+                reg.plugin_id,
+                "model",
+                reg.key,
+                *args,
+                method=method,
+                scene=scene,
+                conversation_id=conversation_id,
+            )
+        if method == "generate":
+            self.model_error_code = result.error.code if result.error else None
+            if self.model_error_code == "auth_invalid":
+                self.model_health = "auth_invalid"
+            elif self.model_health != "auth_invalid":
+                self.model_health = "ok"
+        return result
 
     def rebuild_memory(self):
         self._memory_dirty = True
@@ -321,6 +343,23 @@ class Agent:
         return specs, "\n".join(lines)
 
     async def receive(self, event):
+        reason = (
+            "silenced"
+            if self.kernel.delivery.silenced
+            else "shutting_down"
+            if self.shutting_down
+            else "model_auth_invalid"
+            if self.model_health == "auth_invalid"
+            else None
+        )
+        if reason:
+            if event.companion_id != self.cid:
+                raise ValueError("wrong companion")
+            if event.dedupable:
+                key, new = self.ledger.claim_inbound(event)
+                if new:
+                    self.ledger.ignore(key, reason)
+            return None
         if hasattr(self, "recollector"):
             self.recollector.activity(event.conversation)
         if event.companion_id != self.cid:
@@ -673,6 +712,8 @@ class Agent:
                 text = self.config.get("replies", {}).get(
                     "fallback_private", "刚刚没接上，可以再说一次吗？"
                 )
+                if self.model_health == "auth_invalid" or self.kernel.delivery.silenced:
+                    text = ""
                 if text and not self.outbound.check(text, conversation.scene):
                     try:
                         intents = await self.outgoing(
@@ -904,6 +945,15 @@ class Agent:
         await self.kernel.delivery.deliver(trace)
 
     async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+        if (
+            self.shutting_down
+            or self.kernel.delivery.silenced
+            or self.model_health == "auth_invalid"
+        ):
+            trace = uuid4().hex
+            with self.ledger.transaction():
+                self.ledger.audit("proactive.dropped", trace_id=trace)
+            return trace
         validate_proactive(topic=topic, material=material, parts=parts)
         target = self.instance.get("conversations", {}).get(conversation_id)
         if target is None or target["scene"] == "stranger_private":

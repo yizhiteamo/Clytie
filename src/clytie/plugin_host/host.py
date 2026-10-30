@@ -101,6 +101,8 @@ class Runtime:
     calls: set = field(default_factory=set)
     feeds: set = field(default_factory=set)
     units: list = field(default_factory=list)
+    failure_code: str | None = None
+    stop_errors: list = field(default_factory=list)
     unit_role: str | None = None
     account_ref: str | None = None
 
@@ -240,8 +242,14 @@ class PluginHost(MigrationMixin):
                 config=config,
                 instance=instance,
             )
-        except BaseException:
+        except BaseException as exc:
             lock.__exit__(None, None, None)
+            import sqlite3
+
+            from clytie.memory.errors import MemoryStartupError
+
+            if isinstance(exc, sqlite3.DatabaseError):
+                raise MemoryStartupError("memory structure unavailable") from exc
             raise
         from clytie.memory.migration import migrate
 
@@ -594,6 +602,9 @@ class PluginHost(MigrationMixin):
                 self.runtimes[key] = Runtime(companion_id, manifest, None, manifest.priority)
             runtime = self.runtimes[key]
 
+            from clytie.sdk import PluginUnavailable
+
+            runtime.failure_code = exc.code if isinstance(exc, PluginUnavailable) else None
             metadata_timeout = isinstance(exc, MetadataLockTimeout)
 
             async def cleanup_start():
@@ -650,6 +661,13 @@ class PluginHost(MigrationMixin):
             "exc_type": type(exc).__name__,
             "at": self.clock.now().isoformat(),
         }
+        from clytie.sdk import PluginUnavailable
+
+        if isinstance(exc, PluginUnavailable):
+            failure["code"] = exc.code
+            self.states.setdefault(runtime.companion_id, {}).setdefault(runtime.manifest.id, {})[
+                "code"
+            ] = exc.code
         self.failures.append(failure)
         if isinstance(exc, BackendUnavailable):
             failure["code"], failure["permission"] = "backend_unavailable", exc.permission
@@ -668,6 +686,7 @@ class PluginHost(MigrationMixin):
         companion_id, plugin_id = runtime.companion_id, runtime.manifest.id
         if companion_id in self.schedulers:
             await self.schedulers[companion_id].remove(plugin_id)
+        runtime.stop_errors.clear()
         runtime.status = "stopping"
         await self.emit(
             companion_id,
@@ -695,8 +714,10 @@ class PluginHost(MigrationMixin):
                     with bind_scene():
                         await timed(unit.plugin.stop(), self.clock, 10)
                 except Exception as exc:
+                    runtime.stop_errors.append(type(exc).__name__)
                     self._failure(runtime, "stop", exc)
         except Exception as exc:
+            runtime.stop_errors.append(type(exc).__name__)
             self._failure(runtime, "stop", exc)
         finally:
             runtime.status, runtime.registrations = "disabled", ()
@@ -1092,6 +1113,11 @@ class PluginHost(MigrationMixin):
         return await self.invoke(companion_id, plugin_id, "schedule", schedule_id, tick)
 
     async def close(self):
+        from clytie.supervisor.common import finish_shutdown
+
+        return await finish_shutdown(self._close_all())
+
+    async def _close_all(self):
         result = {}
         for cid in sorted(
             set(self.settings) | {key[0] for key in self.runtimes} | set(self.memory_resources)
@@ -1108,8 +1134,15 @@ class PluginHost(MigrationMixin):
                 with self.operations.hold(cid, plugins, "shutdown"):
                     loaded = {pid: self.runtimes[cid, pid].manifest for pid in plugins}
                     for pid in stop_order(loaded):
-                        await self._stop(cid, pid, "shutdown")
-                        row["stopped"].append(pid)
+                        try:
+                            await self._stop(cid, pid, "shutdown")
+                            errors = self.runtimes[cid, pid].stop_errors
+                            if errors:
+                                row["not_stopped"][pid] = {"error": errors[0]}
+                            else:
+                                row["stopped"].append(pid)
+                        except (Exception, asyncio.CancelledError) as exc:
+                            row["not_stopped"][pid] = {"error": type(exc).__name__}
             except (Exception, asyncio.CancelledError) as exc:
                 reason = (
                     exc.result(multiple=len(plugins) > 1)
@@ -1124,7 +1157,11 @@ class PluginHost(MigrationMixin):
                         row["stopped"].append(pid)
                     else:
                         row["not_stopped"][pid] = reason.copy()
-            if not row["not_stopped"] and cid in self.memory_resources:
+            if cid in self.memory_resources and not any(
+                companion == cid
+                and runtime.status in {"active", "quiescing", "starting", "stopping"}
+                for (companion, _), runtime in self.runtimes.items()
+            ):
                 jobs = tuple(self.memory_jobs.pop(cid, ()))
                 for job in jobs:
                     job.cancel()

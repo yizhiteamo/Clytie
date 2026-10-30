@@ -104,6 +104,7 @@ async def test_optional_dependency_event_and_dynamic_service_proxy(tmp_path):
     with pytest.raises(ValueError):
         await proxy.call("not_declared", {})
     await h.apply(h.plan_disable("companion_a", "provider").plan_id)
+    await h.event_bus.drain()
     assert h.is_active("companion_a", "consumer")
     assert any(
         e.name == "plugin.disabled" and e.payload["plugin_id"] == "provider"

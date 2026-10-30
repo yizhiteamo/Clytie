@@ -136,7 +136,16 @@ def file_lock(path, owner, log=None):
         os.write(descriptor, value)
         os.ftruncate(descriptor, len(value))
         os.fsync(descriptor)
-        yield
+
+        def update_metadata(**fields):
+            owner.update(fields)
+            os.lseek(descriptor, 1, os.SEEK_SET)
+            data = canonical(owner)
+            os.write(descriptor, data)
+            os.ftruncate(descriptor, 1 + len(data))
+            os.fsync(descriptor)
+
+        yield update_metadata
     finally:
         try:
             if locked:

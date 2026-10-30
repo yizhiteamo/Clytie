@@ -14,6 +14,7 @@ from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import MemoryRecord
 
 from . import origins
+from .errors import MemoryStartupError
 
 BASIS = {"observed": 0, "owner_stated": 1, "owner_confirmed": 2}
 
@@ -66,10 +67,13 @@ class MemoryStore:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             self.db = sqlite3.connect(":memory:" if transient else self.path, isolation_level=None)
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version < 0 or version > 2:
                 self.db.close()
-                raise ValueError("memory schema too new")
+                raise MemoryStartupError("memory schema too new")
             if version == 0:
+                if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone():
+                    self.db.close()
+                    raise MemoryStartupError("incomplete memory schema")
                 self.db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -100,13 +104,26 @@ class MemoryStore:
         self.db.row_factory = sqlite3.Row
         if self.db.execute("PRAGMA user_version").fetchone()[0] > 2:
             self.db.close()
-            raise ValueError("memory schema too new")
+            raise MemoryStartupError("memory schema too new")
 
         if self.db.execute("PRAGMA user_version").fetchone()[0] == 2 and any(
-            not self.has_table(table) for table in origins.TABLES
+            not self.has_table(table)
+            for table in (
+                *origins.TABLES,
+                "metadata",
+                "records",
+                "revisions",
+                "audit",
+                "keywords",
+                "vectors",
+                "imports",
+                "foreign_revisions",
+                "recollect_progress",
+                "fade",
+            )
         ):
             self.db.close()
-            raise ValueError("incomplete memory schema")
+            raise MemoryStartupError("incomplete memory schema")
 
     def has_table(self, name):
         return (

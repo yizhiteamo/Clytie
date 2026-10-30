@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
 from .cancellation import CancelToken
+from .plugin import PluginUnavailable
 from .types import ChannelFeatures, DeliveryIntent, EventEnvelope, Receipt
 
 
@@ -20,3 +21,14 @@ class Channel(Protocol):
     async def react(self, intent: DeliveryIntent, cancel: CancelToken) -> Receipt: ...
 
     def features(self) -> ChannelFeatures: ...
+
+
+class ChannelUnavailable(PluginUnavailable):
+    """平台连接阶段的结构化失败。"""
+
+
+def channel_state(channel):
+    """兼容没有实现可选状态查询的旧插件；不探测网络。"""
+    from .types import ChannelState
+
+    return channel.state() if callable(getattr(channel, "state", None)) else ChannelState()

@@ -163,6 +163,12 @@ async def assert_channel_contract(
     *,
     expected_events: Sequence[EventEnvelope] = (),
 ) -> None:
+    from clytie.sdk.channel import channel_state
+    from clytie.sdk.types import ChannelState
+
+    state = channel_state(channel)
+    assert isinstance(state, ChannelState)
+    assert_roundtrip(state)
     assert await channel.connect() is None
     try:
         features = channel.features()

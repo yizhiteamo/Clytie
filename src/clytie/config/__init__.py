@@ -102,6 +102,8 @@ class HomeReport:
     ledger_notices: tuple[Mapping[str, Any], ...] = ()
     dialogue_notices: tuple[Mapping[str, Any], ...] = ()
 
+    global_errors: tuple[ConfigIssue, ...] = ()
+
     @property
     def valid(self) -> bool:
         return self.exists and not self.errors
@@ -120,6 +122,7 @@ class HomeReport:
             "valid": self.valid,
             "companions": thaw(self.companions),
             "errors": [error.to_dict() for error in self.errors],
+            "global_errors": [error.to_dict() for error in self.global_errors],
             "failed_plugin_state": thaw(self.failed_plugin_state),
         }
 
@@ -229,17 +232,26 @@ class _Reader:
         file: Path,
         prefix: tuple[Any, ...] = (),
         origins: dict[str, tuple[Path, tuple[Any, ...]]] | None = None,
+        *,
+        global_origins: list[tuple[Path, tuple[Any, ...]]] | None = None,
+        global_errors: list[ConfigIssue] | None = None,
     ) -> None:
         def emit(parts: tuple[Any, ...], expected: str, actual: Any) -> None:
             target, location = file, prefix + parts
+            selected_origin = None
             if origins:
                 for length in range(len(parts), -1, -1):
                     origin = origins.get(_pointer(parts[:length]))
                     if origin:
+                        selected_origin = origin
                         target, base = origin
                         location = base + parts[length:]
                         break
             self.issue(target, location, expected, actual)
+            if global_errors is not None and any(
+                selected_origin is origin for origin in (global_origins or ())
+            ):
+                global_errors.append(self.errors[-1])
 
         try:
             validator = Draft202012Validator(
@@ -429,6 +441,21 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
     defaults, _ = _default_config(reader.schemas["instance"]["properties"]["limits"], instance_file)
     if isinstance(instance.get("limits", {}), dict):
         instance["limits"] = thaw(deep_merge(defaults, instance.get("limits", {})))
+    for key in ("supervisor", "notify"):
+        defaults, _ = _default_config(reader.schemas["instance"]["properties"][key], instance_file)
+        if isinstance(instance.get(key, {}), dict):
+            instance[key] = thaw(deep_merge(defaults, instance.get(key, {})))
+    supervisor = instance.get("supervisor", {})
+    if isinstance(supervisor, dict):
+        heartbeat = supervisor.get("heartbeat_seconds", 5)
+        hang = supervisor.get("hang_seconds", 30)
+        if isinstance(heartbeat, int) and isinstance(hang, int) and hang <= 2 * heartbeat:
+            reader.issue(
+                instance_file,
+                ("supervisor", "hang_seconds"),
+                "greater than twice heartbeat_seconds",
+                hang,
+            )
     try:
         timezone = instance.get("timezone")
         if isinstance(timezone, str):
@@ -520,6 +547,10 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             instance["test_conversation"],
         )
     instance_errors = len(reader.errors)
+    global_errors = list(reader.errors)
+    manifest_users = {}
+    manifest_errors = {}
+    current_companion = None
     manifests: dict[str, tuple[dict[str, Any] | None, Path, str]] = {}
 
     def manifest(
@@ -534,8 +565,10 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         ):
             reader.issue(source, position, "plugin id without path separators", plugin_id)
             return None, source, "invalid"
+        manifest_users.setdefault(plugin_id, set()).add(current_companion)
         if plugin_id in manifests:
             return manifests[plugin_id]
+        manifest_start = len(reader.errors)
         bases = ([root / "plugins"] if root is not None else []) + [directory / "plugins"]
         candidates = [base / plugin_id / "plugin.json" for base in bases]
         available = [path for path in candidates if path.is_file()]
@@ -585,6 +618,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                             data["config"]["default"],
                         )
             result = (data, file, "found" if data and len(reader.errors) == start else "invalid")
+        manifest_errors[plugin_id] = tuple(reader.errors[manifest_start:])
         manifests[plugin_id] = result
         return result
 
@@ -594,6 +628,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         instance.get("companions") if isinstance(instance.get("companions"), list) else []
     )
     for companion_id in companion_ids:
+        current_companion = companion_id
         start = len(reader.errors)
         companion_dir = _safe_child(directory / "companions", companion_id)
         if (
@@ -809,6 +844,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                         reader.issue(file, position, "account channel matches channel plugin", ref)
                     if ref in account_users and account_users[ref] != companion_id:
                         reader.issue(file, position, "account used by only one companion", ref)
+                        global_errors.append(reader.errors[-1])
                         for previous_index, previous in enumerate(statuses):
                             if previous["id"] == account_users[ref]:
                                 statuses[previous_index] = freeze({**previous, "valid": False})
@@ -908,9 +944,26 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             merged_for_companion[plugin_id] = base_merged
             if kind != "plugins" and isinstance(inline, dict):
                 overrides.append((inline, file, position + ("config",)))
-            _merge_origins(overrides, origins)
+            global_origins = []
+            for override in overrides:
+                previous_origins = list(origins.values())
+                _merge_origins([override], origins)
+                if override[0] is instance_config:
+                    global_origins.extend(
+                        value
+                        for value in origins.values()
+                        if not any(value is old for old in previous_origins)
+                    )
             merged = deep_merge(*(layer for layer, _, _ in layers_to_merge + overrides))
-            reader.validate(thaw(merged), schema, plugin_file, ("config", "default"), origins)
+            reader.validate(
+                thaw(merged),
+                schema,
+                plugin_file,
+                ("config", "default"),
+                origins,
+                global_origins=global_origins,
+                global_errors=global_errors,
+            )
             if kind == "recollect_model":
                 recollect_model_config = merged
             elif kind == "model":
@@ -937,6 +990,22 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             )
         )
         statuses.append(freeze(status))
+    current_companion = None
+    notify_start = len(reader.errors)
+    notify = instance.get("notify", {})
+    notify_ids = notify.get("plugins", []) if isinstance(notify, dict) else []
+    for index, pid in enumerate(notify_ids if isinstance(notify_ids, list) else []):
+        if not isinstance(pid, str):
+            continue
+        data, file, state = manifest(pid, instance_file, ("notify", "plugins", index))
+        if data is None or "notifier" not in data.get("contributes", {}):
+            reader.issue(
+                instance_file, ("notify", "plugins", index), "plugin declaring notifier", pid
+            )
+    global_errors.extend(reader.errors[notify_start:])
+    for pid, users in manifest_users.items():
+        if len(users) > 1 or None in users:
+            global_errors.extend(e for e in manifest_errors.get(pid, ()) if e not in global_errors)
     return HomeReport(
         str(directory),
         True,
@@ -944,6 +1013,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         tuple(reader.errors),
         freeze(instance),
         freeze(configurations),
+        global_errors=tuple(global_errors),
     )
 
 

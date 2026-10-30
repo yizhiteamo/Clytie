@@ -20,8 +20,11 @@ class EventBus:
         self.capacity, self.timeout = capacity, timeout
         self.queues, self.workers = defaultdict(deque), {}
         self.dropped = 0
+        self.closed = False
 
     def publish(self, cid, event):
+        if self.closed:
+            return False
         depth = _depth.get() + 1
         if depth > 8 or len(self.queues[cid]) >= self.capacity:
             self.dropped += 1
@@ -42,12 +45,20 @@ class EventBus:
                 try:
                     for callback in tuple(self.subscribers(cid, event)):
                         try:
-                            await timed(callback(event), self.clock, self.timeout)
-                        except (Exception, asyncio.CancelledError) as exc:
+                            # Child cancellation is a value; cancelling the dispatcher
+                            # cancels gather itself and must propagate.
+                            outcomes = await asyncio.gather(
+                                timed(callback(event), self.clock, self.timeout),
+                                return_exceptions=True,
+                            )
+                            error = outcomes[0]
+                        except Exception as exc:
+                            error = exc
+                        if isinstance(error, BaseException):
                             self.log.warning(
                                 "event.subscriber_failed",
                                 companion_id=cid,
-                                error=type(exc).__name__,
+                                error=type(error).__name__,
                             )
                 finally:
                     _depth.reset(token)
@@ -57,3 +68,11 @@ class EventBus:
     async def drain(self):
         while self.workers:
             await asyncio.gather(*tuple(self.workers.values()))
+
+    async def close(self):
+        self.closed = True
+        workers = tuple(self.workers.values())
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        self.queues.clear()

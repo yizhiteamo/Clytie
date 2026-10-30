@@ -239,3 +239,23 @@ python -m clytie status [--home PATH] [--json]
 
 
 Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 三项完全相同的重复会话校验失败，错误指出配置文件与重复会话字段；群聊与私聊 platform_id 相同时可按 kind 分别对应。逻辑 ID 和平台群名称不参与身份。
+
+## A4.1 守护进程与通知配置
+
+全局配置 `clytie.local.yaml` 新增以下字段，全部可选；未知字段报错，与现有规则相同：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `supervisor.heartbeat_seconds` | 整数 1–60（5） |
+| `supervisor.startup_seconds` | 整数 30–3600（300）；只计 starting 阶段，不计迁移 |
+| `supervisor.hang_seconds` | 整数 10–600（30），必须大于心跳间隔的 2 倍 |
+| `supervisor.restart.backoff_seconds` | 正整数列表，1–10 项（`[10, 30, 60, 120, 300]`） |
+| `supervisor.restart.max_failures` | 整数 1–100（5） |
+| `supervisor.restart.stable_seconds` | 整数 60–86,400（600） |
+| `supervisor.stop.delivery_wait_seconds` | 整数 0–600（30） |
+| `supervisor.stop.task_mode` | `cancel` \| `wait`（`cancel`） |
+| `supervisor.stop.timeout_seconds` | 整数 10–3600（120） |
+| `notify.plugins` | 插件 id 列表（空）；只能是声明了 `notifier` 的插件 |
+| `notify.cooldown_hours` | 整数 1–168（6） |
+
+插件清单的 `notifier` 新增可选字段 `outward: bool`（`false`）。
