@@ -130,6 +130,7 @@ class PluginHost(MigrationMixin):
         self.runtimes = {}
         self.settings, self.private_scenes, self.states = {}, {}, {}
         self.unit_configs, self.identities = {}, {}
+        self.recollection_models = {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
         self.operations = Operations(self.home, self.log, self.clock)
@@ -195,6 +196,15 @@ class PluginHost(MigrationMixin):
                     self.unit_configs.pop(old_key)
             model = config["model"]
             self.unit_configs[cid, model["plugin"]] = [{"role": "model", "config": result["model"]}]
+            recollect_model = config.get("memory", {}).get("recollect", {}).get("model")
+            if recollect_model:
+                self.unit_configs.setdefault((cid, recollect_model["plugin"]), []).append(
+                    {
+                        "role": "model",
+                        "account": "recollect_model",
+                        "config": result["recollect_model"],
+                    }
+                )
             for index, channel in enumerate(config["channels"]):
                 pid, ref = channel["plugin"], channel["account"]
                 self.unit_configs.setdefault((cid, pid), []).append(
@@ -231,6 +241,14 @@ class PluginHost(MigrationMixin):
                 instance=instance,
             )
         except BaseException:
+            lock.__exit__(None, None, None)
+            raise
+        from clytie.memory.migration import migrate
+
+        try:
+            migrate(store, self.home, companion_id, self.log)
+        except BaseException:
+            store.close()
             lock.__exit__(None, None, None)
             raise
         self.memory_resources[companion_id] = (store, lock)
@@ -527,6 +545,8 @@ class PluginHost(MigrationMixin):
                 runtime.units.append(unit)
                 unit.unit_role, unit.account_ref = layout["role"], layout.get("account")
                 backends = dict(self.backends(*key))
+                if key in self.recollection_models:
+                    backends["model"] = self.recollection_models[key]
                 if "memory" not in backends and (
                     key[0] in self.memory_config or key[0] in self.memory_resources
                 ):
@@ -836,7 +856,7 @@ class PluginHost(MigrationMixin):
                 return fallback
             if point in {"context_section", "event_subscriber", "schedule"}:
                 return None
-            if point in {"memory.retriever", "memory.consolidator"}:
+            if point == "memory.retriever":
                 return []
             if point == "model" and method == "quota":
                 return "unknown"

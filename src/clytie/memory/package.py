@@ -2,11 +2,13 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 from uuid import uuid4
@@ -32,6 +34,15 @@ TABLES = {
     "foreign_revisions": "package TEXT, record_id TEXT, revision INTEGER, data TEXT, "
     "PRIMARY KEY(package,record_id,revision)",
 }
+
+
+FADE_COLUMNS = (
+    "record_id TEXT PRIMARY KEY, last_recalled_at TEXT NOT NULL, half_life_days REAL NOT NULL"
+)
+
+
+def export_tables(version):
+    return {**TABLES, **({"fade": FADE_COLUMNS} if version == 3 else {})}
 
 
 @contextmanager
@@ -65,12 +76,25 @@ def _snapshot(store, path):
     try:
         output.execute("PRAGMA journal_mode=DELETE")
         store.db.backup(source)
-        for table, columns in TABLES.items():
+        for table, columns in export_tables(3).items():
             output.execute(f"CREATE TABLE {table}({columns})")
-            rows = source.execute(f"SELECT * FROM {table}").fetchall()
+            rows = (
+                source.execute(f"SELECT * FROM {table}").fetchall()
+                if store.has_table(table)
+                else []
+            )
             if rows:
                 placeholders = ",".join("?" for _ in rows[0])
                 output.executemany(f"INSERT INTO {table} VALUES({placeholders})", rows)
+        from .fade import eligible, state
+
+        for record in store.all_records():
+            if eligible(store, record):
+                at, half = state(store, record)
+                output.execute(
+                    "INSERT INTO fade SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM fade WHERE record_id=?)",
+                    (record.record_id, at.isoformat(), half, record.record_id),
+                )
         output.commit()
         return path.read_bytes()
     finally:
@@ -78,12 +102,12 @@ def _snapshot(store, path):
         output.close()
 
 
-def open_database(data, home, companion_id):
+def open_database(data, home, companion_id, version=3):
     with temporary_database(home, companion_id, "import") as path:
         path.write_bytes(data)
         connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
-            _validate_database(connection)
+            _validate_database(connection, version)
             result = sqlite3.connect(":memory:")
             try:
                 connection.backup(result)
@@ -98,14 +122,15 @@ def open_database(data, home, companion_id):
     return result
 
 
-def _validate_database(connection):
+def _validate_database(connection, version):
+    tables = export_tables(version)
     try:
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA query_only=ON")
         schema = connection.execute(
             "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
         ).fetchall()
-        if sorted(schema) != sorted((name, "table") for name in TABLES):
+        if sorted(schema) != sorted((name, "table") for name in tables):
             raise PackageError("记忆包包含非预期的数据库对象")
         if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
             raise PackageError("记忆数据库校验失败")
@@ -113,7 +138,7 @@ def _validate_database(connection):
         # 在接触数据前逐表核对列，绝不执行包中的 SQL。
         expected = sqlite3.connect(":memory:")
         try:
-            for table, columns in TABLES.items():
+            for table, columns in tables.items():
                 expected.execute(f"CREATE TABLE {table}({columns})")
                 names = [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
                 if names != [row[1] for row in expected.execute(f"PRAGMA table_info({table})")]:
@@ -143,6 +168,18 @@ def _validate_database(connection):
             records[key].model_dump_json() != history[key][-1]["data"] for key in records
         ):
             raise PackageError("记忆当前版本与修订链不一致")
+        if version == 3:
+            for row in connection.execute("SELECT * FROM fade"):
+                at = datetime.fromisoformat(row["last_recalled_at"])
+                half = row["half_life_days"]
+                if (
+                    row["record_id"] not in records
+                    or at.tzinfo is None
+                    or not isinstance(half, (float, int))
+                    or not math.isfinite(half)
+                    or half <= 0
+                ):
+                    raise PackageError("淡化状态无效")
         return connection
     except BaseException:
         connection.close()
@@ -163,7 +200,7 @@ def payload(store, companion_id, home):
             raise ValueError("还没有记忆，不需要导出")
         uid = json.loads(uid_row[0])
         manifest = {
-            "version": 2,
+            "version": 3,
             "clytie_version": clytie_version,
             "companion_uid": uid,
             "companion_id": companion_id,
@@ -192,7 +229,7 @@ def unpack(raw, home, companion_id):
             raise PackageError("记忆包文件表不匹配")
         item, manifest = value["files"]["memory.sqlite3"], value["manifest"]
         format_version = manifest.get("version")
-        if type(format_version) is not int or format_version not in {1, 2}:
+        if type(format_version) is not int or format_version not in {1, 2, 3}:
             raise PackageError("不支持的记忆包清单版本")
         fields = {
             "version",
@@ -201,11 +238,11 @@ def unpack(raw, home, companion_id):
             "record_count",
             "exported_at",
         }
-        if format_version == 2:
+        if format_version >= 2:
             fields.add("clytie_version")
         if set(manifest) != fields:
             raise PackageError("记忆包清单字段不匹配")
-        if format_version == 2:
+        if format_version >= 2:
             if not isinstance(manifest["clytie_version"], str):
                 raise PackageError("Clytie 版本格式无效")
             Version(manifest["clytie_version"])
@@ -217,7 +254,7 @@ def unpack(raw, home, companion_id):
         data = un64(item["data"])
         if hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise PackageError("记忆包文件校验失败")
-        db = open_database(data, home, companion_id)
+        db = open_database(data, home, companion_id, format_version)
         try:
             uid = db.execute("SELECT value FROM metadata WHERE key='companion_uid'").fetchone()
             if (

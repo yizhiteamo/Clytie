@@ -18,7 +18,7 @@ from collections.abc import (
     MutableSequence,
     Sequence,
 )
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -357,20 +357,16 @@ async def assert_reranker_contract(reranker: Any, query: str, records: list[Memo
     await assert_task_cancellation(lambda: reranker.rerank(query, records, CancelToken()))
 
 
-async def assert_consolidator_contract(
-    consolidator: Any, window_start: datetime, window_end: datetime, reader: object
-) -> None:
-    result = await consolidator.run(window_start, window_end, reader, CancelToken())
+async def assert_consolidator_contract(consolidator: Any, window: object, reader: object) -> None:
+    from clytie.sdk.types import RecollectItem
+
+    result = await consolidator.run(window, reader, CancelToken())
     assert isinstance(result, list)
-    for record in result:
-        assert isinstance(record, MemoryRecord) and record.kind == "episode"
-        assert_roundtrip(record)
-    await assert_token_cancellation(
-        lambda cancel: consolidator.run(window_start, window_end, reader, cancel)
-    )
-    await assert_task_cancellation(
-        lambda: consolidator.run(window_start, window_end, reader, CancelToken())
-    )
+    for item in result:
+        assert isinstance(item, RecollectItem)
+        assert_roundtrip(item)
+    await assert_token_cancellation(lambda cancel: consolidator.run(window, reader, cancel))
+    await assert_task_cancellation(lambda: consolidator.run(window, reader, CancelToken()))
 
 
 async def assert_notifier_contract(notifier: Any, notice: Notice) -> None:

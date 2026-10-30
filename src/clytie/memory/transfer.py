@@ -22,11 +22,14 @@ from .store import BASIS, canonical, content_hash, fingerprint
 
 
 def database_fingerprint(store):
-    tables = (*TABLES, "keywords", "vectors")
+    tables = (*TABLES, "keywords", "vectors", "fade", "recollect_progress")
     return fingerprint(
         {
             name: sorted(
-                [list(row) for row in store.db.execute(f"SELECT * FROM {name}")], key=canonical
+                [list(row) for row in store.db.execute(f"SELECT * FROM {name}")]
+                if store.has_table(name)
+                else [],
+                key=canonical,
             )
             for name in tables
         }
@@ -175,7 +178,12 @@ class Transfers:
         else:
             raw = decrypt(source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code)
             manifest, db = unpack(raw, self.home, self.cid)
+            fades = {}
             try:
+                if manifest["version"] == 3:
+                    fades = {
+                        row["record_id"]: dict(row) for row in db.execute("SELECT * FROM fade")
+                    }
                 records = {
                     row["id"]: MemoryRecord.model_validate_json(row["data"])
                     for row in db.execute("SELECT * FROM records")
@@ -200,6 +208,7 @@ class Transfers:
             hash=before,
             proposals=proposals,
             foreign_history=foreign_history,
+            fade=fades if not importer else {},
         )
 
     def _normalized(self, record):
@@ -345,6 +354,12 @@ class Transfers:
             warnings=["来源包未记录 Clytie 版本（版本未知，旧清单格式）"]
             if not importer and loaded["manifest"]["version"] == 1
             else [],
+            repeated_merge_count=len(rows)
+            if mode == "merge" and loaded["hash"] in self.store.meta("merged_packages", [])
+            else 0,
+            repeated_merge_message=f"这个包已经合并过，{len(rows)} 条按上次的选择保留"
+            if mode == "merge" and loaded["hash"] in self.store.meta("merged_packages", [])
+            else None,
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )
@@ -450,6 +465,9 @@ class Transfers:
             if any(r["action"] == "conflict" and r["choice"] is None for r in rows):
                 raise ValueError("冲突尚未选择")
             self.store.materialize()
+            from .migration import migrate
+
+            migrate(self.store, self.home, self.cid, self.log)
             backup = self._snapshot()
             import_id, changes = uuid4().hex, {}
             with self.store.transaction():
@@ -505,6 +523,39 @@ class Transfers:
                         "before": previous.model_dump(mode="json") if previous else None,
                         "after": self.store.get_raw(record_id).model_dump(mode="json"),
                     }
+                from .fade import state as fade_state
+
+                for row in rows:
+                    rid = row["record_id"]
+                    current = self.store.get_raw(rid)
+                    if current is None:
+                        continue
+                    remote = loaded["fade"].get(rid)
+                    if remote:
+                        at, half = fade_state(self.store, current)
+                        if plan["mode"] == "merge":
+                            at = max(at, datetime.fromisoformat(remote["last_recalled_at"]))
+                            half = max(half, remote["half_life_days"])
+                        else:
+                            at, half = (
+                                datetime.fromisoformat(remote["last_recalled_at"]),
+                                remote["half_life_days"],
+                            )
+                        self.store.db.execute(
+                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)", (rid, at.isoformat(), half)
+                        )
+                    elif rid in changes:
+                        self.store.db.execute(
+                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)",
+                            (
+                                rid,
+                                self.store.clock.now().isoformat(),
+                                self.store.config.get("memory", {})
+                                .get("fade", {})
+                                .get("half_life_days", 30),
+                            ),
+                        )
+                self.store.db.execute("DELETE FROM recollect_progress")
                 missing = set(self.store.meta("missing_origins", []))
                 missing.update(
                     key
@@ -611,6 +662,9 @@ class Transfers:
         return preview
 
     def _apply_undo(self, plan):
+        from .migration import migrate
+
+        migrate(self.store, self.home, self.cid, self.log)
         _, rows, targets = self._undo_data(plan["undo"], plan["choices"])
         if rows != plan["records"] or any(
             r["action"] == "conflict" and r["choice"] is None for r in rows
@@ -630,6 +684,7 @@ class Transfers:
                     "before": current.model_dump(mode="json"),
                     "after": target.model_dump(mode="json"),
                 }
+            self.store.db.execute("DELETE FROM recollect_progress")
             self._record_import(import_id, changes, undo=plan["undo"], snapshot=backup.name)
         self._retention()
         return import_id

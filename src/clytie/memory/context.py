@@ -9,6 +9,7 @@ from datetime import datetime
 from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import ChatMessage, TextPart, ToolResult, ToolSpec
 
+from .fade import reinforce
 from .retrieval import Retrieval
 from .store import query_tokens, tokens
 
@@ -116,7 +117,8 @@ class MemoryContext:
             f"[记忆{len(session.references) + 1}]",
         )
         session.references[label] = (record.record_id, record.revision)
-        return f"{label} {record.content}（{when}）"
+        suffix = "很久以前的事，记不太清了" if record.decay.frozen else ""
+        return f"{label} {record.content}（{when}）{suffix}"
 
     async def build(self, trace, conversation, query):
         session = self.session(trace)
@@ -128,7 +130,11 @@ class MemoryContext:
         scene, cid = conversation.scene, conversation.conversation_id
         if scene == "stranger_private":
             return []
-        visible = self.store.project(scene, cid)
+        try:
+            visible = self.store.project(scene, cid)
+        except Exception:
+            self.log.warning("memory.projection_failed")
+            return []
         if not visible:
             return [ChatMessage(role="system", parts=[TextPart(text="你们之间还没有记住的事")])]
         config = self.store.config.get("memory", {})
@@ -162,12 +168,25 @@ class MemoryContext:
         except Exception:
             self.log.warning("memory.retrieval_failed")
             recalled = []
+        contextual = [
+            r
+            for r in visible
+            if not r.decay.frozen
+            and (r.kind == "profile" or (r.kind == "jargon" and r.scope == cid))
+        ]
+        recalled = [*contextual, *recalled]
         used, count = 0, 0
         for record in recalled:
             if record.record_id in selected or count >= config.get("recall_limit", 10):
                 continue
             previous = dict(session.references)
             label = self.label(record, session)
+            if record.kind == "jargon":
+                label += (
+                    "（这个群里的说法）"
+                    if record.scope == cid
+                    else "（群里的说法，听懂就好，不主动用）"
+                )
             if used + len(label) > config.get("recall_chars", 3000):
                 session.references = previous
                 continue
@@ -175,9 +194,17 @@ class MemoryContext:
             selected.add(record.record_id)
             used += len(label)
             count += 1
+        reinforce(self.store, [r for r in visible if r.record_id in selected])
         return [ChatMessage(role="system", parts=[TextPart(text="记忆：\n" + "\n".join(lines))])]
 
     def guard(self, text, scene):
+        try:
+            return self._guard(text, scene)
+        except Exception:
+            self.log.warning("memory.guard_failed")
+            return True
+
+    def _guard(self, text, scene):
         if scene in self.store.config.get("memory", {}).get("private_scenes", ["owner_private"]):
             return False
         value = normalize_leak(text)
@@ -258,8 +285,11 @@ class MemoryContext:
                 if session.recalls >= 3:
                     raise ValueError("本次回复的回想次数已用完")
                 session.recalls += 1
-                rows = await self.retrieval.search(args["query"], **scope, limit=10, cancel=cancel)
+                rows = await self.retrieval.search(
+                    args["query"], **scope, limit=10, cancel=cancel, include_frozen=True
+                )
                 lines = [self.label(r, session) for r in rows]
+                reinforce(self.store, rows)
                 lines.extend(self.task_recall(args["query"], conversation))
                 content = "\n".join(lines) or "记忆和任务记录里都没有找到相关的事"
             else:

@@ -18,7 +18,6 @@ from clytie.sdk.types import (
     Denial,
     EventEnvelope,
     MemoryHit,
-    MemoryRecord,
     ModelFeatures,
     ModelTurn,
     Plan,
@@ -104,7 +103,7 @@ def assemble(runtime, *, role=None, primary=True):
             continue
         add(
             point,
-            runtime.account_ref if point == "channel" and runtime.account_ref else point,
+            runtime.account_ref if point in {"channel", "model"} and runtime.account_ref else point,
             contributions[point],
             True,
         )
@@ -182,7 +181,9 @@ def validate_result(point, method, result):
         if result != QUOTA_UNKNOWN and not isinstance(result, QuotaSnapshot):
             raise TypeError("quota must be a snapshot or QUOTA_UNKNOWN")
     if point in {"memory.retriever", "memory.consolidator"}:
-        cls = MemoryHit if point == "memory.retriever" else MemoryRecord
+        from clytie.sdk.types import RecollectItem
+
+        cls = MemoryHit if point == "memory.retriever" else RecollectItem
         if not isinstance(result, list) or not all(isinstance(r, cls) for r in result):
             raise TypeError("invalid memory extension result")
     if point == "channel" and method == "events":

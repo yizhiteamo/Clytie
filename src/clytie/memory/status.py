@@ -1,5 +1,6 @@
 """只读记忆状态，不启动插件，不打印任何记忆内容。"""
 
+import json
 from pathlib import Path
 
 from clytie.config import thaw
@@ -28,6 +29,32 @@ def notices(report, *, clock):
                 instance=thaw(report.instance),
                 readonly=True,
             )
+            failures = store.meta("recollect_semantic_failures", 0)
+            if failures:
+                result.append(
+                    dict(
+                        companion_id=cid,
+                        code="recollect_semantic_unavailable",
+                        count=failures,
+                        message=f"有 {failures} 次回想没能做语义比对",
+                    )
+                )
+            if store.has_table("recollect_progress"):
+                for row in store.db.execute(
+                    "SELECT * FROM recollect_progress WHERE conversation_id != ?", ("*",)
+                ):
+                    progress = json.loads(row["data"])
+                    result.append(
+                        dict(
+                            companion_id=cid,
+                            code="recollect_progress",
+                            conversation_id=row["conversation_id"],
+                            **{
+                                key: progress.get(key)
+                                for key in ("at", "written", "dropped", "failures")
+                            },
+                        )
+                    )
             active = [r for r in store.all_records() if not r.retracted]
             missing = len({r.record_id for r in active} & set(store.meta("missing_origins", [])))
             if missing:

@@ -178,7 +178,9 @@ class Retrieval:
             with self.store.transaction():
                 self.store.set_meta("embedder_unavailable", False)
 
-    async def search(self, query, scene, conversation_id, *, limit=None, cancel=None):
+    async def search(
+        self, query, scene, conversation_id, *, limit=None, cancel=None, include_frozen=False
+    ):
         import json
 
         from clytie.plugin_host.support import timed
@@ -201,6 +203,7 @@ class Retrieval:
                 if row[0] in by_id:
                     lexical_scores[row[0]] = lexical_scores.get(row[0], 0) + row[1]
         routes = [sorted(lexical_scores.items(), key=lambda pair: (-pair[1], pair[0]))]
+        semantic_ids = set()
         if self.embedder is None:
             self.warn()
         else:
@@ -218,6 +221,7 @@ class Retrieval:
                         score = cosine(q, vector(json.loads(row["vector"])))
                         if score > config.get("semantic_min_similarity", 0.5):
                             scores.append((record.record_id, score))
+                semantic_ids = {key for key, _ in scores}
                 routes.append(sorted(scores, key=lambda p: (-p[1], p[0])))
                 self.warnings = []
                 if self.store.meta("embedder_unavailable", False):
@@ -233,29 +237,59 @@ class Retrieval:
                     rank = position
                 previous = score
                 fused[key] = fused.get(key, 0.0) + 1 / (60 + rank)
-        ranked = sorted(fused, key=lambda k: (-fused[k], -BASIS[by_id[k].basis], k))
-        if self.reranker and ranked:
-            candidates = ranked[: config.get("rerank_candidates", 30)]
+        factor = {key: 0.5 + 0.5 * by_id[key].decay.weight for key in fused}
+
+        def ordered(keys, scores):
+            return sorted(
+                keys,
+                key=lambda k: (
+                    -scores[k],
+                    -BASIS[by_id[k].basis],
+                    -by_id[k].updated_at.timestamp(),
+                    k,
+                ),
+            )
+
+        raw_order = ordered(fused, fused)
+        adjusted = {key: score * factor[key] for key, score in fused.items()}
+        ranked = ordered(fused, adjusted)
+        if self.reranker and raw_order:
+            candidates = raw_order[: config.get("rerank_candidates", 30)]
             try:
-                scores = await timed(
-                    self.reranker.rerank(query, [by_id[k] for k in candidates], cancel),
-                    self.clock,
-                    30,
+                scores = vector(
+                    await timed(
+                        self.reranker.rerank(query, [by_id[k] for k in candidates], cancel),
+                        self.clock,
+                        30,
+                    )
                 )
-                scores = vector(scores)
                 if len(scores) != len(candidates):
                     raise ValueError("invalid reranker result")
-                ranked = (
-                    sorted(
-                        candidates,
-                        key=lambda k: (-scores[candidates.index(k)], -BASIS[by_id[k].basis], k),
-                    )
-                    + ranked[len(candidates) :]
+                raw = dict(zip(candidates, scores))
+                ranks, previous, rank = {}, None, 0
+                for position, key in enumerate(ordered(candidates, raw), 1):
+                    if raw[key] != previous:
+                        rank = position
+                    previous = raw[key]
+                    ranks[key] = factor[key] / (60 + rank)
+                ranked = ordered(candidates, ranks) + ordered(
+                    raw_order[len(candidates) :], adjusted
                 )
             except Exception:
                 pass
         cancel.raise_if_cancelled()
+        active = [k for k in ranked if not by_id[k].decay.frozen]
+        frozen = (
+            [
+                k
+                for k in ranked
+                if by_id[k].decay.frozen and k in lexical_scores and k in semantic_ids
+            ][:3]
+            if include_frozen
+            else []
+        )
         return [
             by_id[k]
-            for k in ranked[: limit if limit is not None else config.get("recall_limit", 10)]
+            for k in active[: limit if limit is not None else config.get("recall_limit", 10)]
+            + frozen
         ]

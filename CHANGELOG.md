@@ -1,9 +1,10 @@
 # 变更记录
 
-## A3.4（规格已确认，待实现）
+## 0.7.0（A3.4，待验收）
 
 - Issue #35：撤销内容仅由本体内部比对，窗口只给撤销条数；新增 recollect.retracted_similarity（0–1，默认 0.85）。private_scenes 既有隐私边界不变；永不淡化优先，跨群印象仍会淡。
 
+- 官方插件 SDK 范围同步为 `>=0.7,<0.8`。
 - SDK 0.x 次版本不兼容变更：consolidator 替换旧的四参数签名为 `run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`，新增窗口和候选类型，出处由本体核对；core: 标签保留给本体。
 - 记忆库模式版本加一，新增回想进度与淡化状态表，并提供 A3.3 库迁移及旧快照回归。
 - 导出格式版本加一，增加加密的淡化状态，继续支持旧包；回想进度不导出。具体表结构与版本编码在 ADR 记录。

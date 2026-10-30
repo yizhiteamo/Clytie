@@ -120,6 +120,22 @@ class MemoryAPI:
         finally:
             store.close()
 
+    def thaw_record(self, companion_id, record_id):
+        from clytie.memory.fade import reinforce
+        from clytie.memory.migration import migrate
+        from clytie.memory.transfer import runtime_lock
+
+        with runtime_lock(self.home, companion_id, "memory_thaw"):
+            with self.open(companion_id) as store:
+                record = store.get_raw(record_id)
+                if record is None or record.retracted:
+                    raise ValueError("记忆不存在")
+                migrate(store, self.home, companion_id, None)
+                reinforce(store, [record])
+                with store.transaction():
+                    store.audit("memory.thawed", record_id=record_id)
+                return {"record_id": record_id, "thawed": True}
+
     def export(self, companion_id, out, *, passphrase=None, format="encrypted"):
         with self.open(companion_id) as store:
             return Exports(store, self.home, companion_id).export(

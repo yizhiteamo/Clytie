@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .cancellation import CancelToken
-from .types import ImportCandidate, MemoryHit, MemoryQuery, MemoryRecord
+from .types import (
+    ImportCandidate,
+    MemoryHit,
+    MemoryQuery,
+    MemoryRecord,
+    RecollectItem,
+    RecollectWindow,
+)
 
 
 class CandidateReader(Protocol):
@@ -55,8 +62,7 @@ class Reranker(Protocol):
 class Consolidator(Protocol):
     async def run(
         self,
-        window_start: datetime,
-        window_end: datetime,
+        window: RecollectWindow,
         reader: CandidateReader,
         cancel: CancelToken,
-    ) -> list[MemoryRecord]: ...
+    ) -> list[RecollectItem]: ...

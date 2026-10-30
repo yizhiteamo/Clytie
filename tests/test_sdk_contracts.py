@@ -1,5 +1,4 @@
 import asyncio
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -62,7 +61,6 @@ from clytie.sdk.testing.samples import (
     sample_import_candidate,
     sample_intent,
     sample_invocation,
-    sample_memory,
     sample_query,
     sample_request,
     sample_task_summary,
@@ -172,11 +170,14 @@ async def test_importer_contract_without_reading_source(ctx):
 
 
 async def test_consolidator_contract(ctx):
-    consolidator = FakeConsolidator((sample_memory(ctx.clock, kind="episode"),), ctx)
+    from clytie.sdk.types import RecollectItem, RecollectWindow
+
+    consolidator = FakeConsolidator(
+        (RecollectItem(kind="episode", content="虚构回想", evidence=[1]),), ctx
+    )
     await assert_consolidator_contract(
         consolidator,
-        ctx.clock.now() - timedelta(hours=1),
-        ctx.clock.now(),
+        RecollectWindow(scene="owner_private", conversation_kind="private", messages=[]),
         FakeCandidateReader(),
     )
 
@@ -223,7 +224,6 @@ async def test_running_fake_operations_cancel_without_side_effects(clock, method
 
 
 async def test_running_token_cancellation_on_remaining_fake_interfaces(ctx):
-    now = ctx.clock.now()
     inv = sample_invocation()
     plan = Plan(summary="Fictional plan", heavy=False, data={"call_id": "fake-call"})
     notice = Notice(level="info", title="Fictional", body="Notice", dedupe_key="fake")
@@ -241,7 +241,7 @@ async def test_running_token_cancellation_on_remaining_fake_interfaces(ctx):
         lambda cancel: FakeCapability(ctx).execute(plan, inv, cancel),
         lambda cancel: FakeRetriever(ctx).search(sample_query(), FakeCandidateReader(), cancel),
         import_records,
-        lambda cancel: FakeConsolidator((), ctx).run(now, now, FakeCandidateReader(), cancel),
+        lambda cancel: FakeConsolidator((), ctx).run(None, FakeCandidateReader(), cancel),
         lambda cancel: FakeNotifier(ctx).notify(notice, cancel),
     ]
     for operation in operations:

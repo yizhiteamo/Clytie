@@ -411,3 +411,46 @@ async def test_merge_applies_remote_undo_even_when_content_hash_repeats(homes):
     assert [r[0] for r in target.db.execute("SELECT hash FROM revisions ORDER BY revision")] == [
         r[0] for r in source.db.execute("SELECT hash FROM revisions ORDER BY revision")
     ]
+
+
+async def test_fade_moves_merges_maxima_and_progress_stays_local(homes):
+    from clytie.memory.fade import reinforce, state
+    from clytie.memory.package import payload, unpack
+
+    source, home, _ = homes("fade_source")
+    source.instance["conversations"]["group_a"] = {"kind": "group", "scene": "public_group"}
+    record = source.write(
+        dict(kind="episode", content="虚构群里的纸船", visibility="relationship"),
+        scene="public_group",
+        conversation_id="group_a",
+    )
+    source.clock.advance(86_400)
+    reinforce(source, [record])
+    with source.transaction():
+        source.db.execute(
+            "INSERT INTO recollect_progress VALUES(?,?)", ("group_a", json.dumps({"inbound": 4}))
+        )
+    _, db = unpack(payload(source, "companion_a", home), home, "companion_a")
+    try:
+        assert not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='recollect_progress'"
+        ).fetchone()
+    finally:
+        db.close()
+    target, _, transfers = homes("fade_target")
+    target.instance["conversations"]["group_a"] = {"kind": "group", "scene": "public_group"}
+    await move(transfers, export(source, home))
+    assert state(target, target.get_raw(record.record_id)) == state(source, record)
+    target.clock.advance(3 * 86_400)
+    reinforce(target, [target.get_raw(record.record_id)])
+    later = state(target, target.get_raw(record.record_id))
+    reinforce(source, [record])
+    reinforce(source, [record])
+    path = export(source, home, "second.enc")
+    plan = await transfers.plan(path, mode="merge", passphrase=PASSPHRASE)
+    await transfers.apply(plan["id"], passphrase=PASSPHRASE)
+    assert state(target, target.get_raw(record.record_id)) == (later[0], state(source, record)[1])
+    again = await transfers.plan(path, mode="merge", passphrase=PASSPHRASE)
+    assert again["repeated_merge_count"] == 1
+    assert "按上次的选择保留" in again["repeated_merge_message"]
+    assert not target.db.execute("SELECT * FROM recollect_progress").fetchall()

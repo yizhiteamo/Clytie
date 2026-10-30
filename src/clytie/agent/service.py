@@ -97,7 +97,13 @@ class Agent:
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
         self.model_registration = (
-            None if model is not None else host.registrations(self.cid, "model")[0]
+            None
+            if model is not None
+            else next(
+                r
+                for r in host.registrations(self.cid, "model")
+                if r.plugin_id == config["model"]["plugin"] and r.key == "model"
+            )
         )
         self.model = model or self.model_registration.implementation
         self.features = self.model.features()
@@ -184,6 +190,10 @@ class Agent:
                 if name == "embedder":
                     self.memory.retrieval.embedder_id = pid
         self.rebuild_memory()
+        from clytie.memory.scheduler import Recollector
+
+        self.recollector = Recollector(self)
+        await self.recollector.start()
 
     def track(self, coroutine):
         task = background(coroutine)
@@ -311,6 +321,8 @@ class Agent:
         return specs, "\n".join(lines)
 
     async def receive(self, event):
+        if hasattr(self, "recollector"):
+            self.recollector.activity(event.conversation)
         if event.companion_id != self.cid:
             raise ValueError("wrong companion")
         self.kernel.conversation_scenes[event.conversation.conversation_id] = (
@@ -532,7 +544,32 @@ class Agent:
             cancelled.cancel()
             await asyncio.gather(timer, cancelled, return_exceptions=True)
 
-    async def run(
+    async def run(self, trace, conversation, actor, events, **options):
+        from clytie.memory.presence import bind_presence
+
+        actors = set()
+        if actor is not None and not self.boundary.paused(actor):
+            actors.add(actor.actor_id)
+        for event in events:
+            if event.message is None or self.boundary.paused(event.message.sender):
+                continue
+            actors.add(event.message.sender.actor_id)
+            actors.update(part.actor_id for part in event.message.parts if part.type == "mention")
+            if event.message.reply_to:
+                ref = event.message.reply_to.model_dump(mode="json")
+                for row in self.ledger.rows("inbound"):
+                    msg = row.get("message")
+                    if (
+                        msg
+                        and msg["ref"] == ref
+                        and row.get("reason") != "boundary_paused"
+                        and self.context.visible(row, conversation)
+                    ):
+                        actors.add(msg["sender"]["actor_id"])
+        with bind_presence(conversation.conversation_id, actors):
+            return await self._run(trace, conversation, actor, events, **options)
+
+    async def _run(
         self,
         trace,
         conversation,

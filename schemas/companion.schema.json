@@ -422,13 +422,13 @@
         "max_chars": {
           "type": "integer",
           "minimum": 1000,
-          "maximum": 2e5,
-          "default": 2e4
+          "maximum": 2E+5,
+          "default": 2E+4
         },
         "max_single_message_chars": {
           "type": "integer",
           "minimum": 100,
-          "maximum": 2e4,
+          "maximum": 2E+4,
           "default": 2000
         },
         "material_full_minutes": {
@@ -440,7 +440,7 @@
         "material_budget_chars": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1e5,
+          "maximum": 1E+5,
           "default": 6000
         }
       },
@@ -466,13 +466,13 @@
         "core_chars": {
           "type": "integer",
           "minimum": 200,
-          "maximum": 5e4,
+          "maximum": 5E+4,
           "default": 4000
         },
         "recall_chars": {
           "type": "integer",
           "minimum": 200,
-          "maximum": 5e4,
+          "maximum": 5E+4,
           "default": 3000
         },
         "recall_limit": {
@@ -520,6 +520,116 @@
           ],
           "minLength": 1,
           "default": null
+        },
+        "recollect": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "idle_minutes": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 1440,
+              "default": 30
+            },
+            "daily_limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 12
+            },
+            "window_chars": {
+              "type": "integer",
+              "minimum": 2000,
+              "maximum": 1E+5,
+              "default": 1.2E+4
+            },
+            "max_items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30,
+              "default": 8
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "plugin": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "config": {
+                      "type": "object"
+                    }
+                  },
+                  "patternProperties": {
+                    "^x-": {}
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "plugin",
+                    "config"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "retracted_similarity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.85
+            },
+            "group_visibility": {
+              "enum": [
+                "private",
+                "relationship",
+                "public"
+              ],
+              "default": "relationship"
+            },
+            "consolidator": {
+              "type": "string",
+              "default": "default-consolidator"
+            }
+          }
+        },
+        "fade": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "half_life_days": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30
+            },
+            "reinforce": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 5,
+              "default": 1.5
+            },
+            "max_half_life_days": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 3.65E+4,
+              "default": 365
+            },
+            "freeze_below": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.5,
+              "default": 0.1
+            }
+          }
         }
       },
       "patternProperties": {

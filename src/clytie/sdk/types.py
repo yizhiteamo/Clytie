@@ -705,3 +705,37 @@ CORE_PAYLOAD_TYPES = {
     "plugin.enabled": PluginChangedPayload,
     "plugin.disabled": PluginChangedPayload,
 }
+
+
+class RecollectMessage(SDKModel):
+    number: int = Field(ge=1)
+    speaker: str
+    role: Literal["owner", "self", "peer", "member"]
+    text: str
+    reply_to: int | None = None
+    mentions: FrozenList[str] = Field(default_factory=list)
+
+
+class RecollectRemembered(SDKModel):
+    label: str
+    kind: str
+    content: str
+    visibility: Literal["private", "relationship", "public"]
+
+
+class RecollectWindow(SDKModel):
+    scene: str
+    conversation_kind: Literal["private", "group"]
+    messages: FrozenList[RecollectMessage]
+    remembered: FrozenList[RecollectRemembered] = Field(default_factory=list)
+    retracted_count: int = Field(default=0, ge=0)
+
+
+class RecollectItem(SDKModel):
+    kind: str
+    content: str
+    visibility: Literal["private", "relationship", "public"] | None = None
+    evidence: FrozenList[int]
+    about: str | None = None
+    merges: FrozenList[str] = Field(default_factory=list)
+    with_owner: bool = False

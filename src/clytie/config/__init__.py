@@ -771,6 +771,18 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         model = data.get("model")
         if isinstance(model, dict):
             references.append((model.get("plugin"), ("model",), model.get("config"), "model"))
+        recollect_model = (
+            memory.get("recollect", {}).get("model") if isinstance(memory, dict) else None
+        )
+        if isinstance(recollect_model, dict):
+            references.append(
+                (
+                    recollect_model.get("plugin"),
+                    ("memory", "recollect", "model"),
+                    recollect_model.get("config"),
+                    "recollect_model",
+                )
+            )
         channels = data.get("channels")
         if isinstance(channels, list):
             for index, channel in enumerate(channels):
@@ -796,8 +808,20 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 if isinstance(channel, dict)
             )
         plugin_settings = _entries(data.get("plugins"))
-        for key, point in (("embedder", "embedder"), ("reranker", "memory.reranker")):
-            memory_plugin = memory.get(key) if isinstance(memory, dict) else None
+        for key, point in (
+            ("embedder", "embedder"),
+            ("reranker", "memory.reranker"),
+            ("consolidator", "memory.consolidator"),
+        ):
+            memory_plugin = (
+                memory.get("recollect", {}).get("consolidator")
+                if key == "consolidator"
+                else memory.get(key)
+                if isinstance(memory, dict)
+                else None
+            )
+            if key == "consolidator" and memory_plugin == "default-consolidator":
+                continue
             if memory_plugin is None:
                 continue
             position = ("memory", key)
@@ -812,7 +836,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 declared = (
                     contributes.get("embedder")
                     if key == "embedder"
-                    else contributes.get("memory", {}).get("reranker")
+                    else contributes.get("memory", {}).get(key)
                 )
                 if not declared:
                     reader.issue(file, position, f"plugin implements {point}", memory_plugin)
@@ -827,7 +851,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             (key, ("plugins", key), {}, "plugins") for key in sorted(role_plugins - listed_plugins)
         )
         merged_for_companion: dict[str, Any] = {}
-        model_config = None
+        model_config = recollect_model_config = None
         channel_configs: dict[int, Any] = {}
         for plugin_id, position, inline, kind in references:
             setting = plugin_settings.get(plugin_id, {}) if isinstance(plugin_id, str) else {}
@@ -842,7 +866,9 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 plugin_id, file, position + (("plugin",) if kind != "plugins" else ())
             )
             item = {"id": plugin_id, "status": state}
-            if kind == "model":
+            if kind == "recollect_model":
+                status["plugins"].append(item)
+            elif kind == "model":
                 status[kind] = item
             else:
                 status[kind].append(item)
@@ -874,7 +900,9 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
             _merge_origins(overrides, origins)
             merged = deep_merge(*(layer for layer, _, _ in layers_to_merge + overrides))
             reader.validate(thaw(merged), schema, plugin_file, ("config", "default"), origins)
-            if kind == "model":
+            if kind == "recollect_model":
+                recollect_model_config = merged
+            elif kind == "model":
                 model_config = merged
             elif kind == "channels":
                 channel_configs[position[1]] = merged
@@ -883,6 +911,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 "config": data,
                 "plugins": merged_for_companion,
                 "model": model_config,
+                "recollect_model": recollect_model_config,
                 "channels": channel_configs,
             }
         )

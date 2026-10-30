@@ -63,7 +63,12 @@ class MemoryStore:
             if not transient:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             self.db = sqlite3.connect(":memory:" if transient else self.path, isolation_level=None)
-            self.db.executescript("""
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version > 2:
+                self.db.close()
+                raise ValueError("memory schema too new")
+            if version == 0:
+                self.db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 INSERT OR IGNORE INTO metadata VALUES('generation','0');
@@ -84,9 +89,22 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS foreign_revisions(
                     package TEXT, record_id TEXT, revision INTEGER, data TEXT,
                     PRIMARY KEY(package,record_id,revision));
-                PRAGMA user_version=1;
+                CREATE TABLE recollect_progress(conversation_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+                CREATE TABLE fade(record_id TEXT PRIMARY KEY, last_recalled_at TEXT NOT NULL, half_life_days REAL NOT NULL);
+                PRAGMA user_version=2;
             """)
         self.db.row_factory = sqlite3.Row
+        if self.db.execute("PRAGMA user_version").fetchone()[0] > 2:
+            self.db.close()
+            raise ValueError("memory schema too new")
+
+    def has_table(self, name):
+        return (
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone()
+            is not None
+        )
 
     def materialize(self):
         """仅持有运行锁的 apply 调用；临时计划库在这之前不落盘。"""
@@ -162,6 +180,10 @@ class MemoryStore:
             return False
         if scene in internal:
             return True
+        from .presence import present_actors
+
+        if record.kind == "profile" and "core:profile" in record.tags:
+            return record.subject in present_actors(conversation_id)
         origin = self.instance.get("conversations", {}).get(record.origin_conversation_id)
         if not origin:
             return False
@@ -170,8 +192,12 @@ class MemoryStore:
         )
 
     def project(self, scene, conversation_id, permissions=None):
+        from .fade import projected
+
         return [
-            r for r in self.all_records() if self.visible(r, scene, conversation_id, permissions)
+            projected(self, r)
+            for r in self.all_records()
+            if self.visible(r, scene, conversation_id, permissions)
         ]
 
     def _save(self, record, *, operator, trace=None, import_id=None, reason=None, timestamp=None):
@@ -231,6 +257,9 @@ class MemoryStore:
             for k in ("kind", "content", "visibility", "subject", "scope", "tags")
             if k in data
         }
+        fields["tags"] = [tag for tag in fields.get("tags", []) if not tag.startswith("core:")]
+        if fields.get("kind") == "jargon":
+            fields["scope"] = conversation_id
         fields.update(
             record_id=uuid4().hex,
             revision=1,
@@ -257,6 +286,7 @@ class MemoryStore:
                     getattr(old, k) == getattr(new, k)
                     for k in ("kind", "subject", "visibility", "origin_conversation_id")
                 ) and normalized(old.content) == normalized(new.content):
+                    old = self.get_raw(old.record_id)
                     if owner and explicit and old.basis != "owner_confirmed":
                         old = old.model_copy(
                             update={
@@ -296,6 +326,10 @@ class MemoryStore:
                 raise RevisionConflict("memory revision changed")
             allowed = {"content", "visibility", "tags", "retracted", "kind"}
             update = {k: v for k, v in dict(changes).items() if k in allowed}
+            if "tags" in update:
+                update["tags"] = [tag for tag in update["tags"] if not tag.startswith("core:")] + [
+                    tag for tag in old.tags if tag.startswith("core:")
+                ]
             update.update(revision=old.revision + 1, updated_at=self.clock.now())
             if explicit and operator == "owner":
                 update.update(basis="owner_confirmed", write_mode="confirmed")
@@ -321,7 +355,7 @@ class PluginMemory:
         words = tokens(text)
         records = self.store.project(**self.scope())
         return sorted(
-            (r for r in records if not words or words & tokens(r.content)),
+            (r for r in records if not r.decay.frozen and (not words or words & tokens(r.content))),
             key=lambda r: (-len(words & tokens(r.content)), r.record_id),
         )[:limit]
 

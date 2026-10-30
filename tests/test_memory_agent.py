@@ -391,3 +391,47 @@ async def test_recall_storage_failure_has_distinct_message_and_no_retry(tmp_path
     assert len(calls) == 1
     assert any(e[:2] == ("warning", "memory.operation_failed") for e in agent.log.entries)
     await finish(agent)
+
+
+async def test_projection_failure_skips_memory_but_guard_failure_blocks(tmp_path, monkeypatch):
+    agent, _, _ = await make_agent(tmp_path)
+    try:
+
+        def unavailable(*args, **kwargs):
+            raise OSError("fake unavailable")
+
+        monkeypatch.setattr(agent.memory.store, "project", unavailable)
+        assert await agent.memory.build("fake", event(agent).conversation, "纸船") == []
+        monkeypatch.setattr(agent.memory.store, "all_records", unavailable)
+        assert agent.memory.guard("虚构的长内容用于检查", "public_group")
+        assert not agent.memory.guard("虚构的长内容用于检查", "owner_private")
+    finally:
+        await finish(agent)
+
+
+async def test_recollection_rules_in_owner_and_group_model_requests(tmp_path):
+    agent, _, model = await make_agent(tmp_path)
+    try:
+        for scene, role in (
+            ("owner_private", "owner"),
+            ("public_group", "owner"),
+            ("public_group", "member"),
+        ):
+            await agent.receive(event(agent, "纸船活动", scene=scene, role=role, mention=True))
+            await agent.drain()
+            text = str(model.requests[-1].model_dump())
+            for rule in (
+                "不当面否认",
+                "不提是在哪个群认识的",
+                "只当作某人说过",
+                "relationship",
+                "别在群里提",
+            ):
+                assert rule in text
+            if role != "owner":
+                assert not any(
+                    tool.name in {"core_remember", "core_forget"}
+                    for tool in model.requests[-1].tools
+                )
+    finally:
+        await finish(agent)

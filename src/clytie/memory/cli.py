@@ -10,6 +10,10 @@ from clytie.api.memory import MemoryAPI
 def add_parser(commands):
     memory = commands.add_parser("memory", help="记忆导出、搬家计划和恢复码")
     actions = memory.add_subparsers(dest="memory_action", required=True)
+    thaw = actions.add_parser("thaw")
+    thaw.add_argument("companion")
+    thaw.add_argument("record_id")
+    thaw.add_argument("--home")
     export = actions.add_parser("export")
     export.add_argument("companion")
     export.add_argument("--out", required=True)
@@ -63,7 +67,9 @@ def choices(values):
 def run(arguments):
     api = MemoryAPI(arguments.home)
     try:
-        if arguments.memory_action == "export":
+        if arguments.memory_action == "thaw":
+            result = api.thaw_record(arguments.companion, arguments.record_id)
+        elif arguments.memory_action == "export":
             result = api.export(
                 arguments.companion,
                 arguments.out,
