@@ -159,7 +159,8 @@ class Supervisor:
                         if phase == "running":
                             self.pending_health.discard(cid)
                             self.problems = {
-                                k: v for k, v in self.problems.items()
+                                k: v
+                                for k, v in self.problems.items()
                                 if not k.startswith(f"auth_invalid:{cid}:")
                             }
                         row["migration_stalled"] = False
