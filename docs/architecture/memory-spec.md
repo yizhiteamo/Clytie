@@ -86,7 +86,7 @@
 |---|---|
 | `kind` | `fact` \| `preference` \| `event` |
 | `content` | 用自然的话写下这件事（她自己的措辞），不超过 300 字 |
-| `visibility` | `private` \| `relationship` \| `public`。拿不准时填 `private`；缺省也是 `private` |
+| `visibility` | `private` \| `relationship` \| `public`。拿不准时填 `private`；缺省也是 `private`。replaces 修订 profile/jargon 的例外见 memory-recall-spec §4.1（Issue #43，用户已确认） |
 | `explicit` | 布尔值：主人是否**明确**要她记住，或者正在纠正她的记忆 |
 | `replaces` | 可选，上下文中的记忆编号 `[记忆N]`：表示这是对那条记忆的修订 |
 

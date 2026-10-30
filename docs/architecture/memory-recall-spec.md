@@ -142,6 +142,7 @@
 - 同时命中两栏时**永不淡化优先**（用户已确认，Issue #35 U3）。
 - 群友印象是跨群记录（`origin_conversation_id = null`，第 3.2 节），不属于任何场景来源，`observed` 的印象按"会慢慢淡"处理，不适用第 4.6 节。
 - **主人修订或确认过的印象和黑话**（用户已确认，Issue #39 U3）：主人用 `replaces` 修订或明确确认后，记录升级为 `owner_confirmed` 或 `owner_stated`，保留 `core:profile` 标签和 `scope`。这样的印象和黑话：
+  - 用户已确认（Issue #43）：replaces 指向 profile 或 jargon 且调用未给出 visibility 时，沿用原记录的可见等级；显式给出时按给出值修订。此例外仅限 profile/jargon，其他类型仍按 memory-spec §2.2 缺省 private。
   - **不淡化**（适用第一栏第 2 行，永不淡化优先）；
   - **不进入核心记忆**：memory-spec §5.1 的核心记忆排除 `kind = profile` 和 `kind = jargon`；
   - 使用范围不变：印象仍按第 3.2 节在场才想起，黑话仍按第 5 节只在所属群主动用。
