@@ -384,3 +384,30 @@ async def test_missing_origin_normalization_does_not_fork_source_only_changes(ho
         export(source, home, "fork.enc"), mode="merge", passphrase=PASSPHRASE
     )
     assert plan["records"][0]["action"] == "conflict"
+
+
+async def test_merge_applies_remote_undo_even_when_content_hash_repeats(homes):
+    source, source_home, source_transfers = homes("source")
+    original = remember(source, "虚构状态甲")
+    target, target_home, target_transfers = homes("target")
+    await move(target_transfers, export(source, source_home))
+    target.clock.advance(1)
+    revised = revise(target, original, "虚构状态乙")
+    plan = await source_transfers.plan(
+        export(target, target_home), mode="merge", passphrase=PASSPHRASE
+    )
+    imported = await source_transfers.apply(plan["id"], passphrase=PASSPHRASE)
+    assert source.get_raw(original.record_id).content == revised.content
+    undo = source_transfers.undo(imported)
+    await source_transfers.apply(undo["id"])
+    restored = source.get_raw(original.record_id)
+    assert restored.content == original.content and restored.revision == 3
+    plan = await target_transfers.plan(
+        export(source, source_home, "undo.enc"), mode="merge", passphrase=PASSPHRASE
+    )
+    assert plan["records"][0]["action"] == "update"
+    await target_transfers.apply(plan["id"], passphrase=PASSPHRASE)
+    assert target.get_raw(original.record_id) == restored
+    assert [r[0] for r in target.db.execute("SELECT hash FROM revisions ORDER BY revision")] == [
+        r[0] for r in source.db.execute("SELECT hash FROM revisions ORDER BY revision")
+    ]

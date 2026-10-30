@@ -235,9 +235,9 @@ class Transfers:
                 remote_rows = loaded["histories"][key]
                 local_chain = self._comparison_chain(local_rows)
                 remote_chain = self._comparison_chain(remote_rows)
-                if remote_chain[-1] in local_chain:
+                if remote_chain == local_chain[: len(remote_chain)]:
                     action = "skip"
-                elif local_chain[-1] in remote_chain:
+                elif local_chain == remote_chain[: len(local_chain)]:
                     original = [r["hash"] for r in local_rows]
                     preserve = original == [r["hash"] for r in remote_rows[: len(original)]]
                 else:
