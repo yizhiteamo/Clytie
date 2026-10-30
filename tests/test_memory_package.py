@@ -151,3 +151,56 @@ def test_written_package_is_verified_before_publication(export_case, monkeypatch
     plain["files"]["../escape"] = plain["files"]["memory.sqlite3"]
     with pytest.raises(PackageError):
         unpack(canonical(plain).encode(), home, "companion_a")
+
+
+async def test_manifest_software_version_legacy_and_unknown_formats(export_case):
+    from importlib.metadata import version
+
+    from clytie.memory.transfer import Transfers
+
+    store, exports, home = export_case
+    seed(store)
+    exports.export(home / "new.enc", passphrase=PASSPHRASE)
+    raw = decrypt((home / "new.enc").read_bytes(), passphrase=PASSPHRASE)
+    plain = json.loads(raw)
+    assert plain["manifest"]["version"] == 2
+    assert plain["manifest"]["clytie_version"] == version("clytie")
+    for value in (None, "invalid version", 42):
+        altered = json.loads(raw)
+        altered["manifest"]["clytie_version"] = value
+        with pytest.raises(PackageError):
+            unpack(canonical(altered).encode(), home, "companion_a")
+    for format_version in (0, 3, True, "2"):
+        altered = json.loads(raw)
+        altered["manifest"]["version"] = format_version
+        with pytest.raises(PackageError, match="版本"):
+            unpack(canonical(altered).encode(), home, "companion_a")
+    plain["manifest"]["version"] = 1
+    with pytest.raises(PackageError, match="字段"):
+        unpack(canonical(plain).encode(), home, "companion_a")
+    del plain["manifest"]["clytie_version"]
+    manifest, db = unpack(canonical(plain).encode(), home, "companion_a")
+    db.close()
+    assert manifest["version"] == 1 and "clytie_version" not in manifest
+    _, public = new_recovery()
+    legacy = home / "legacy.enc"
+    legacy.write_bytes(encrypt(canonical(plain).encode(), PASSPHRASE, public))
+    plan = await Transfers(store, home, "companion_a").plan(
+        legacy, mode="merge", passphrase=PASSPHRASE
+    )
+    assert "版本未知" in plan["warnings"][0]
+
+
+def test_missing_install_version_refuses_export(export_case, monkeypatch):
+    from clytie.memory import package
+
+    store, exports, home = export_case
+    seed(store)
+
+    def missing(name):
+        raise package.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(package.metadata, "version", missing)
+    with pytest.raises(ValueError, match="安装版本"):
+        exports.export(home / "refused.enc", passphrase=PASSPHRASE)
+    assert not (home / "refused.enc").exists()

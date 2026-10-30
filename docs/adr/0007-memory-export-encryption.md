@@ -8,7 +8,7 @@
 
 恢复码使用库生成的 P-256 私钥，编码为带版本前缀的 32 字节私钥标量 Base64。实例仅保存 DER/SPKI 公钥；私钥和恢复码仅首次生成时交给调用方展示，不落盘。每包生成新的临时 ECDH 密钥，与恢复公钥交换后，以 HKDF-SHA256（随机 16 字节盐、固定用途标签）派生另一把 32 字节包裹密钥。包里只保存临时公钥，临时私钥用后丢弃。两个包裹各自加密同一内容密钥，因此口令与恢复码独立可用。轮换只替换实例公钥，旧包不改变。
 
-外层为版本化 JSON/Base64，包含算法、KDF 参数、随机盐、公钥与 nonce；两个密钥包裹分别以规范编码的基础头部和包裹用途作为 AAD；内容加密以含两个包裹的完整头部作为 AAD，避免循环依赖。加密载荷包含 manifest 和固定文件名的文件表，逐文件 SHA-256；不使用任意路径解包。manifest 包含 companion_uid、来源配置编号、记录数、导出时间与格式版本。SQLite 备份取一致快照，导出数据库仅复制允许的记忆表，排除向量；载荷不含账本、聊天、凭据。校验全部成功后才以原子替换发布输出。
+外层为版本化 JSON/Base64，包含算法、KDF 参数、随机盐、公钥与 nonce；两个密钥包裹分别以规范编码的基础头部和包裹用途作为 AAD；内容加密以含两个包裹的完整头部作为 AAD，避免循环依赖。加密载荷包含 manifest 和固定文件名的文件表，逐文件 SHA-256；不使用任意路径解包。manifest 格式版本 2 包含 companion_uid、来源配置编号、记录数、导出时间和 Clytie 安装版本（clytie_version）。SQLite 备份取一致快照，导出数据库仅复制允许的记忆表，排除向量；载荷不含账本、聊天、凭据。校验全部成功后才以原子替换发布输出。
 
 实现只调用库提供的密钥生成、ECDH、HKDF、Scrypt 和 AEAD，不自行实现密码算法。依据：[KDF](https://cryptography.io/en/latest/hazmat/primitives/key-derivation-functions/)、[EC 密钥与交换](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/ec/)、[认证加密](https://cryptography.io/en/latest/hazmat/primitives/aead/)。
 
@@ -17,3 +17,6 @@
 本机 Python 3.10 不提供 SQLite serialize/deserialize。按 Claude 只读技术答复，在实例 `run/memory-temp/` 创建排他命名的单个临时 SQLite 文件；导出使用 DELETE 日志模式，导入认证解密后用 `mode=ro&immutable=1`、`trusted_schema=OFF` 校验，再备份到内存。关闭连接后逐个删除这个文件及三个确切的 SQLite 附属文件名，不递归清理。崩溃残留不自动删除；status 只列名称、大小和时间，不读内容。明文不进入系统临时目录、计划、日志或导出目标。这是平台兼容技术约定，不改变隐私规则。
 
 首次公钥生成与轮换、加密导出共用实例内的非阻塞运行锁，避免不同导出交叉覆盖恢复公钥。包先写为目标旁的加密临时文件，重新读取、解密和校验后才发布；首次导出失败移除本次新建的公钥，不留下用户未获得恢复码的状态。此临时文件只有密文，明文校验仍只在实例内。
+
+
+Issue #32 F4 技术澄清（Claude 只读确认）：软件版本从 importlib.metadata 的 clytie 安装元数据读取并按 PEP 440 校验，读取失败拒绝导出。清单 v2 严格要求 clytie_version；开发期 v1 按旧的严格字段集显式读取，导入计划提示“版本未知”，不伪造软件版本。未知清单版本拒绝。外层认证加密格式仍为 v1：算法、头部和 AAD 未变；新清单仍在认证载荷内，不静默扩大外层版本支持。

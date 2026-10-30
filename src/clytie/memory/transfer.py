@@ -342,6 +342,9 @@ class Transfers:
             records=rows,
             proposals=loaded["proposals"],
             manifest=loaded["manifest"],
+            warnings=["来源包未记录 Clytie 版本（版本未知，旧清单格式）"]
+            if not importer and loaded["manifest"]["version"] == 1
+            else [],
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )

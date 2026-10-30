@@ -7,8 +7,11 @@ import re
 import sqlite3
 import tempfile
 from contextlib import contextmanager
+from importlib import metadata
 from pathlib import Path
 from uuid import uuid4
+
+from packaging.version import Version
 
 from clytie.plugin_host.locking import file_lock, process_identity
 from clytie.plugin_host.snapshots import atomic_write, contained, identifier
@@ -147,6 +150,11 @@ def _validate_database(connection):
 
 
 def payload(store, companion_id, home):
+    try:
+        clytie_version = metadata.version("clytie")
+        Version(clytie_version)
+    except (metadata.PackageNotFoundError, ValueError) as exc:
+        raise ValueError("无法读取有效的 Clytie 安装版本，拒绝导出") from exc
     data = snapshot(store, home, companion_id)
     db = open_database(data, home, companion_id)
     try:
@@ -155,7 +163,8 @@ def payload(store, companion_id, home):
             raise ValueError("还没有记忆，不需要导出")
         uid = json.loads(uid_row[0])
         manifest = {
-            "version": 1,
+            "version": 2,
+            "clytie_version": clytie_version,
             "companion_uid": uid,
             "companion_id": companion_id,
             "record_count": db.execute("SELECT count(*) FROM records").fetchone()[0],
@@ -182,14 +191,24 @@ def unpack(raw, home, companion_id):
         if set(value) != {"manifest", "files"} or set(value["files"]) != {"memory.sqlite3"}:
             raise PackageError("记忆包文件表不匹配")
         item, manifest = value["files"]["memory.sqlite3"], value["manifest"]
-        if set(manifest) != {
+        format_version = manifest.get("version")
+        if type(format_version) is not int or format_version not in {1, 2}:
+            raise PackageError("不支持的记忆包清单版本")
+        fields = {
             "version",
             "companion_uid",
             "companion_id",
             "record_count",
             "exported_at",
-        }:
+        }
+        if format_version == 2:
+            fields.add("clytie_version")
+        if set(manifest) != fields:
             raise PackageError("记忆包清单字段不匹配")
+        if format_version == 2:
+            if not isinstance(manifest["clytie_version"], str):
+                raise PackageError("Clytie 版本格式无效")
+            Version(manifest["clytie_version"])
         if not isinstance(manifest["companion_uid"], str) or not re.fullmatch(
             r"[0-9a-f]{32}", manifest["companion_uid"]
         ):
@@ -202,8 +221,7 @@ def unpack(raw, home, companion_id):
         try:
             uid = db.execute("SELECT value FROM metadata WHERE key='companion_uid'").fetchone()
             if (
-                manifest["version"] != 1
-                or not uid
+                not uid
                 or json.loads(uid[0]) != manifest["companion_uid"]
                 or db.execute("SELECT count(*) FROM records").fetchone()[0]
                 != manifest["record_count"]
