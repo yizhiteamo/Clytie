@@ -300,7 +300,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `memory.consolidator` | `async run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`；本体核对、写入，见 memory-recall-spec §2 |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
-| `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；非 GET 必须声明 `audit: true` |
+| `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；实际挂载 `/api/v1/companions/<cid>/plugins/<pid>/`；非 GET 必须声明 `audit: true`；handler 与边界见 §7.3 |
 | `webui_panel` | 声明式：`{id, title, kind: kv|table|text, data_route}`，不允许插件自带脚本 |
 
 A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3 完成。
@@ -363,7 +363,9 @@ async count() -> int
 async request(method: str, path: str, *, json: JsonObject | None = None,
               query: dict[str, str] | None = None) -> ApiResponse
 ```
-`ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单在 A4 定义。A1 只需要协议和一个假实现。
+`ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单见 `api-spec.md` 第 4、5 节。CLI 扩展只拿到绑定 CLI 通行证的 `ApiClient`，不提供 `ctx`。
+
+插件路由 handler 为 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主限制 10 秒超时和 1 MB 响应。清单的 `/plugins/<pid>/<子路径>` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/<子路径>`，请求转交伴侣子进程执行。登录、防伪和审计由本体统一处理；插件非 GET 路由不能作为确认或口令级操作。
 
 ### 7.4 通知与事件负载
 

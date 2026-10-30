@@ -10,9 +10,12 @@ Clytie-home/
 ├─ docs/                      部署专属文档（伴侣设定说明、旧系统迁移记录、私有问题记录）
 ├─ private-denylist.txt       本机提交扫描用的真实名字/号码名单
 ├─ clytie.local.yaml          全局配置：平台账号映射、会话逻辑名、通知方式
-├─ secrets/                   凭据和登录态（WebUI 不显示内容）
+├─ secrets/                   凭据和登录态（WebUI 不显示内容，不备份）
+│  ├─ admin.json              管理口令的 scrypt 哈希及参数
+│  └─ sessions.json           网页会话（只存标识的哈希）
 ├─ companions/<companion-id>/
 │  ├─ companion.yaml          模型、平台账号、启用的插件及配置、场景与人设层
+│  ├─ config-history/         API 写回配置前的旧文件，最近 10 份（A4.3 备份）
 │  ├─ persona/                人设文件
 │  ├─ memory/                 记忆库及记忆资产
 │  ├─ ledger/                 统一任务账本
@@ -29,6 +32,8 @@ Clytie-home/
 ├─ supervisor/                silence.json、notify-state.json、audit.jsonl（A4.3 备份）
 ├─ logs/supervisor/            守护进程日志（不备份，A4.3 轮转）
 └─ run/                       supervisor.lock、health.json；memory-temp/ 为实例内短暂 SQLite 校验文件
+   ├─ api.json                实际端口、pid、启动时间（不备份）
+   └─ api-token               本次启动的 CLI 通行证（不备份）
 ```
 
 迁移到另一台电脑 = 克隆代码仓库 + 恢复实例目录的备份。

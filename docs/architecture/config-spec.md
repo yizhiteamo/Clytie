@@ -31,6 +31,20 @@
 
 平台账号（`account`、`platform_id`）在这里是真实值，这个文件只存在于实例目录。
 
+### A4.2 本机管理接口
+
+全局 `api` 字段均可省略（`api-spec.md` §8）：
+
+| 字段 | 类型（默认值） |
+|---|---|
+| `api.port` | 整数，1024 起的有效 TCP 端口号（8765） |
+| `api.session_idle_days` | 整数 1–365（30） |
+| `api.reauth_minutes` | 整数 1–1440（15） |
+| `api.login_lockout.failures` | 整数 3–20（5） |
+| `api.login_lockout.seconds` | 整数 10–3600（60） |
+
+只绑定 127.0.0.1，不提供监听地址配置。未明确配置端口时，从默认端口起依次尝试后面的 9 个端口；明确配置时只使用该端口。实际端口写入 run/api.json 并在 status 显示。
+
 ## 3. 伴侣配置 `companion.yaml`
 
 | 字段 | 必填 | 说明 |
