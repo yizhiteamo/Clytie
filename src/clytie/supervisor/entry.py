@@ -360,5 +360,17 @@ def run(args):
         print(json.dumps(value, ensure_ascii=False, indent=2))
     else:
         print("运行中" if value["running"] else "未运行（可能过时）")
-        print(json.dumps(value["health"], ensure_ascii=False))
+        health = value["health"]
+        print(f"{health.get('undelivered', 0)} 条通知未送达")
+        for cid, row in health.get("companions", {}).items():
+            print(f"{cid}: {row.get('state', 'unknown')}")
+            print(
+                f"还有 {row.get('sending', 0)} 条消息正在发送 / "
+                f"{row.get('inflight_tasks', 0)} 个任务在执行"
+            )
+            if row.get("silence_status") == "pending_migrating":
+                print("静默待确认（迁移中，尚未连接平台）")
+            if row.get("migration_stalled"):
+                print("迁移暂时无心跳（startup_stalled，等待中，不强制终止）")
+        print(json.dumps(health, ensure_ascii=False))
     return 0

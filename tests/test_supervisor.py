@@ -393,3 +393,36 @@ async def test_terminal_stop_audit_source(tmp_path, session):
     selected = [r for r in rows if r["operation"] in actions]
     assert len(selected) == len(actions)
     assert all(r["source"] == "terminal" for r in selected)
+
+
+def test_status_chinese_counts_and_pending_migration(tmp_path, monkeypatch, capsys):
+    from argparse import Namespace
+
+    import clytie.api
+    from clytie.supervisor.entry import run
+
+    monkeypatch.setattr(
+        clytie.api,
+        "local_supervisor_status",
+        lambda home: {
+            "running": True,
+            "health": {
+                "undelivered": 2,
+                "companions": {
+                    "companion_a": {
+                        "state": "stopping",
+                        "sending": 3,
+                        "inflight_tasks": 1,
+                        "silence_status": "pending_migrating",
+                        "migration_stalled": True,
+                    }
+                },
+            },
+        },
+    )
+    assert run(Namespace(action="status", home=tmp_path, json=False)) == 0
+    output = capsys.readouterr().out
+    assert "2 条通知未送达" in output
+    assert "还有 3 条消息正在发送 / 1 个任务在执行" in output
+    assert "静默待确认（迁移中，尚未连接平台）" in output
+    assert "startup_stalled" in output
