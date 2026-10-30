@@ -133,12 +133,27 @@ async def test_memory_failure_has_structured_startup_reason(tmp_path, monkeypatc
             lock.__exit__(None, None, None)
 
 
-async def test_persistent_silence_is_set_before_platform_connect(tmp_path, monkeypatch):
+@pytest.mark.parametrize("during_migration", [False, True])
+async def test_persistent_silence_is_set_before_platform_connect(
+    tmp_path, monkeypatch, during_migration
+):
     from clytie.supervisor.common import write
 
     home = home_copy(tmp_path)
-    write(home / "supervisor/silence.json", {"on": True, "since": "fictional", "by": "owner"})
+    if not during_migration:
+        write(home / "supervisor/silence.json", {"on": True, "since": "fictional", "by": "owner"})
     runtime = Companion(home, "companion_a", MockClock())
+    if during_migration:
+        store = runtime.host.memory_store
+
+        def migrate(cid, *args):
+            result = store(cid, *args)
+            write(
+                home / "supervisor/silence.json", {"on": True, "since": "fictional", "by": "owner"}
+            )
+            return result
+
+        monkeypatch.setattr(runtime.host, "memory_store", migrate)
     original = runtime.host._load_class
     connected = []
 

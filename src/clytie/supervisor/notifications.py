@@ -34,7 +34,7 @@ class Notifications:
         self.problems = dict(problems)
         for key in tuple(self.states):
             if (
-                self.states[key]["state"] == "failed"
+                (self.states[key]["state"] == "failed" or key.startswith("startup_stalled:"))
                 and key not in problems
                 and key.split(":")[1] not in pending
             ):
@@ -42,6 +42,8 @@ class Notifications:
         for key, body in problems.items():
             previous = self.states.get(key)
             if previous:
+                if key.startswith("startup_stalled:") and previous["state"] == "cooldown":
+                    continue
                 elapsed = (
                     self.clock.now() - datetime.fromisoformat(previous["at"])
                 ).total_seconds()

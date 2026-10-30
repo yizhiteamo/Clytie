@@ -5,6 +5,62 @@ from clytie.supervisor.service import Supervisor
 from .test_supervisor import FakeLauncher, spin
 
 
+async def test_migration_silence_confirms_other_companions_and_warns_once(tmp_path):
+    from .test_supervisor_runtime import FakeNotifier
+
+    clock, launcher = MockClock(), FakeLauncher()
+    svc = Supervisor(tmp_path, ["companion_a", "companion_b"], launcher, clock)
+    notifier = FakeNotifier(clock)
+    svc.notifications.plugins = [(notifier, False)]
+    await svc.start()
+    await spin()
+    a, b = (child for _, child in launcher.children)
+    a.ack = False
+    await a.heartbeat(phase="migrating")
+    await b.ready()
+    await spin()
+    assert await svc.silence(True) == {
+        "companion_a": "pending_migrating",
+        "companion_b": "confirmed",
+    }
+    for seconds in (31, 1, 6 * 3600 + 1, 1):
+        clock.advance(seconds)
+        await b.heartbeat(phase="running", silenced=True)
+        await spin()
+    notices = [n for n in notifier.calls if n.dedupe_key == "startup_stalled:companion_a"]
+    assert len(notices) == 1 and not a.killed
+    await svc.stop()
+
+
+async def test_orphan_cleanup_after_startup_is_bounded(tmp_path, monkeypatch):
+    import asyncio
+    import io
+    from types import SimpleNamespace
+
+    import pytest
+
+    import clytie.supervisor.entry as entry
+
+    clock, calls = MockClock(), []
+
+    async def stop(mode, *, orphan):
+        calls.append((mode, orphan))
+        await clock.sleep(100)
+
+    def exit(code):
+        raise RuntimeError(f"fake_exit_{code}")
+
+    monkeypatch.setattr(entry.os, "_exit", exit)
+    runtime = SimpleNamespace(stop=stop, session_ending=lambda: calls.append("ending"))
+    task = asyncio.create_task(entry.orphan_exit(runtime, clock, io.BytesIO()))
+    await spin()
+    clock.advance(5)
+    await spin()
+    with pytest.raises(RuntimeError, match="fake_exit_0"):
+        await task
+    assert calls == ["ending", ("cancel", True)]
+
+
 async def starting(tmp_path, *, ack=False):
     clock = MockClock()
     launcher = FakeLauncher(ack=ack)

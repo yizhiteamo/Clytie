@@ -157,6 +157,8 @@ class Companion:
                 if reason:
                     raise StartupBlocked(reason) from None
                 raise
+        if self.stop_requested():
+            return False
         for channel in self.channels.values():
             self.feeds.append(asyncio.create_task(self.consume(channel)))
         return True

@@ -44,6 +44,17 @@ def status(home):
     return dict(running=running, stale=not running, health=value)
 
 
+async def orphan_exit(runtime, clock, protocol):
+    runtime.session_ending()
+    try:
+        await timed(runtime.stop("cancel", orphan=True), clock, 5)
+    except BaseException:
+        pass
+    # Do not let event-loop shutdown await a plugin that ignores cancellation.
+    protocol.flush()
+    os._exit(0)
+
+
 async def companion_main(home, cid):
     from .heartbeat import Heartbeat
 
@@ -113,6 +124,8 @@ async def companion_main(home, cid):
     if not started or stop_requested.is_set():
         heartbeat.update(phase="stopping")
         try:
+            if orphan.is_set():
+                await orphan_exit(runtime, clock, protocol)
             result = await runtime.stop("cancel", orphan=orphan.is_set())
             if not orphan.is_set():
                 emit("stop_result", result=result)
@@ -138,14 +151,7 @@ async def companion_main(home, cid):
                     return 0
             msg = await read_task
             if msg is None:
-                runtime.session_ending()
-                try:
-                    await timed(runtime.stop("cancel", orphan=True), clock, 5)
-                except BaseException:
-                    pass
-                # No event-loop shutdown wait for plugins that ignore cancellation.
-                protocol.flush()
-                os._exit(0)
+                await orphan_exit(runtime, clock, protocol)
             kind = msg["type"]
             if kind == "stop" and stopping is None:
                 heartbeat.update(phase="stopping")
