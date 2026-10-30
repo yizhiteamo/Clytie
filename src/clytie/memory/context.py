@@ -61,7 +61,7 @@ class MemoryContext:
                     ToolSpec(
                         name="core_remember",
                         description="记住主人亲口说的事实、偏好和经历；明确要求记住时 explicit=true。",
-                        when_not_to_use="第三方说法、截图、猜测或玩笑；不是主人亲口说的内容不记。",
+                        when_not_to_use="第三方说法、截图、猜测或玩笑；不是主人亲口说的内容不记。主人说不用记、别记这个时不记；已经在本次记下的，用 core_forget 撤销。",
                         parameters={
                             "type": "object",
                             "properties": {
@@ -80,7 +80,7 @@ class MemoryContext:
                     ),
                     ToolSpec(
                         name="core_forget",
-                        description="撤销本次想起的一条记忆，此后不再提起。",
+                        description="主人说别再提了、那个记错了，删掉时，撤销本次想起的一条记忆。主人说不用记、别记这个时不记；已经在本次记下的，用 core_forget 撤销。",
                         when_not_to_use="没有当前调用中的记忆编号或没有主人要求",
                         parameters={
                             "type": "object",

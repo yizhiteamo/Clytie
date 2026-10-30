@@ -334,3 +334,33 @@ async def test_recall_reference_survives_agent_round_and_core_reordering(tmp_pat
     assert "[记忆2] 琥珀" in context
     assert len(model.requests) == 3
     await finish(agent)
+
+
+@pytest.mark.parametrize(
+    "role,scene",
+    [
+        ("owner", "owner_private"),
+        ("member", "public_group"),
+        ("stranger", "stranger_private"),
+        ("peer", "public_group"),
+    ],
+)
+async def test_do_not_remember_rule_in_request_without_granting_non_owner_tools(
+    tmp_path, role, scene
+):
+    agent, _, model = await make_agent(tmp_path)
+    await agent.receive(event(agent, "这个别记", role=role, scene=scene, mention=True))
+    await agent.drain()
+    request = model.requests[0]
+    rule = "主人说不用记、别记这个时不记；已经在本次记下的，用 core_forget 撤销。"
+    assert any(rule in text_parts(m.parts) for m in request.messages if m.role == "system")
+    names = {t.name for t in request.tools}
+    if role == "owner":
+        assert {"core_remember", "core_forget"} <= names
+        for spec in request.tools:
+            if spec.name in {"core_remember", "core_forget"}:
+                assert rule in spec.description + spec.when_not_to_use
+    else:
+        assert not names & {"core_remember", "core_forget"}
+    assert not agent.memory.store.all_records()
+    await finish(agent)
