@@ -142,6 +142,17 @@ def creation(*, detached=False):
     return {"start_new_session": True}
 
 
+def python_process():
+    """Target the interpreter, not the Windows venv redirector."""
+    executable = sys.executable
+    env = os.environ.copy()
+    base = getattr(sys, "_base_executable", executable)
+    if sys.platform == "win32" and base != executable:
+        env["__PYVENV_LAUNCHER__"] = executable
+        executable = base
+    return executable, env
+
+
 class Child:
     def __init__(self, process, log):
         self.process, self.log = process, log
@@ -178,11 +189,13 @@ class ProcessLauncher:
         directory = self.home / "companions" / cid / "logs"
         directory.mkdir(parents=True, exist_ok=True)
         log = (directory / "process.log").open("ab")
+        executable, env = python_process()
         process = subprocess.Popen(
-            [sys.executable, "-m", "clytie", "companion", "run", cid, "--home", str(self.home)],
+            [executable, "-m", "clytie", "companion", "run", cid, "--home", str(self.home)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log,
+            env=env,
             **creation(),
         )
         try:

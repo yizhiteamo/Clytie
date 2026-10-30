@@ -51,3 +51,10 @@ Python 3.10 的 Task 对 CancelledError 子类的传播可能丢失自定义结�
 health.json 保持每五秒最多写一次。持锁者开始停止时更新 supervisor.lock 的 operation 元数据；status 仍仅通过操作系统锁判断存活，元数据只用于覆盖顶层 stopping 状态。元数据读取不完整时回退到健康文件，不通过删除锁或进程号猜测存活。
 
 父进程先将子进程加入 Job Object，再发送 boot 帧，子进程收到后才打开实例。IPC 使用 UTF-8 JSON Lines，日志走 stderr；同一进程内的重复停止请求共享一次关闭操作。
+
+
+## Windows 虚拟环境解释器
+
+只读技术核对确认：Windows venv 的 python.exe 可能只是重定向启动器，其 PID 与实际持锁解释器不同。若 `_base_executable` 与 `sys.executable` 不同，伴侣及守护进程直接启动基础解释器，在复制的子进程环境中设置 `__PYVENV_LAUNCHER__=sys.executable` 保留虚拟环境；不改系统环境。系统 Python 和 Linux 保持原路径。它们是 CPython 私有接口，双平台冒烟直接断言账本锁持有者 PID 与 Popen PID 一致，Windows 另验证 Job 关闭后可取得账本锁。
+
+仍先加入 Job 再发送 boot；基础解释器在 boot 前不打开实例，不需要另行挂起创建进程。此修复只落实既定进程管理语义，不改变启动或停止规则。

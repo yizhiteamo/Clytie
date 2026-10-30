@@ -16,7 +16,7 @@ from clytie.plugin_host.support import timed
 
 from .common import read
 from .companion import Companion, StartupBlocked
-from .processes import Lines, ProcessBackend, ProcessLauncher, creation, frame
+from .processes import Lines, ProcessBackend, ProcessLauncher, creation, frame, python_process
 from .service import Supervisor
 
 
@@ -232,11 +232,13 @@ def frontend(home):
     directory = home / "logs/supervisor"
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / "process.log").open("ab") as log:
+        executable, env = python_process()
         process = subprocess.Popen(
-            [sys.executable, "-m", "clytie", "_supervisor", "--home", str(home)],
+            [executable, "-m", "clytie", "_supervisor", "--home", str(home)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=log,
+            env=env,
             **creation(detached=True),
         )
         count = 0

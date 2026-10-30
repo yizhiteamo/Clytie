@@ -30,6 +30,15 @@ async def test_real_companion_ready_heartbeat_stop(tmp_path):
                 break
         assert any(m and m["type"] == "ready" for m in messages), (messages, child.log.name)
         assert any(m and m["type"] == "heartbeat" for m in messages)
+        import os
+
+        from clytie.plugin_host.locking import _owner
+
+        descriptor = os.open(home / "companions" / cid / "ledger/.lock", os.O_RDONLY)
+        try:
+            assert _owner(descriptor)["pid"] == child.process.pid
+        finally:
+            os.close(descriptor)
         await child.send(dict(type="stop", seq=2, task_mode="cancel"))
         result = None
         while True:
@@ -53,24 +62,23 @@ async def wait_until(predicate, clock, timeout=25):
 
 
 async def test_real_frontend_disappears_daemon_stops(tmp_path):
-    import os
     import subprocess
-    import sys
 
     from clytie.supervisor.common import read
     from clytie.supervisor.entry import status
-    from clytie.supervisor.processes import creation
+    from clytie.supervisor.processes import creation, python_process
 
     home = tmp_path / "fictional-home"
     shutil.copytree(ROOT / "examples/home", home)
     clock = SystemClock()
     with (tmp_path / "frontend-output.txt").open("wb") as output:
+        executable, env = python_process()
         front = subprocess.Popen(
-            [sys.executable, "-m", "clytie", "supervisor", "start", "--home", str(home)],
+            [executable, "-m", "clytie", "supervisor", "start", "--home", str(home)],
             stdin=subprocess.DEVNULL,
             stdout=output,
             stderr=output,
-            env={**os.environ, "PYTHONIOENCODING": "ascii"},
+            env={**env, "PYTHONIOENCODING": "ascii"},
             **creation(),
         )
         try:
@@ -216,9 +224,21 @@ async def test_real_job_close_terminates_windows_child(tmp_path):
     clock = SystemClock()
     try:
         assert (await timed(child.receive(), clock, 25))["type"] == "ready"
+        import os
+
+        from clytie.plugin_host.locking import _owner, file_lock, process_identity
+
+        lock = home / "companions/companion_a/ledger/.lock"
+        descriptor = os.open(lock, os.O_RDONLY)
+        try:
+            assert _owner(descriptor)["pid"] == child.process.pid
+        finally:
+            os.close(descriptor)
         launcher.job.close()
         await timed(child.wait(), clock, 6)
         assert child.process.poll() is not None
+        with file_lock(lock, process_identity()):
+            pass
     finally:
         await child.kill()
         launcher.close()
