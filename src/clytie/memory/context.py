@@ -323,6 +323,8 @@ class MemoryContext:
                         and original.kind in {"profile", "jargon"}
                     ):
                         changes["kind"] = original.kind
+                        if "visibility" not in args:
+                            changes["visibility"] = original.visibility
                     self.store.revise(
                         key,
                         revision,

@@ -523,8 +523,9 @@ async def test_agent_core_recall_thaws_and_reinforces_frozen_record(tmp_path):
 
 @pytest.mark.parametrize("kind", ["profile", "jargon"])
 @pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("visibility", [None, "relationship", "private"])
 async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
-    tmp_path, kind, explicit
+    tmp_path, kind, explicit, visibility
 ):
     from clytie.memory.presence import bind_presence
 
@@ -535,8 +536,8 @@ async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
             replaces="[记忆1]",
             kind="fact",
             content="修订后的虚构纸船",
-            visibility="relationship",
             explicit=explicit,
+            **({"visibility": visibility} if visibility is not None else {}),
         ),
         {"finish": "stop", "text": "记下修订"},
     )
@@ -568,6 +569,7 @@ async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
         assert updated.content == "修订后的虚构纸船"
         assert updated.kind == kind and updated.tags == original.tags
         assert updated.scope == original.scope
+        assert updated.visibility == (visibility or "relationship")
         assert updated.basis == ("owner_confirmed" if explicit else "owner_stated")
         assert any(
             text_parts(m.parts) == "记下了" for m in model.requests[-1].messages if m.role == "tool"
@@ -583,7 +585,7 @@ async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
                 with bind_presence("test_group", present):
                     assert bool(
                         await agent.memory.retrieval.search("纸船", "public_group", "test_group")
-                    ) == bool(present)
+                    ) == (bool(present) and visibility != "private")
                     recalled = await agent.memory.execute(
                         f"recall-{bool(present)}",
                         group,
@@ -591,9 +593,43 @@ async def test_owner_replaces_profile_jargon_through_agent_preserves_scope(
                         ToolCall(call_id="recall", tool="core_recall", arguments={"query": "纸船"}),
                         CancelToken(),
                     )
-                    assert ("修订后的虚构纸船" in recalled.content) == bool(present)
+                    assert ("修订后的虚构纸船" in recalled.content) == (
+                        bool(present) and visibility != "private"
+                    )
         else:
-            assert store.visible(updated, "public_group", "test_group")
+            assert store.visible(updated, "public_group", "test_group") == (visibility != "private")
+            assert bool(
+                await agent.memory.retrieval.search("纸船", "public_group", "test_group")
+            ) == (visibility != "private")
             assert not store.visible(updated, "public_group", "other_group")
+    finally:
+        await finish(agent)
+
+
+async def test_owner_replaces_fact_omitted_visibility_stays_private_through_agent(tmp_path):
+    agent, _, model = await make_agent(
+        tmp_path,
+        tool("core_remember", replaces="[记忆1]", kind="fact", content="修订后的虚构纸船"),
+        {"finish": "stop", "text": "记下修订"},
+    )
+    try:
+        await agent.recollector.set_enabled(False)
+        record = write(agent, "原来的虚构纸船", kind="fact", visibility="relationship")
+        await agent.receive(event(agent, "修订虚构纸船"))
+        await agent.drain()
+        store = agent.memory.store
+        updated = store.get_raw(record.record_id)
+        assert updated.content == "修订后的虚构纸船"
+        assert updated.kind == "fact" and updated.visibility == "private"
+        assert updated.basis == "owner_stated"
+        assert any(
+            text_parts(m.parts) == "记下了" for m in model.requests[-1].messages if m.role == "tool"
+        )
+        agent.clock.advance(120 * 86_400)
+        assert store.project("owner_private", "owner_private")[0].decay.weight == 1
+        assert "纸船" not in str(
+            await agent.memory.build("unrelated", event(agent).conversation, "晴天雨滴")
+        )
+        assert not store.visible(updated, "public_group", "test_group")
     finally:
         await finish(agent)
