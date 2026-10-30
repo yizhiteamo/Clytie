@@ -168,8 +168,6 @@ class Companion:
     def health(self):
         if not self.kernel:
             return {}
-        records = self.kernel.ledger.rows("record")
-        intents = self.kernel.ledger.rows("intent")
         notices = set(self.agent.boundary.warnings)
         if self.report:
             from dataclasses import replace
@@ -194,10 +192,7 @@ class Companion:
             if priority[state] >= priority[states.get(pid, "unknown")]:
                 states[pid] = state
         return dict(
-            inflight_tasks=sum(
-                r["kind"] == "task" and r["exec_status"] not in EXEC_TERMINAL for r in records
-            ),
-            sending=sum(r["status"] == "sending" for r in intents),
+            **self.kernel.ledger.health_counts(),
             channels=states,
             model=self.agent.model_health,
             quota=(

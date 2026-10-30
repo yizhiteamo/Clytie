@@ -237,6 +237,28 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     assert calls == ["close"] and model.requests == []
 
 
+async def test_health_counts_without_loading_ledger_bodies(tmp_path, monkeypatch):
+    from clytie.supervisor.companion import Companion
+
+    a, _, _ = await make_agent(tmp_path)
+    runtime = Companion(tmp_path, a.cid, a.clock, host=a.host)
+    runtime.agent, runtime.kernel = a, a.kernel
+    with a.ledger.transaction():
+        for n, state in enumerate(("pending", "running", "ok", "cancelled", "interrupted")):
+            a.ledger.put("record", f"fake_{n}", {"kind": "task", "exec_status": state})
+        a.ledger.put("record", "fake_chat", {"kind": "chat", "exec_status": "running"})
+        for n, state in enumerate(("sending", "pending", "unknown")):
+            a.ledger.put("intent", f"fake_{n}", {"status": state})
+    with monkeypatch.context() as patch:
+        patch.setattr(a.ledger, "rows", lambda _: pytest.fail("health loaded record bodies"))
+        health = runtime.health()
+    assert health["inflight_tasks"] == 2 and health["sending"] == 1
+    # Both predicates have reusable indexes; routine heartbeats do no JSON decoding.
+    indexes = {r[1] for r in a.ledger.db.execute("PRAGMA index_list(record)")}
+    assert "health_tasks" in indexes
+    await finish(a)
+
+
 async def test_session_ending_blocks_all_split_remainders(tmp_path):
     kernel, channel, clock = setup(tmp_path)
     record, _, intents = await task_with_intents(kernel, split=True)
