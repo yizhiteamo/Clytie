@@ -79,6 +79,8 @@ def assemble(runtime, *, role=None, primary=True):
                     asynchronous and not inspect.iscoroutinefunction(function)
                 ):
                     raise TypeError("factory object does not implement its SDK protocol")
+            if point == "memory.importer" and inspect.iscoroutinefunction(implementation.detect):
+                raise TypeError("importer detect must be synchronous")
             if point in {"model", "channel"}:
                 cls = ModelFeatures if point == "model" else ChannelFeatures
                 if not isinstance(implementation.features(), cls):

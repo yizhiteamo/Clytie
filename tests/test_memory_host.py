@@ -121,3 +121,101 @@ async def test_importer_host_validates_items_and_times_out_with_mock_clock(tmp_p
         await task
     assert h.failures
     await h.close()
+
+
+async def test_detect_wait_uses_mock_clock_timeout_and_cancels_host_call():
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    from clytie.api.memory import HostedImporter
+    from clytie.sdk.testing import MockClock
+
+    clock = MockClock()
+    cancelled = []
+
+    async def waiting(*args, **kwargs):
+        try:
+            await clock.sleep(100)
+            return True
+        finally:
+            cancelled.append(True)
+
+    adapter = HostedImporter(
+        SimpleNamespace(clock=clock, invoke=waiting),
+        "companion_a",
+        SimpleNamespace(plugin_id="fake-importer", point="memory.importer", key="importer"),
+    )
+    task = asyncio.create_task(adapter.detect("fictional-source"))
+    for _ in range(10):
+        await clock.sleep(0)
+    clock.advance(29)
+    await clock.sleep(0)
+    assert not task.done()
+    clock.advance(1)
+    with pytest.raises(TimeoutError):
+        await task
+    await clock.sleep(0)
+    assert cancelled == [True]
+
+
+async def test_detect_sync_protocol_rejects_async_declaration_and_awaitable_result(tmp_path):
+    import pytest
+
+    from clytie.plugin_host.host import PluginFailure
+
+    tail = """
+    def make_importer(self):
+        return self
+    async def read(self, source, cancel):
+        if False:
+            yield None
+"""
+    plugin(
+        tmp_path,
+        "async-detect",
+        SOURCE
+        + tail
+        + """
+    async def detect(self, source):
+        await self.ctx.clock.sleep(100)
+        return True
+""",
+        contributes={
+            "memory": {"importer": {"factory": "make_importer", "formats": ["fictional"]}}
+        },
+    )
+    plugin(
+        tmp_path,
+        "wrapped-detect",
+        SOURCE
+        + tail
+        + """
+    def detect(self, source):
+        async def invalid():
+            self.seen.append("must not run")
+            await self.ctx.clock.sleep(100)
+            return True
+        return invalid()
+""",
+        contributes={
+            "memory": {"importer": {"factory": "make_importer", "formats": ["fictional"]}}
+        },
+    )
+    h = host(tmp_path)
+    plan = h.plan_enable("companion_a", "async-detect")
+    assert (await h.apply(plan.plan_id))["failed"] == ["async-detect"]
+    runtime = await enable(h, "wrapped-detect")
+    with pytest.raises(PluginFailure):
+        await h.invoke(
+            "companion_a",
+            "wrapped-detect",
+            "memory.importer",
+            "importer",
+            "fictional",
+            method="detect",
+        )
+    assert runtime.plugin.seen == []
+    assert h.failures
+    await h.close()

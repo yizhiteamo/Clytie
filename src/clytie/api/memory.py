@@ -12,6 +12,7 @@ from clytie.memory.package import Exports
 from clytie.memory.store import MemoryStore
 from clytie.memory.transfer import Transfers
 from clytie.plugin_host.snapshots import contained, identifier
+from clytie.plugin_host.support import timed
 
 
 class HostedImporter:
@@ -19,8 +20,12 @@ class HostedImporter:
         self.host, self.cid, self.reg = host, companion_id, registration
 
     async def detect(self, source):
-        return await self.host.invoke(
-            self.cid, self.reg.plugin_id, self.reg.point, self.reg.key, source, method="detect"
+        return await timed(
+            self.host.invoke(
+                self.cid, self.reg.plugin_id, self.reg.point, self.reg.key, source, method="detect"
+            ),
+            self.host.clock,
+            30,
         )
 
     async def read(self, source, cancel):

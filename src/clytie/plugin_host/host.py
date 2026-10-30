@@ -772,6 +772,16 @@ class PluginHost(MigrationMixin):
                     else registration.implementation
                 )
                 result = function(*args)
+                if (
+                    point == "memory.importer"
+                    and method == "detect"
+                    and inspect.isawaitable(result)
+                ):
+                    if inspect.iscoroutine(result):
+                        result.close()
+                    elif isinstance(result, asyncio.Future):
+                        result.cancel()
+                    raise TypeError("importer detect must return bool synchronously")
                 if point == "memory.importer" and method == "read":
                     from clytie.sdk.types import ImportCandidate
 
