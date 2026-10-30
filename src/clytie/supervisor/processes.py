@@ -141,7 +141,7 @@ def creation(*, detached=False):
         return {
             "creationflags": subprocess.DETACHED_PROCESS
             if detached
-            else subprocess.CREATE_NEW_PROCESS_GROUP
+            else subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
         }
     return {"start_new_session": True}
 

@@ -276,8 +276,9 @@ def test_process_creation_and_session_adapter(monkeypatch):
     monkeypatch.setattr(processes.sys, "platform", "win32")
     monkeypatch.setattr(subprocess, "DETACHED_PROCESS", 8, raising=False)
     monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 1024, raising=False)
     assert processes.creation(detached=True)["creationflags"] == 8
-    assert processes.creation()["creationflags"] == 512
+    assert processes.creation()["creationflags"] == 512 | 1024
     handler = signals.SessionEvents.__new__(signals.SessionEvents)
     called = []
     handler.callback = lambda: called.append("session_ending")
