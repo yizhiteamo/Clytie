@@ -25,8 +25,18 @@ python -m clytie supervisor start   （前台运行，单实例）
 └─ 伴侣子进程（每个伴侣一个）：插件宿主、本体、账本、记忆
 ```
 
-- **前台运行**：`supervisor start` 在当前终端前台运行，日志同时输出到终端。关掉终端窗口或按 Ctrl+C 即触发安全停止（第 6 节），第二次 Ctrl+C 把正在执行的任务改为取消。这样做的原因是：不需要系统服务，状态可见，也不会留下用户不知道的后台进程；A4.1 还没有管理接口，后台运行时无法安全停止。
-- **后台运行（用户已确认，2026-10-30）**：A4.2 有了 API 之后提供 `supervisor start --detach`（启动后立即返回，日志写文件，停止、状态、静默通过 API 完成），并提供双击启动脚本（启动守护进程并打开 WebUI）。它们仍是用户手动启动，不是系统服务或开机自启。阶段三可选托盘图标。迁移到云服务器时如需系统服务（如 systemd），须另经用户明确同意。
+- **窗口与守护进程分开（用户已确认，Issue #47 D2）**：`supervisor start` 打开的终端窗口只是一个**前端窗口**，负责显示日志和接收停止操作；真正的守护进程由前端以脱离控制台的方式启动（Windows 用 `DETACHED_PROCESS`，Linux 用 `setsid`），不属于这个窗口，所以关闭窗口不会把它杀掉。前端和守护进程之间用一条管道通信：守护进程把日志行发给前端显示，前端把停止操作发给守护进程。
+- **关闭窗口就是安全停止**：大多数人会直接关窗口，所以关窗口必须等同于安全停止。以下情况都触发第 6 节的完整安全停止（取消模式，`supervisor.stop.timeout_seconds` 照常有效）：
+  - 按 Ctrl+C 或 Ctrl+Break；
+  - 点窗口的关闭按钮、退出登录或关机时窗口被关闭；
+  - 前端因为任何原因消失（管道断开，即 EOF）。
+
+  前端在收到关闭事件时只做一件事：立即向管道写入 `stop`，不等待结果；Windows 留给前端的几秒钟足够完成这一步。即使连这一步都来不及，守护进程看到管道断开也会照样开始安全停止。安全停止由守护进程在后台完成，最长不超过总超时，结束后自己退出，不会长期留在后台。
+- **第二次 Ctrl+C**：窗口还在时，第二次 Ctrl+C 让前端发送 `escalate`，把等待模式改为取消模式。关闭窗口的路径固定使用取消模式，因为窗口已经没有了，没人能再改。
+- **停止期间再次启动**：上一次的安全停止还没结束时再运行 `supervisor start`，前端显示"上一次还在安全停止中，请稍候"，等锁释放后再启动，不会出现两个守护进程。`supervisor status` 显示 `stopping`。
+- **前台提示**：前端第一行提示"关闭这个窗口会安全停止所有伴侣"。
+- 这样做的原因：不需要系统服务，状态可见；窗口没了守护进程会自己收尾退出，不会留下用户不知道的常驻后台进程。A4.1 还没有管理接口，前端管道就是唯一的停止入口。
+- **不留下子进程**：伴侣子进程放在守护进程创建的、设置了关闭即终止（kill-on-job-close）的 Job Object 里（Windows），守护进程无论怎样退出，子进程都会被一起结束。所有平台的子进程在与守护进程的通道断开（标准输入 EOF）时，都视为守护进程已不在：立即按取消模式停止、不等交付，5 秒内退出，且不会自行重启。下次启动时，发送中的消息按账本规则标为 `unknown` 不重发，执行中的任务标为 `interrupted` 不重放。
 - **单实例**：守护进程持有 `run/supervisor.lock`，锁的实现与插件宿主相同（Windows 用 msvcrt 字节锁，Linux 用 flock）。锁文件记录 pid 和进程创建时间，以操作系统的锁作为"持有者还活着"的判据。已有实例在运行时，再次启动报"已在运行"并退出，退出码非 0。不通过删除锁文件来抢锁。
 - **伴侣子进程**：入口是内部命令 `python -m clytie companion run <cid>`。它不是给用户用的命令，帮助中不列出；单独运行时也必须取得同样的锁。启动顺序沿用现有流程：配置校验 → 取得账本锁并处理迁移日志 → 账本重启修正 → 插件宿主启动 → 本体启动 → 连接平台 → 开始接收消息。
 - **信号隔离**：子进程放在独立的进程组中（Windows 用 `CREATE_NEW_PROCESS_GROUP`），所以终端里的 Ctrl+C 只送到守护进程，由守护进程统一协调停止。
@@ -60,7 +70,7 @@ python -m clytie supervisor start   （前台运行，单实例）
 | `inflight_tasks` | 正在执行的任务数 |
 | `sending` | 处于 `sending` 状态的 intent 数 |
 | `channels` | 每个平台插件的连接状态：`online`、`connecting`、`offline`、`auth_invalid`、`unknown`（第 3.3 节） |
-| `model` | `ok`、`auth_invalid`、`unknown`：取自 `features()` 和最近一次正常调用的结果，**不为检查而调用模型** |
+| `model` | `ok`、`auth_invalid`、`unknown`：只取最近一次正常调用的结果，还没有调用过时为 `unknown`；`features()` 只描述能力，不提供登录状态（Issue #47 D1）；**不为检查而调用模型** |
 | `quota` | 保障模式使用的最近一份 `QuotaSnapshot` 摘要（各窗口剩余比例），没有时为 `unknown` |
 | `silenced` | 子进程当前是否处于静默 |
 | `warnings` | 现有 `status` 提醒的代码列表，只有代码，不含原文 |
@@ -81,8 +91,9 @@ python -m clytie supervisor start   （前台运行，单实例）
   - `auth_invalid`：凭证或登录态失效；
   - `quota_exhausted`：额度用完。
 
-  它们可以出现在 `ModelTurn.error.code`、`Receipt.error.code`，以及 `connect()` 抛出的 `ChannelUnavailable(code)` 中。原有的 `rate_limited` / `transient` 不变。
-- 契约测试覆盖：缺少 `state()` 时为 `unknown`；`connect()` 抛出 `auth_invalid` 时进入第 4.2 节的不重启路径。
+  它们可以出现在 `ModelTurn.error.code`、`Receipt.error.code`，以及下面的 `PluginUnavailable(code)` 中。原有的 `rate_limited` / `transient` 不变。
+- **带错误码的启动失败（用户已确认，Issue #47 D1）**：SDK 新增异常 `PluginUnavailable(code: str, message: str = "")`；`ChannelUnavailable` 是它的子类。插件可以在 `start(ctx)`、`factory` 和 `connect()` 中抛出它。宿主把 `code` 记入该插件的启动失败状态并原样传给本体，`message` 只写日志，不进入通知和心跳。宿主**不解析异常消息**来猜测原因；没有带错误码的其他异常一律视为无错误码。启动阶段不为识别原因而发出任何模型调用。
+- 契约测试覆盖：缺少 `state()` 时为 `unknown`；`start()`、`factory` 或 `connect()` 抛出 `PluginUnavailable("auth_invalid")` 时进入第 4.2 节的不重启路径；抛出 `transient` 或普通异常时按崩溃处理；宿主传递的是错误码而不是消息。
 
 ## 4. 重启策略
 
@@ -103,10 +114,12 @@ python -m clytie supervisor start   （前台运行，单实例）
 | `config_invalid` | 配置校验失败 |
 | `migration_blocked` | 存在账本迁移日志或"恢复未完成"，伴侣按现有规则拒绝启动 |
 | `lock_held` | 这个伴侣已经被另一个进程占用 |
-| `auth_invalid` | 启动时平台或模型报告凭证失效 |
-| `required_plugin_failed` | 必需的平台或模型插件启动失败，且错误码不是 `transient` / `rate_limited` |
+| `auth_invalid` | 启动时必需的平台或模型插件抛出 `PluginUnavailable("auth_invalid")` |
+| `quota_exhausted` | 启动时模型插件抛出 `PluginUnavailable("quota_exhausted")` |
+| `required_plugin_failed` | 必需的平台或模型插件启动失败，带有上面以外的错误码（`transient`、`rate_limited` 除外） |
 
-- 插件启动失败时，错误码是 `transient` / `rate_limited` 的，按第 4.1 节的崩溃处理。
+- 必需插件的启动失败：错误码为 `transient`、`rate_limited`，或者抛出的是没有错误码的普通异常，按第 4.1 节的崩溃处理（退避重启，连续失败后停止重启）。
+- 非必需插件的启动失败沿用插件宿主的现有规则（该插件不装配，伴侣照常运行，`status` 提醒），不会让整个伴侣进入 `blocked`。
 - `blocked` 只能由主人处理后手动重新启动来解除。A4.1 提供内部入口 `supervisor.restart(cid)`，CLI 和 API 在 A4.2 接入。
 
 ### 4.3 运行中凭证失效或额度用完
@@ -174,7 +187,7 @@ python -m clytie supervisor start   （前台运行，单实例）
 
   一个伴侣失败不影响其他伴侣的关闭（#10）。
 - **关闭期间被取消**（#7）：例如调用方的协程被取消。必须先等所有伴侣的关闭处理完成，再向调用方传播取消，不能当作正常返回。传播的异常类型为 `ShutdownCancelled`，它携带完整的上述结果（`.result`），调用方收到后仍能取得每个伴侣的 `stopped` / `not_stopped` 和原因。
-- 终端里的第二次 Ctrl+C 不算取消关闭，只把等待模式改为取消模式（第 1 节）。
+- 前端窗口里的第二次 Ctrl+C 不算取消关闭，只把等待模式改为取消模式（第 1 节）。
 - `supervisor status` 和健康汇总在停止期间显示"还有 N 条消息正在发送 / N 个任务在执行"（来自心跳）。
 
 ## 7. 全部静默
@@ -250,7 +263,7 @@ python -m clytie supervisor start   （前台运行，单实例）
     - 主人私聊同样静默；
     - 子进程超过 5 秒没有回复 `silence_ack` 时被重启并进入静默；
     - `outward` 类通知插件暂停，桌面通知照常。
-11. **信号**：子进程运行在独立的进程组中（检查启动参数）；第一次中断触发安全停止，第二次中断改为取消任务（直接调用处理函数测试）。
+11. **信号与关闭窗口**：子进程运行在独立的进程组中（检查启动参数）；守护进程以脱离控制台的方式启动（检查创建参数）。前端收到 Ctrl+C、关闭窗口事件，以及前端被直接终止导致管道 EOF，三种情况都让守护进程开始取消模式的完整安全停止，第 7 项的各条断言同样成立；第二次 Ctrl+C 发送 `escalate`。停止期间再次 `supervisor start` 会等待，不会出现两个守护进程。Windows 上伴侣子进程属于设置了关闭即终止的 Job Object（检查创建参数）。子进程在标准输入 EOF 后按取消模式 5 秒内退出、不自行重启。以上在 Windows 和 Linux 的冒烟测试中用真实进程验证（直接终止前端进程来模拟关闭窗口）。
 12. **健康**：`run/health.json` 的字段与状态取值都正确；守护进程未运行时 `supervisor status` 显示"未运行"和"可能过时"；不为检查而调用模型（用假模型的调用计数断言）；没有实现 `state()` 的平台插件显示 `unknown`。
 13. **通信通道**：未知的 `type` 只记 WARN；消息中没有原文（用虚构敏感词断言）；子进程的标准输出只用于这个通道。
 14. **冒烟测试**：使用真实子进程和 fake-channel、fake-model：启动 → `ready` → 心跳 → 用假的退出指令模拟崩溃 → 重启 → 安全停止，Windows 和 Linux 的 CI 都运行。
@@ -262,7 +275,7 @@ python -m clytie supervisor start   （前台运行，单实例）
 | roadmap A4 | 拆分为 A4.1 / A4.2 / A4.3，每段的范围和验收与本文件第 0 节表格一致；A4.1 的验收引用本文件第 10 节 |
 | design/supervisor.md | 开头注明实现规格见本文件；§1 注明前台运行；§4 注明实例级通知插件和冷却时间 6 小时 |
 | data-and-backup §1 | 目录树加入 `supervisor/` 和 `logs/supervisor/`；`run/` 注明包含 `supervisor.lock` 和 `health.json` |
-| sdk-spec | `Channel.state()`（可选）、`ChannelState`、`ChannelUnavailable`、错误码 `auth_invalid` / `quota_exhausted`、notifier 清单的 `outward` 字段 |
+| sdk-spec | `Channel.state()`（可选）、`ChannelState`、`PluginUnavailable` 及其子类 `ChannelUnavailable`、启动失败的错误码传递、错误码 `auth_invalid` / `quota_exhausted`、notifier 清单的 `outward` 字段 |
 | config-spec | 第 9 节中的字段 |
 | plugin-host-spec | 实例范围的装配（只用于 notifier）；`close` 遇到异常后继续停止其余插件 |
 | kernel-spec | 入站 `ignored` 新增原因 `shutting_down`、`silenced`、`model_auth_invalid`；intent 错误码新增 `shutdown_before_send`、`silenced` |

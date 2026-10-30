@@ -494,7 +494,7 @@ Issue #36（用户已确认）：窗口聊天原文保持原样，不从撤销�
 按 `supervisor-spec.md` §3.3、§9：
 
 - `Channel` 新增可选方法 `state() -> ChannelState`；`ChannelState` 字段为 `status`（`online`、`connecting`、`offline`、`auth_invalid`、`unknown`）、`since` 和可选 `code`。未实现时为 `unknown`，现有插件不需要修改。
-- 新增 `ChannelUnavailable(code)`，供 `connect()` 抛出。
-- 错误码增加 `auth_invalid`（凭证或登录态失效）和 `quota_exhausted`（额度用完），可以出现在 `ModelTurn.error.code`、`Receipt.error.code` 和 `ChannelUnavailable(code)`。原有 `rate_limited` / `transient` 不变。
+- 新增 `PluginUnavailable(code, message="")`，插件可在 `start(ctx)`、`factory` 和 `connect()` 中抛出；`ChannelUnavailable(code)` 是它的子类，供 `connect()` 使用。宿主只传递 `code`，不解析异常消息；`message` 只写日志（supervisor-spec §3.3，Issue #47 D1）。模型的登录状态只取最近一次正常调用的结果，`ModelFeatures` 不增加状态字段。
+- 错误码增加 `auth_invalid`（凭证或登录态失效）和 `quota_exhausted`（额度用完），可以出现在 `ModelTurn.error.code`、`Receipt.error.code` 和 `PluginUnavailable(code)`。原有 `rate_limited` / `transient` 不变。
 - notifier 清单增加可选 `outward: bool`，默认 `false`。静默期间暂停 `outward: true` 的实例通知插件；其他照常。
-- 契约测试覆盖未实现 `state()` 时为 `unknown`，以及 connect 抛出 auth_invalid 时不重启。
+- 契约测试覆盖未实现 `state()` 时为 `unknown`，以及 start、factory 或 connect 抛出 auth_invalid 时不重启。
