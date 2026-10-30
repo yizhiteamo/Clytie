@@ -37,3 +37,17 @@ Channel.state 是与 features 相同的同步缓存查询，不做网络探测�
 ## 验证计划
 
 用假启动器、假插件、假平台、假模型、假通知后端和 MockClock 覆盖 supervisor-spec §10；真实子进程冒烟仅使用临时实例和 fake-channel/fake-model，在 Windows 与 Linux CI 中运行。不创建系统服务、自启或计划任务，不弹出真实通知。
+
+## Issue #49：配置隔离与记忆失败分类
+
+全局配置错误及影响多个伴侣的共享清单错误、账号冲突阻止整个守护进程启动。只有单个伴侣自身配置无效时，使用报告中的伴侣 valid 标记将它置为 blocked/config_invalid，其余照常启动。配置加载器单独保留全局错误集合；不按错误文件名过滤。子进程交给宿主的报告只包含已验证通过的本伴侣。
+
+记忆库版本过新、不支持、结构不完整、迁移恢复被阻止，以及迁移快照写入或校验失败，统一使用结构化异常归为 migration_blocked；记忆运行锁占用归为 lock_held。不得解析异常消息分类。迁移快照保留规则留到 A4.3，此前不自动删除快照。
+
+## 关闭异常与停止状态的技术约定
+
+Python 3.10 的 Task 对 CancelledError 子类的传播可能丢失自定义结果，因此 ShutdownCancelled 直接继承 BaseException。它在全部关闭处理完成后抛出并携带 result，不是正常返回。调用方须显式捕获 ShutdownCancelled，不能仅捕获 asyncio.CancelledError；此时 task.cancelled() 为 false，gather(return_exceptions=True) 可收集该异常。此约定经过 Issue #49 前的只读技术核对，不改变先完成关闭再传播取消的规则。
+
+health.json 保持每五秒最多写一次。持锁者开始停止时更新 supervisor.lock 的 operation 元数据；status 仍仅通过操作系统锁判断存活，元数据只用于覆盖顶层 stopping 状态。元数据读取不完整时回退到健康文件，不通过删除锁或进程号猜测存活。
+
+父进程先将子进程加入 Job Object，再发送 boot 帧，子进程收到后才打开实例。IPC 使用 UTF-8 JSON Lines，日志走 stderr；同一进程内的重复停止请求共享一次关闭操作。
