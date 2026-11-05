@@ -16,6 +16,8 @@ dependencies = [
   "packaging>=25,<27",
   "tzdata>=2025.2",
   "cryptography>=46,<51",
+  "aiohttp>=3.13,<4",
+  "ruamel-yaml>=0.18,<0.19",
 ]
 
 [dependency-groups]

@@ -39,7 +39,7 @@ class Audit:
         self.clock = clock
         self.on_entry = None
 
-    def append(self, operation, cid=None, result="ok", reason=None, source="internal"):
+    def append(self, operation, cid=None, result="ok", reason=None, source="internal", **fields):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         value = dict(
             at=self.clock.now().isoformat(),
@@ -48,6 +48,7 @@ class Audit:
             result=result,
             reason=reason,
             source=source,
+            **fields,
         )
         with self.path.open("ab") as stream:
             stream.write(canonical(value) + b"\n")

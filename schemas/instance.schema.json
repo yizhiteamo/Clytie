@@ -170,16 +170,40 @@
       "properties": {
         "port": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1024,
+          "maximum": 6.5535e4
+        },
+        "session_idle_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "reauth_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440
+        },
+        "login_lockout": {
+          "type": "object",
+          "properties": {
+            "failures": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 20
+            },
+            "seconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 3600
+            }
+          },
+          "additionalProperties": false
         }
       },
       "patternProperties": {
         "^x-": {}
       },
-      "additionalProperties": false,
-      "required": [
-        "port"
-      ]
+      "additionalProperties": false
     },
     "paths": {
       "type": "object",
@@ -230,7 +254,7 @@
           "type": "integer",
           "default": 3600,
           "minimum": 60,
-          "maximum": 8.64e4
+          "maximum": 8.6400e+04
         }
       },
       "patternProperties": {
@@ -287,7 +311,7 @@
             "stable_seconds": {
               "type": "integer",
               "minimum": 60,
-              "maximum": 8.64e4,
+              "maximum": 8.6400e+04,
               "default": 600
             }
           },

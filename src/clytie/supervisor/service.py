@@ -11,6 +11,7 @@ from .common import Audit, finish_shutdown, read, write
 from .notifications import Notifications
 
 FATAL = {
+    "management_recovery_blocked",
     "config_invalid",
     "migration_blocked",
     "lock_held",
@@ -57,6 +58,11 @@ class Supervisor:
         self.escalation = asyncio.Event()
         self._closing = None
         self.finalize = None
+        self.management_workers = None
+        self.requests = {}
+        self.suspended = set()
+        self.request_stop = None
+        self.startup_cancelled = lambda: False
 
     def setting(self, group, key, default):
         return self.config.get(group, {}).get(key, default)
@@ -89,7 +95,11 @@ class Supervisor:
                 silenced=self.silenced,
                 warnings=[],
             )
-            self.monitors[cid] = asyncio.create_task(self.monitor(cid))
+            if self.startup_cancelled():
+                self.rows[cid]["state"] = "stopped"
+                self.monitors[cid] = asyncio.create_task(self.clock.sleep(0))
+            else:
+                self.monitors[cid] = asyncio.create_task(self.monitor(cid))
         self.ticker = asyncio.create_task(self.tick())
 
     async def command(self, child, kind, **fields):
@@ -99,7 +109,7 @@ class Supervisor:
 
     async def monitor(self, cid):
         row = self.rows[cid]
-        while not self.stopping:
+        while not self.stopping and cid not in self.suspended:
             row.update(state="starting", phase="starting", migration_stalled=False)
             startup_elapsed = 0
             accounted = self.clock.monotonic()
@@ -117,7 +127,7 @@ class Supervisor:
                     hang = self.config.get("hang_seconds", 30)
                     startup_limit = self.config.get("startup_seconds", 300)
                     budget = max(0, last + hang - now)
-                    if row["phase"] == "migrating" or self.stopping:
+                    if row["phase"] == "migrating" or self.stopping or cid in self.suspended:
                         budget = hang
                     elif ready is None:
                         budget = min(budget, max(0, startup_limit - startup_elapsed))
@@ -125,7 +135,7 @@ class Supervisor:
                         msg = await timed(child.receive(), self.clock, budget)
                     except TimeoutError:
                         now = self.clock.monotonic()
-                        if self.stopping:
+                        if self.stopping or cid in self.suspended:
                             last = now
                             continue
                         if row["phase"] == "migrating":
@@ -149,7 +159,8 @@ class Supervisor:
                     if kind == "ready":
                         ready = self.clock.monotonic()
                         last = ready
-                        row["state"] = "running"
+                        if not self.stopping and cid not in self.suspended:
+                            row["state"] = "running"
                         row["phase"] = "running"
                         self.ready_events[cid].set()
                     elif kind == "heartbeat":
@@ -188,7 +199,7 @@ class Supervisor:
                             and row["silenced"] == self.silenced
                         ):
                             row["silence_status"] = "confirmed"
-                        if not self.stopping and ready is not None:
+                        if not self.stopping and cid not in self.suspended and ready is not None:
                             row["state"] = (
                                 "degraded" if row["model"] == "auth_invalid" else "running"
                             )
@@ -217,6 +228,10 @@ class Supervisor:
                         fatal = msg.get("reason")
                         if fatal not in FATAL:
                             fatal = None
+                    elif kind == "response":
+                        pending = self.requests.get((cid, msg.get("id")))
+                        if pending and not pending.done():
+                            pending.set_result(msg)
                     elif kind == "stop_result":
                         self.stop_results[cid] = msg["result"]
                     elif kind == "silence_ack":
@@ -232,6 +247,7 @@ class Supervisor:
                             row["failures"] = 0
                     if (
                         not self.stopping
+                        and cid not in self.suspended
                         and ready is None
                         and row["phase"] == "starting"
                         and startup_elapsed >= startup_limit
@@ -240,6 +256,11 @@ class Supervisor:
                         reason = "startup_timeout"
                         break
                 code = await child.wait()
+                from clytie.api.auth import APIError
+
+                for (owner, _), pending in tuple(self.requests.items()):
+                    if owner == cid and not pending.done():
+                        pending.set_exception(APIError("companion_unavailable", 409))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -248,7 +269,7 @@ class Supervisor:
                 child = self.children.get(cid)
                 if child:
                     await child.kill()
-            if self.stopping:
+            if self.stopping or cid in self.suspended:
                 return
             if fatal:
                 self.pending_health.discard(cid)
@@ -261,6 +282,7 @@ class Supervisor:
                     "quota_exhausted": "额度恢复后重启伴侣",
                     "config_invalid": "修正配置后重启伴侣",
                     "migration_blocked": "处理迁移或恢复后重启伴侣",
+                    "management_recovery_blocked": "核验管理操作恢复状态后重启伴侣",
                     "lock_held": "停止占用进程后重启伴侣",
                     "required_plugin_failed": "修复必需插件后重启伴侣",
                 }[fatal]
@@ -306,6 +328,14 @@ class Supervisor:
             external=external,
             undelivered=self.notifications.undelivered,
             state="stopping" if self.stopping else "running",
+            api_port=getattr(self, "api_port", None),
+            warnings=list(self.problems.values()),
+            management={
+                "operations": self.management_workers.status(),
+                "still_finishing": self.management_workers.still_finishing,
+            }
+            if self.management_workers
+            else None,
         )
         import json
 
@@ -359,6 +389,90 @@ class Supervisor:
         )
         return dict(results)
 
+    async def request(self, cid, op, args, *, timeout=30):
+        from uuid import uuid4
+
+        from clytie.api.auth import APIError
+
+        if self.rows.get(cid, {}).get("state") not in {"running", "degraded"}:
+            raise APIError("companion_busy", 409)
+        key = uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        self.requests[cid, key] = future
+        try:
+            await self.command(self.children[cid], "request", id=key, op=op, args=args)
+            try:
+                result = (
+                    await asyncio.shield(future)
+                    if timeout is None
+                    else await timed(asyncio.shield(future), self.clock, timeout)
+                )
+            except TimeoutError:
+                raise APIError("companion_timeout", 504) from None
+            if not result["ok"]:
+                error = result["error"]
+                raise APIError(error["code"], error.get("status", 400))
+            return result["result"]
+        finally:
+            self.requests.pop((cid, key), None)
+            if not future.done():
+                future.cancel()
+
+    async def stop_companion(self, cid, mode=None):
+        return await finish_shutdown(self._stop_companion(cid, mode))
+
+    async def _stop_companion(self, cid, mode=None):
+        self.suspended.add(cid)
+        row = self.rows[cid]
+        child = self.children.get(cid)
+        if child is None or row["state"] in {"stopped", "blocked", "restart_stopped", "backoff"}:
+            self.monitors[cid].cancel()
+            await asyncio.gather(self.monitors[cid], return_exceptions=True)
+            row["state"] = "stopped"
+            return {"stopped": [], "not_stopped": {}}
+        row["state"] = "stopping"
+        self.stop_results.pop(cid, None)
+        mode = mode or self.setting("stop", "task_mode", "cancel")
+        try:
+            await self.command(child, "stop", task_mode=mode)
+            if mode == "wait":
+                waiter = asyncio.create_task(child.wait())
+                escalation = asyncio.create_task(self.escalation.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {waiter, escalation}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if waiter not in done:
+                        await timed(
+                            asyncio.shield(waiter),
+                            self.clock,
+                            self.setting("stop", "timeout_seconds", 120),
+                        )
+                finally:
+                    escalation.cancel()
+                    await asyncio.gather(escalation, return_exceptions=True)
+            else:
+                await timed(child.wait(), self.clock, self.setting("stop", "timeout_seconds", 120))
+            await self.monitors[cid]
+            return self.stop_results.get(
+                cid,
+                {"stopped": [], "not_stopped": {}, "reason": "process_exited_without_stop_result"},
+            )
+        except TimeoutError:
+            await child.kill()
+            await child.wait()
+            return {"stopped": [], "not_stopped": {}, "reason": "timeout_killed"}
+        finally:
+            self.monitors[cid].cancel()
+            await asyncio.gather(self.monitors[cid], return_exceptions=True)
+            row["state"] = "stopped"
+
+    async def start_companion(self, cid):
+        if self.rows[cid]["state"] in {"running", "degraded", "starting"}:
+            return
+        self.suspended.discard(cid)
+        await self.restart(cid)
+
     async def restart(self, cid, reason="manual"):
         if self.stopping:
             return
@@ -379,6 +493,8 @@ class Supervisor:
 
     async def escalate(self):
         self.escalation.set()
+        if self.management_workers:
+            self.management_workers.escalate()
         for child in tuple(self.children.values()):
             try:
                 await self.command(child, "escalate")
@@ -396,6 +512,9 @@ class Supervisor:
         return await self.stop("cancel", source=source)
 
     async def stop(self, task_mode=None, *, source="internal"):
+        self.stopping = True
+        if self.management_workers:
+            self.management_workers.stopping = True
         if self._closing is None:
             self._closing = asyncio.create_task(
                 self._stop(task_mode or self.setting("stop", "task_mode", "cancel"), source)
@@ -408,6 +527,10 @@ class Supervisor:
 
     async def _stop(self, mode, source):
         self.stopping = True
+        management_stop = None
+        if self.management_workers:
+            self.management_workers.stopping = True
+            management_stop = asyncio.create_task(self.management_workers.stop(mode))
         for event in self.ready_events.values():
             event.set()
         if self.lock:
@@ -471,6 +594,8 @@ class Supervisor:
             zip(self.companions, await asyncio.gather(*(one(cid) for cid in self.companions)))
         )
         await self.notifications.update(self.problems, pending=self.pending_health)
+        if management_stop:
+            await management_stop
         for task in (*self.monitors.values(), self.ticker):
             if task:
                 task.cancel()

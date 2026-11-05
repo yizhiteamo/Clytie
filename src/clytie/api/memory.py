@@ -2,10 +2,11 @@
 
 import json
 import sqlite3
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from clytie.api.management_journal import owns_runtime
 from clytie.clock import SystemClock
 from clytie.config import load_home, resolve_home, thaw
 from clytie.memory.package import Exports
@@ -44,13 +45,28 @@ class HostedImporter:
 
 
 class MemoryAPI:
-    def __init__(self, home=None, *, repo_root=None, clock=None, importers=None):
+    def __init__(self, home=None, *, repo_root=None, clock=None, importers=None, hosted=None):
         self.home = Path(resolve_home(home)).resolve()
         self.repo_root, self.clock = repo_root, clock or SystemClock()
         self.importers = importers or {}
+        self.hosted = hosted
 
     @asynccontextmanager
     async def importer_scope(self, companion_id, selected):
+        if self.hosted is not None and selected is not None:
+            host = self.hosted.host
+            reg = next(
+                (
+                    r
+                    for r in host.registrations(companion_id, "memory.importer")
+                    if r.plugin_id == selected
+                ),
+                None,
+            )
+            if reg is None:
+                raise ValueError("importer unavailable")
+            yield {selected: HostedImporter(host, companion_id, reg)}
+            return
         if selected is None or selected in self.importers:
             yield self.importers
             return
@@ -99,6 +115,11 @@ class MemoryAPI:
     @contextmanager
     def open(self, companion_id, *, readonly=False):
         identifier(companion_id)
+        if self.hosted is not None:
+            if companion_id != self.hosted.cid:
+                raise ValueError("wrong companion")
+            yield self.hosted.host.memory_store(companion_id)
+            return
         report = load_home(self.home, repo_root=self.repo_root)
         if not report.valid or companion_id not in report.plugin_configs:
             raise ValueError("实例配置无效或伴侣不存在")
@@ -125,16 +146,30 @@ class MemoryAPI:
         from clytie.memory.migration import migrate
         from clytie.memory.transfer import runtime_lock
 
-        with runtime_lock(self.home, companion_id, "memory_thaw"):
+        with (
+            nullcontext()
+            if self.hosted or owns_runtime()
+            else runtime_lock(self.home, companion_id, "memory_thaw")
+        ):
             with self.open(companion_id) as store:
                 record = store.get_raw(record_id)
                 if record is None or record.retracted:
                     raise ValueError("记忆不存在")
                 migrate(store, self.home, companion_id, None)
-                reinforce(store, [record])
+                from clytie.api.management_journal import (
+                    begin_database,
+                    finish_commit,
+                    transaction_committed,
+                )
+
+                result = {"record_id": record_id, "thawed": True}
+                begin_database(store)
                 with store.transaction():
+                    reinforce(store, [record], transaction=False)
                     store.audit("memory.thawed", record_id=record_id)
-                return {"record_id": record_id, "thawed": True}
+                    transaction_committed(store, result)
+                finish_commit(result)
+                return result
 
     def export(self, companion_id, out, *, passphrase=None, format="encrypted"):
         with self.open(companion_id) as store:
@@ -154,9 +189,13 @@ class MemoryAPI:
     async def plan(self, companion_id, source, **options):
         async with self.importer_scope(companion_id, options.get("importer")) as importers:
             with self.open(companion_id, readonly=True) as store:
-                return await Transfers(store, self.home, companion_id, importers=importers).plan(
-                    source, **options
-                )
+                return await Transfers(
+                    store,
+                    self.home,
+                    companion_id,
+                    importers=importers,
+                    runtime_owned=self.hosted is not None or owns_runtime(),
+                ).plan(source, **options)
 
     async def apply(self, plan_id, **options):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
@@ -166,7 +205,11 @@ class MemoryAPI:
         async with self.importer_scope(plan["companion_id"], plan.get("importer")) as importers:
             with self.open(plan["companion_id"]) as store:
                 return await Transfers(
-                    store, self.home, plan["companion_id"], importers=importers
+                    store,
+                    self.home,
+                    plan["companion_id"],
+                    importers=importers,
+                    runtime_owned=self.hosted is not None or owns_runtime(),
                 ).apply(plan_id, **options)
 
     def plan_kind(self, plan_id):

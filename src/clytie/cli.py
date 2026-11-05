@@ -10,16 +10,23 @@ from clytie.api import local_status, local_task, task_exit_code
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {"companion", "_supervisor"}:
+    if argv and (argv[0] == "_supervisor" or argv[:2] == ["companion", "run"]):
         from clytie.supervisor.entry import internal
 
         return internal(argv)
     parser = argparse.ArgumentParser(prog="clytie")
     subcommands = parser.add_subparsers(dest="command", required=True)
     supervisor_parser = subcommands.add_parser("supervisor", help="守护进程")
-    supervisor_parser.add_argument("action", choices=["start", "status"])
+    supervisor_parser.add_argument("action", choices=["start", "status", "stop", "silence"])
     supervisor_parser.add_argument("--home")
     supervisor_parser.add_argument("--json", action="store_true")
+    supervisor_parser.add_argument("--detach", action="store_true")
+    supervisor_parser.add_argument("--wait-tasks", action="store_true")
+    supervisor_parser.add_argument("--yes", action="store_true")
+    supervisor_parser.add_argument("value", nargs="?", choices=["on", "off"])
+    from clytie.api.cli import add_parser as management_parser
+
+    management_parser(subcommands)
     status_parser = subcommands.add_parser("status", help="离线检查实例配置")
     status_parser.add_argument("--home")
     status_parser.add_argument("--json", action="store_true")
@@ -30,7 +37,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     task_parser.add_argument("--json", action="store_true")
     task_parser.add_argument("--full", action="store_true")
     from clytie.memory.cli import add_parser
-    from clytie.memory.cli import run as memory_run
 
     add_parser(subcommands)
     try:
@@ -39,12 +45,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         if exc.code and argv and "task" in argv:
             return 4
         raise
-    if arguments.command == "supervisor":
-        from clytie.supervisor.entry import run
+    from clytie.api.cli import run as management_run
+    from clytie.config import resolve_home
+    from clytie.supervisor.entry import status as supervisor_status
 
-        return run(arguments)
-    if arguments.command == "memory":
-        return memory_run(arguments)
+    offline = arguments.command == "status" or (
+        arguments.command in {"task", "supervisor"}
+        and (
+            getattr(arguments, "action", None) == "start"
+            or not supervisor_status(resolve_home(arguments.home))["running"]
+        )
+    )
+    if offline:
+        from clytie.supervisor.common import read
+
+        silence = read(resolve_home(arguments.home) / "supervisor/silence.json", {})
+        if silence.get("on"):
+            print("全部静默中（自" + str(silence.get("since")) + "起）")
+    if arguments.command == "supervisor":
+        if arguments.action == "start":
+            if arguments.detach:
+                import asyncio
+
+                from clytie.api.client import detached_start
+                from clytie.clock import SystemClock
+
+                result = asyncio.run(detached_start(resolve_home(arguments.home), SystemClock()))
+                print(json.dumps(result, ensure_ascii=False))
+                return 0 if result["ok"] else 1
+            from clytie.supervisor.entry import run
+
+            return run(arguments)
+        if (
+            arguments.action == "status"
+            and not supervisor_status(resolve_home(arguments.home))["running"]
+        ):
+            from clytie.supervisor.entry import run
+
+            return run(arguments)
+        return management_run(arguments)
+    if arguments.command in {"memory", "companion", "boundary", "plugin", "admin"}:
+        return management_run(arguments)
+    if arguments.command == "task" and supervisor_status(resolve_home(arguments.home))["running"]:
+        return management_run(arguments)
     if arguments.command == "task":
         result = local_task(
             arguments.task_id,
@@ -52,36 +95,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             companion_id=arguments.companion,
             full=arguments.full,
         )
-        if arguments.json:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-        elif result["ok"]:
-            task = result["task"]
-            print(f"任务 {task['task_id']} · 伴侣 {task['companion_id']}")
-            for key, label in (
-                ("kind", "类型"),
-                ("tool", "能力"),
-                ("requester", "请求人"),
-                ("conversation_id", "会话"),
-                ("exec_status", "执行状态"),
-                ("delivery_status", "交付状态"),
-                ("timings", "阶段耗时"),
-                ("parent_task_id", "父任务"),
-                ("child_task_ids", "子任务"),
-                ("deliveries", "交付与收据"),
-                ("error", "错误摘要"),
-                ("asset_ids", "产物引用"),
-                ("unrecovered", "尚未恢复"),
-            ):
-                print(f"{label}：{json.dumps(task[key], ensure_ascii=False)}")
-            if arguments.full:
-                print("完整内容：" + json.dumps(task["content"], ensure_ascii=False))
-        else:
-            print(f"查询失败 [{result['error']['code']}]：{result['error']['message']}")
-            if result["error"].get("companions"):
-                print("伴侣：" + ", ".join(result["error"]["companions"]))
-        if not arguments.json and result["warnings"]:
-            print("提醒：" + json.dumps(result["warnings"], ensure_ascii=False))
-        return task_exit_code(result)
+        return display_task(arguments, result)
     report = local_status(arguments.home)
     result = report.to_dict()
     if arguments.json:
@@ -120,3 +134,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"故障目录总占用：{retained['total_bytes']} bytes；统计完整：{retained['size_complete']}"
             )
     return report.exit_code
+
+
+def display_task(arguments, result):
+    if arguments.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result["ok"]:
+        task = result["task"]
+        print(f"任务 {task['task_id']} · 伴侣 {task['companion_id']}")
+        for key, label in (
+            ("kind", "类型"),
+            ("tool", "能力"),
+            ("requester", "请求人"),
+            ("conversation_id", "会话"),
+            ("exec_status", "执行状态"),
+            ("delivery_status", "交付状态"),
+            ("timings", "阶段耗时"),
+            ("parent_task_id", "父任务"),
+            ("child_task_ids", "子任务"),
+            ("deliveries", "交付与收据"),
+            ("error", "错误摘要"),
+            ("asset_ids", "产物引用"),
+            ("unrecovered", "尚未恢复"),
+        ):
+            print(f"{label}：{json.dumps(task[key], ensure_ascii=False)}")
+        if arguments.full:
+            print("完整内容：" + json.dumps(task["content"], ensure_ascii=False))
+    else:
+        print(f"查询失败 [{result['error']['code']}]：{result['error']['message']}")
+        if result["error"].get("companions"):
+            print("伴侣：" + ", ".join(result["error"]["companions"]))
+    if not arguments.json and result["warnings"]:
+        print("提醒：" + json.dumps(result["warnings"], ensure_ascii=False))
+    return task_exit_code(result)

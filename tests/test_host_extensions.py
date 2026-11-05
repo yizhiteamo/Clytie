@@ -3,9 +3,6 @@
 import json
 from types import SimpleNamespace
 
-import pytest
-
-from clytie.plugin_host import PluginFailure
 from clytie.sdk import CancelToken
 from clytie.sdk.testing.context_fakes import FakeApiClient, FakeCandidateReader, FakeIdentity
 from clytie.sdk.testing.samples import (
@@ -237,8 +234,7 @@ async def test_new_plugin_all_points_and_dispatch_without_core_modification(tmp_
     assert await call("service", "new.state", "get", {}) == {"ready": True}
     assert await call("cli_command", "example", {}, FakeApiClient(clock=h.clock)) == 0
     await runtime.ctx.events.publish("new-plugin.changed", {})
-    with pytest.raises(PluginFailure, match="not_assembled"):
-        await call("api_route", "/plugins/new-plugin/status", {})
+    assert await call("api_route", "/plugins/new-plugin/status", {}) == {}
     assert runtime.plugin.seen
     await h.close()
 

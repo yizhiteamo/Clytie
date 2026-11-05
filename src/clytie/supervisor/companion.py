@@ -43,6 +43,8 @@ class Companion:
         self._closing = None
         self.orphan = False
         self.report = None
+        self.management_requests = set()
+        self.management_journals = {}
         self.on_phase = lambda phase: None
         self.stop_requested = lambda: False
 
@@ -79,8 +81,19 @@ class Companion:
         # Restart correction precedes plugin start; reactions are initialized by Agent.start.
         interrupted = ledger.restart()
         self.host.configure_report(report)
+        from clytie.api.management_journal import ManagementBusy, gate, recover_locked
+
         try:
-            self.host.memory_store(self.cid)
+            with gate(self.home, self.cid):
+                recover_locked(self.home, self.cid, self.clock)
+                self.host.memory_store(self.cid)
+        except ManagementBusy:
+            reason = (
+                "management_recovery_blocked"
+                if (self.home / "companions" / self.cid / "management/blocked.json").exists()
+                else "lock_held"
+            )
+            raise StartupBlocked(reason) from None
         except OperationBusy:
             raise StartupBlocked("lock_held") from None
         except MemoryStartupError:
@@ -97,6 +110,8 @@ class Companion:
                 return False
             plan = self.host.plan_enable(self.cid, pid)
             if not plan.ok:
+                if pid in self.host._excluded:
+                    self.host.states.setdefault(self.cid, {})[pid] = {"status": "uninstalled"}
                 if pid in required:
                     raise StartupBlocked("required_plugin_failed")
                 continue
@@ -245,7 +260,13 @@ class Companion:
 
         return await finish_shutdown(join())
 
+    def cancel_management(self):
+        for journal in tuple(self.management_journals.values()):
+            journal.cancel()
+
     async def _stop(self, mode, *, orphan=False):
+        if mode == "cancel" or self.escalated.is_set():
+            self.cancel_management()
         if not self.agent:
             await self.host.event_bus.close()
             await self.host.close()
@@ -340,6 +361,8 @@ class Companion:
         for task in self.feeds:
             task.cancel()
         await asyncio.gather(*self.feeds, return_exceptions=True)
+        # Accepted management work must finish before plugin shutdown / database close.
+        await asyncio.gather(*tuple(self.management_requests), return_exceptions=True)
         await kernel.bus.close()
         await self.host.event_bus.close()
         result = await self.host.close()

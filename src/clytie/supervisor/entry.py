@@ -137,6 +137,27 @@ async def companion_main(home, cid):
     emit("ready")
     heartbeat.update(runtime.health(), phase="running")
     stopping = None
+    requests = runtime.management_requests
+
+    async def handle_request(msg):
+        from clytie.api.auth import APIError
+        from clytie.api.operations import companion_operation
+
+        try:
+            if stopping or stop_requested.is_set():
+                raise APIError("companion_busy", 409)
+            value = await companion_operation(runtime, msg["op"], msg["args"])
+            emit("response", id=msg["id"], ok=True, result=value)
+        except APIError as exc:
+            emit("response", id=msg["id"], ok=False, error={"code": exc.code, "status": exc.status})
+        except Exception:
+            emit(
+                "response",
+                id=msg["id"],
+                ok=False,
+                error={"code": "operation_failed", "status": 400},
+            )
+
     try:
         while True:
             read_task = asyncio.create_task(lines.receive())
@@ -153,11 +174,20 @@ async def companion_main(home, cid):
             if msg is None:
                 await orphan_exit(runtime, clock, protocol)
             kind = msg["type"]
-            if kind == "stop" and stopping is None:
+            if kind == "request":
+                task = asyncio.create_task(handle_request(msg))
+                requests.add(task)
+                task.add_done_callback(requests.discard)
+            elif kind == "stop" and stopping is None:
                 heartbeat.update(phase="stopping")
                 stopping = asyncio.create_task(runtime.stop(msg.get("task_mode", "cancel")))
+            elif kind == "management_cancel":
+                journal = runtime.management_journals.get(msg.get("operation_id"))
+                if journal:
+                    journal.cancel()
             elif kind == "escalate":
                 runtime.escalated.set()
+                runtime.cancel_management()
             elif kind == "session_ending":
                 runtime.session_ending()
                 runtime.escalated.set()
@@ -168,6 +198,9 @@ async def companion_main(home, cid):
             else:
                 runtime.log.warning("companion.unknown_type")
     finally:
+        for task in requests:
+            task.cancel()
+        await asyncio.gather(*requests, return_exceptions=True)
         heartbeat.close()
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
@@ -237,7 +270,26 @@ class FrontendCommands:
         return False
 
 
-async def daemon_main(home):
+class StartupHandshake:
+    """A short-lived launch pipe: EOF cancels only before API acknowledgement."""
+
+    def __init__(self, loop, queue):
+        self.loop, self.queue = loop, queue
+        self.ready = threading.Event()
+        self.cancelled = threading.Event()
+        self.confirmed = False
+
+    def observe(self, message):
+        if self.confirmed:
+            return
+        if message is None:
+            self.cancelled.set()
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
+        elif message.get("type") == "startup_confirmed" and self.ready.is_set():
+            self.confirmed = True
+
+
+async def daemon_main(home, detached=False):
     clock = SystemClock()
     report = load_home(home)
     if report.global_errors or not report.instance:
@@ -275,18 +327,68 @@ async def daemon_main(home):
         PluginHost(repository_root(), home, clock=clock), subprocess_backend=ProcessBackend(clock)
     )
     supervisor.notifications.cooldown = instance.get("notify", {}).get("cooldown_hours", 6) * 3600
-    lines = Lines(sys.stdin.buffer)
+    detached_events = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    handshake = StartupHandshake(loop, detached_events)
+    lines = Lines(sys.stdin.buffer, handshake.observe if detached else None)
+    supervisor.startup_cancelled = handshake.cancelled.is_set
 
     def ending(*_):
-        loop.call_soon_threadsafe(lines.queue.put_nowait, dict(type="session_ending", seq=0))
+        handshake.cancelled.set()
+        loop.call_soon_threadsafe(
+            (detached_events if detached else lines.queue).put_nowait,
+            dict(type="session_ending", seq=0),
+        )
 
     signal.signal(signal.SIGTERM, ending)
     from .signals import SessionEvents
 
     session_events = SessionEvents(ending)
 
+    from clytie.api.auth import APIError
+    from clytie.api.management import Management
+    from clytie.api.server import Server
+
+    management = Management(supervisor, report)
+    server = None
+    control = FrontendCommands(supervisor)
+    startup_complete = asyncio.Event()
+
+    def stop_requested(mode):
+        supervisor.stopping = True
+        management.memory_workers.stopping = True
+        if control.stopping is None:
+
+            async def stop_when_ready():
+                await startup_complete.wait()
+                return await supervisor.stop(mode, source="internal")
+
+            control.stopping = asyncio.create_task(stop_when_ready())
+        queue = detached_events if detached else lines.queue
+        queue.put_nowait(dict(type="api_stop", seq=0))
+
+    supervisor.request_stop = stop_requested
+
     async def prepare():
+        nonlocal server
+        server = Server(home, clock, management, supervisor.audit, thaw(instance.get("api", {})))
+        try:
+            management.api_port = supervisor.api_port = await server.start()
+            handshake.ready.set()
+        except (OSError, APIError):
+            if detached:
+                raise APIError("api_bind_failed", 503) from None
+            supervisor.problems["api_unavailable:instance"] = "管理接口未启动：api_bind_failed"
+            frame(sys.stdout.buffer, dict(type="warning", seq=0, code="api_bind_failed"))
+        if not server.auth.admin and not detached:
+            frame(
+                sys.stdout.buffer,
+                dict(
+                    type="notice",
+                    seq=0,
+                    message="还没有设置管理口令：网页登录不可用，危险操作没有口令保护。运行 clytie admin set-password 设置",
+                ),
+            )
         await notifiers.start(
             instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
         )
@@ -295,16 +397,44 @@ async def daemon_main(home):
 
     try:
         await supervisor.start(prepare)
-    except OperationBusy:
-        frame(sys.stdout.buffer, dict(type="error", seq=0, code="already_running"))
+    except (OperationBusy, APIError) as exc:
+        if control.stopping is not None:
+            control.stopping.cancel()
+            await asyncio.gather(control.stopping, return_exceptions=True)
+        if server:
+            await server.close()
+        frame(
+            sys.stdout.buffer,
+            dict(
+                type="error",
+                seq=0,
+                code="already_running" if isinstance(exc, OperationBusy) else exc.code,
+            ),
+        )
         session_events.close()
         launcher.close()
         return 1
+    startup_complete.set()
     frame(sys.stdout.buffer, dict(type="ready", seq=0))
-    control = FrontendCommands(supervisor)
+
+    async def reminders():
+        while True:
+            if supervisor.silenced and not detached:
+                info = read(home / "supervisor/silence.json", {})
+                frame(
+                    sys.stdout.buffer,
+                    dict(
+                        type="notice",
+                        seq=0,
+                        message="全部静默中（自" + info.get("since", "") + "起）",
+                    ),
+                )
+            await clock.sleep(60)
+
+    reminder = asyncio.create_task(reminders())
     try:
         while True:
-            task = asyncio.create_task(lines.receive())
+            task = asyncio.create_task(detached_events.get() if detached else lines.receive())
             if control.stopping:
                 done, _ = await asyncio.wait(
                     {task, control.stopping}, return_when=asyncio.FIRST_COMPLETED
@@ -320,9 +450,16 @@ async def daemon_main(home):
                     except (OSError, BrokenPipeError):
                         pass
                     return 0
-            if await control.receive(await task):
+            message = await task
+            if message and message.get("type") == "api_stop":
+                continue
+            if await control.receive(message):
                 return 0
     finally:
+        reminder.cancel()
+        await asyncio.gather(reminder, return_exceptions=True)
+        if server:
+            await server.close()
         session_events.close()
         await notifiers.close()
         launcher.close()
@@ -332,7 +469,10 @@ def frontend(home):
     # Redirected Windows stdout may use an ANSI codepage unable to encode this notice.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    print("关闭这个窗口会安全停止所有伴侣", flush=True)
+    print(
+        "这是调试模式窗口。命令行操作会直接作用于伴侣的数据，请确认了解每条命令的作用后再执行。关闭这个窗口会安全停止所有伴侣。",
+        flush=True,
+    )
     clock = SystemClock()
     while status(home)["running"]:
         if status(home)["health"].get("state") != "stopping":
@@ -383,6 +523,7 @@ def frontend(home):
 def internal(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--home", required=True)
+    parser.add_argument("--detach", action="store_true")
     if argv[0] == "companion":
         parser.add_argument("verb", choices=["run"])
         parser.add_argument("cid")
@@ -391,7 +532,7 @@ def internal(argv):
     logging.basicConfig(stream=sys.stderr, level=logging.INFO)
     if argv[0] == "companion":
         return asyncio.run(companion_main(home, args.cid))
-    return asyncio.run(daemon_main(home))
+    return asyncio.run(daemon_main(home, detached=args.detach))
 
 
 def run(args):

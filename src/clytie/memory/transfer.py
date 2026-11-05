@@ -10,15 +10,22 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from clytie.api.management_journal import (
+    begin_database,
+    cancellation,
+    checkpoint,
+    finish_commit,
+    publish_file,
+    transaction_committed,
+)
 from clytie.plugin_host.locking import file_lock, process_identity
-from clytie.plugin_host.snapshots import UpgradeSnapshots, atomic_write, contained, identifier
+from clytie.plugin_host.snapshots import UpgradeSnapshots, contained, identifier
 from clytie.plugin_host.support import HostLog
-from clytie.sdk import CancelToken
 from clytie.sdk.types import ImportCandidate, MemoryRecord
 
 from . import origins
 from .crypto import b64, decrypt, un64
-from .package import TABLES, open_database, snapshot, unpack
+from .package import TABLES, open_database, snapshot, unpack, write_temporary
 from .store import BASIS, canonical, content_hash, fingerprint
 
 
@@ -65,11 +72,12 @@ def runtime_lock(home, companion_id, operation="memory_runtime"):
 
 
 class Transfers:
-    def __init__(self, store, home, companion_id, *, importers=None, log=None):
+    def __init__(self, store, home, companion_id, *, importers=None, log=None, runtime_owned=False):
         self.store, self.home = store, Path(home).resolve()
         self.cid = identifier(companion_id)
         self.importers = importers or {}
         self.log = log or HostLog()
+        self.runtime_owned = runtime_owned
 
     def plan_path(self, plan_id):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
@@ -168,7 +176,8 @@ class Transfers:
             if not detected:
                 raise ValueError("导入器不支持该源副本")
             records = {}
-            async for candidate in implementation.read(source, CancelToken()):
+            async for candidate in implementation.read(source, cancellation()):
+                checkpoint()
                 record = self.candidate(candidate, approve)
                 if record.record_id in records:
                     raise ValueError("导入候选编号重复")
@@ -397,7 +406,7 @@ class Transfers:
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )
-        atomic_write(self.plan_path(plan["id"]), canonical(plan).encode())
+        publish_file(self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]})
         preview = dict(plan)
         if show_content:
             preview["content"] = {
@@ -410,6 +419,7 @@ class Transfers:
         return preview
 
     def _snapshot(self):
+        checkpoint()
         raw = snapshot(self.store, self.home, self.cid)
         key = UpgradeSnapshots(self.home, self.store.clock, self.log)._key(create=True)
         header = {
@@ -434,17 +444,25 @@ class Transfers:
                 + ".enc"
             ),
         )
-        atomic_write(
-            path, canonical(dict(header=header, nonce=b64(nonce), data=b64(encrypted))).encode()
-        )
-        saved = json.loads(path.read_bytes())
-        checked = AESGCM(key).decrypt(
-            un64(saved["nonce"]), un64(saved["data"]), canonical(saved["header"]).encode()
-        )
-        if checked != raw:
-            raise ValueError("导入前快照校验失败")
-        db = open_database(checked, self.home, self.cid)
-        db.close()
+        pending = path.with_name(path.name + "." + uuid4().hex + ".pending")
+        try:
+            write_temporary(
+                pending,
+                canonical(dict(header=header, nonce=b64(nonce), data=b64(encrypted))).encode(),
+            )
+            saved = json.loads(pending.read_bytes())
+            checked = AESGCM(key).decrypt(
+                un64(saved["nonce"]), un64(saved["data"]), canonical(saved["header"]).encode()
+            )
+            if checked != raw:
+                raise ValueError("导入前快照校验失败")
+            db = open_database(checked, self.home, self.cid)
+            db.close()
+            pending.replace(path)
+        finally:
+            if pending.exists():
+                pending.unlink()
+        checkpoint()
         return path
 
     def _retention(self):
@@ -468,7 +486,13 @@ class Transfers:
         plan = json.loads(self.plan_path(plan_id).read_bytes())
         if plan["companion_id"] != self.cid or plan["id"] != plan_id:
             raise ValueError("计划目标不匹配")
-        with runtime_lock(self.home, self.cid, "memory_import"):
+        from contextlib import nullcontext
+
+        with (
+            nullcontext()
+            if self.runtime_owned
+            else runtime_lock(self.home, self.cid, "memory_import")
+        ):
             if self.store.transient and self.store.path.exists():
                 raise ValueError("计划失效，记忆库已建立")
             if (
@@ -498,12 +522,14 @@ class Transfers:
                 raise ValueError("必须确认这是她的记忆")
             if any(r["action"] == "conflict" and r["choice"] is None for r in rows):
                 raise ValueError("冲突尚未选择")
+            begin_database(self.store, "materializing")
             self.store.materialize()
             from .migration import migrate
 
             migrate(self.store, self.home, self.cid, self.log)
             backup = self._snapshot()
             import_id, changes = uuid4().hex, {}
+            begin_database(self.store)
             with self.store.transaction():
                 if not self.store.uid:
                     self.store.set_meta(
@@ -654,6 +680,7 @@ class Transfers:
                     source_hash=loaded["hash"],
                     snapshot=backup.name,
                 )
+            finish_commit({"import_id": import_id})
             self._retention()
             return import_id
 
@@ -661,6 +688,7 @@ class Transfers:
         value = dict(at=self.store.clock.now().isoformat(), changes=changes, **metadata)
         self.store.db.execute("INSERT INTO imports VALUES(?,?)", (import_id, canonical(value)))
         self.store.audit("memory_import", import_id=import_id, changed=len(changes))
+        transaction_committed(self.store, {"import_id": import_id})
 
     def _undo_data(self, import_id, choices):
         row = self.store.db.execute("SELECT data FROM imports WHERE id=?", (import_id,)).fetchone()
@@ -718,7 +746,7 @@ class Transfers:
             counts=counts,
             downgrade_count=sum(r["downgrade"] for r in rows),
         )
-        atomic_write(self.plan_path(plan["id"]), canonical(plan).encode())
+        publish_file(self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]})
         preview = dict(plan)
         if show_content:
             preview["content"] = {
@@ -738,6 +766,7 @@ class Transfers:
             raise ValueError("撤销计划失效或冲突尚未选择")
         backup = self._snapshot()
         import_id, changes = uuid4().hex, {}
+        begin_database(self.store)
         with self.store.transaction():
             for row in rows:
                 if row["action"] == "conflict" and row["choice"] == "current":
@@ -765,5 +794,6 @@ class Transfers:
             )
             origins.track(self.store)
             self._record_import(import_id, changes, undo=plan["undo"], snapshot=backup.name)
+        finish_commit({"import_id": import_id})
         self._retention()
         return import_id
