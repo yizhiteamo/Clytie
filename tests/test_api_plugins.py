@@ -166,10 +166,15 @@ def _uninstall_worker(home, cid, target, ready, go, result):
     asyncio.run(run())
 
 
-def test_cross_process_exclusion_updates_do_not_lose_writes(tmp_path):
+def test_cross_process_exclusion_updates_do_not_lose_writes(tmp_path, monkeypatch):
     import multiprocessing
+    from pathlib import Path
 
     from clytie.supervisor.common import read
+
+    # spawn imports the target by module name, outside pytest's importlib loader.
+    # Give that fresh interpreter the explicit location of this fictional fixture.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
 
     plugin(tmp_path, "optional-a")
     plugin(tmp_path, "optional-b")
