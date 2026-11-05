@@ -168,3 +168,65 @@ async def test_ignoring_management_cancel_does_not_delay_other_companion_stops(t
         runner.release.set()
         await call
         await closing
+
+
+@pytest.mark.parametrize("started", [False, True])
+async def test_worker_transport_loss_preserves_commit_or_clears_unstarted_operation(
+    tmp_path, monkeypatch, started
+):
+    from clytie.api.auth import APIError
+
+    workers = Workers(tmp_path, MockClock())
+
+    class Pipe:
+        chunks = 0
+
+        def write(self, value):
+            if not started:
+                raise BrokenPipeError()
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        def is_closing(self):
+            return False
+
+        async def readline(self):
+            if not started:
+                return b""
+            raise ValueError("fictional response exceeds transport limit")
+
+        async def read(self, size):
+            self.chunks += 1
+            return b"fictional discarded response" if self.chunks == 1 else b""
+
+    class Process:
+        stdin, stdout = Pipe(), Pipe()
+        returncode = None
+
+        async def wait(self):
+            assert self.stdout.chunks == (2 if started else 0)
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    async def spawn(*args, **kwargs):
+        if started:
+            next(iter(workers.journals.values())).committed({"plan_id": "a" * 32})
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    if started:
+        result = await workers.execute("companion_a", "import/plan", {})
+        assert result["committed"] and result["result"] == {"plan_id": "a" * 32}
+        assert result["delivery"] == "unconfirmed"
+    else:
+        with pytest.raises(APIError):
+            await workers.execute("companion_a", "import/plan", {})
+        assert workers.status()[0]["state"] == "failed"
+    assert process.returncode == 0
+    assert not workers.tasks

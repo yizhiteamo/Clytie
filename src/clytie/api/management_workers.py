@@ -176,8 +176,11 @@ class Workers:
                 if not recover_only:
                     journal.phase("failed")
             return {"ok": False, "code": "management_worker_failed"}
-        process.stdin.write(json.dumps(args, ensure_ascii=False).encode("utf-8") + b"\n")
-        await process.stdin.drain()
+        try:
+            process.stdin.write(json.dumps(args, ensure_ascii=False).encode("utf-8") + b"\n")
+            await process.stdin.drain()
+        except (OSError, RuntimeError):
+            process.stdin.close()
 
         def cancel():
             if process.returncode is None and not process.stdin.is_closing():
@@ -188,12 +191,23 @@ class Workers:
 
         control(cancel)
         try:
-            line = await process.stdout.readline()
+            try:
+                line = await process.stdout.readline()
+            except ValueError:
+                # A large result must not orphan a still-running writer or leave it
+                # blocked on a full pipe. Discard transport bytes without logging them,
+                # then retain the durable result rather than replaying the operation.
+                while await process.stdout.read(64 * 1024):
+                    pass
+                line = None
             await process.wait()
             if not line:
                 # Do not open SQLite or retry recovery in the daemon. A future admission
                 # starts an isolated verification worker, never the original operation.
                 recovered = Journal.load(journal.path, self.clock)
+                if recovered.value["state"] == "accepted" and not recover_only:
+                    with gate(self.home, journal.value["companion_id"]):
+                        recovered.phase("failed")
                 return {
                     "ok": recovered.value["committed"],
                     "code": "management_result_unconfirmed",
