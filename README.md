@@ -26,6 +26,14 @@ SDK 规格见 [sdk-spec.md](docs/architecture/sdk-spec.md)，配置格式见 [co
 
 ## 开发约定
 
+### 命令行使用须知
+
+管理命令通过本机 API 操作实例；先用 `python -m clytie supervisor start` 启动。加上 `--detach` 可在 API 就绪后返回，停止使用 `python -m clytie supervisor stop`。启动脚本只打开前台窗口，不安装服务或开机自启。
+
+管理通行证只允许本机调用，不能代替对当前系统用户的信任。建议用 `python -m clytie admin set-password` 设置管理口令。设置后，CLI 的最危险操作也要求口令；`--yes` 只跳过确认，不能跳过口令。修改口令需要旧口令；忘记时由用户手动删除实例内的 `secrets/admin.json`，程序不会代删。
+
+确认前请阅读目标编号和影响说明。普通关窗会请求安全停止；已接受的记忆管理操作可能仍在安全收尾。请求断线、超时或进程退出不代表操作成功，也不能据此重新执行；保留操作编号并查询状态。全部静默时 CLI 会显示提示。
+
 开始前阅读 [AGENTS.md](AGENTS.md)，以及实例目录中存在的 `AGENTS.local.md`。实例目录由 `CLYTIE_HOME` 指定，未设置时为仓库同级的 `Clytie-home/`。部署配置、真实身份、凭据、人设、聊天和记忆都留在实例目录。
 
 测试只使用手写的虚构数据、假模型、假平台和模拟时钟。实现按里程碑分支提交 PR；由设计验收和用户合并完成交付。
