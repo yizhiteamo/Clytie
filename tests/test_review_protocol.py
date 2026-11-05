@@ -1,9 +1,26 @@
 """Review rounds fail closed and never publish unscanned or stale reports."""
 
+import importlib.util
 import json
+import sys
+from pathlib import Path
 
 import pytest
-from scripts.review_protocol import ReviewIncomplete, ReviewProtocol
+
+
+def load_tool(name):
+    path = Path(__file__).resolve().parents[1] / "scripts" / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+protocol_module = load_tool("review_protocol")
+codex_review = load_tool("codex_review")
+ReviewIncomplete = protocol_module.ReviewIncomplete
+ReviewProtocol = protocol_module.ReviewProtocol
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -98,7 +115,7 @@ def test_round_limit_and_same_head_not_restarted(tmp_path):
 
 
 def test_codex_command_pins_model_mxc_and_cleans_tool_environment(tmp_path):
-    from scripts.codex_review import client_environment, command
+    client_environment, command = codex_review.client_environment, codex_review.command
 
     args = command(
         "codex.exe",
@@ -138,7 +155,7 @@ def test_review_archive_rejects_links_and_traversal(tmp_path):
     import stat
     import zipfile
 
-    from scripts.codex_review import extract_snapshot
+    extract_snapshot = codex_review.extract_snapshot
 
     for index, name in enumerate(("../escape.txt", "C:/escape.txt")):
         data = io.BytesIO()
@@ -211,7 +228,7 @@ def test_fresh_review_fake_executor_and_incomplete_results(tmp_path, outcome):
     from pathlib import Path
     from types import SimpleNamespace
 
-    from scripts.codex_review import policy_hash, run_candidate
+    policy_hash, run_candidate = codex_review.policy_hash, codex_review.run_candidate
 
     candidate = tmp_path / "candidate"
     (candidate / "snapshot").mkdir(parents=True)
