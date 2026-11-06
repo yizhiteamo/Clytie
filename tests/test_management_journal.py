@@ -155,7 +155,8 @@ def test_management_gate_rejects_existing_operation_and_block(tmp_path):
     assert pending(tmp_path, "companion_b", clock) == []
 
 
-async def test_import_apply_uses_real_commit_evidence(tmp_path):
+@pytest.mark.parametrize("snapshot_fault", [None, "missing", "corrupt"])
+async def test_import_apply_uses_real_commit_evidence(tmp_path, snapshot_fault):
     from clytie.api.management_journal import current
     from clytie.api.memory import MemoryAPI
     from clytie.memory.package import Exports
@@ -190,7 +191,29 @@ async def test_import_apply_uses_real_commit_evidence(tmp_path):
     # Simulate journal update lost after the actual SQLite commit.
     journal.value.update(state="transaction", committed=False)
     journal.save()
+    backup = next((home / "backups/memory/companion_a").glob("*.enc"))
+    import hashlib
+
+    assert journal.value["snapshot"] == {
+        "path": str(backup.resolve()),
+        "sha256": hashlib.sha256(backup.read_bytes()).hexdigest(),
+    }
+    if snapshot_fault == "missing":
+        backup.unlink()
+    elif snapshot_fault == "corrupt":
+        backup.write_bytes(b"fictional broken snapshot")
     assert journal.recover()["committed"]
+    if snapshot_fault:
+        assert journal.value["state"] == "recovery_blocked"
+        assert journal.block_path.exists()
+        from clytie.api.management_journal import pending
+
+        assert pending(home, "companion_b", clock) == []
+    else:
+        assert journal.value["state"] == "committed"
+        # Completed operations are not revalidated against normally rotated snapshots.
+        backup.unlink()
+        assert journal.recover()["state"] == "committed"
     with api.open("companion_a") as store:
         assert store.db.execute("SELECT count(*) FROM imports").fetchone()[0] == 1
 

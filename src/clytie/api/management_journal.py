@@ -145,6 +145,33 @@ class Journal:
             "management_committed", operation_id=self.value["id"], result=safe_result(result)
         )
 
+    def snapshot(self, path, data):
+        """Persist verified snapshot identity before publishing it or changing SQLite."""
+        self.value["snapshot"] = {
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        self.save()
+
+    def snapshot_verified(self):
+        from pathlib import Path
+
+        snapshot = self.value.get("snapshot")
+        if snapshot is None:
+            return self.value["operation"] != "import/apply" or not self.value["committed"]
+        try:
+            path = Path(snapshot["path"])
+            root = self.path.parents[4] / "backups/memory" / self.value["companion_id"]
+            contained(root, path)
+            return (
+                path.is_file()
+                and not path.is_symlink()
+                and path.resolve() == path
+                and hashlib.sha256(path.read_bytes()).hexdigest() == snapshot["sha256"]
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
     def prepare_file(self, path, data, result=None):
         self.checkpoint()
         self.value["file"] = {
@@ -300,12 +327,21 @@ class Journal:
                             entry.get("kind") == "management_committed"
                             and entry.get("operation_id") == self.value["id"]
                         ):
-                            self.committed(entry.get("result"))
-                            return self.public()
+                            # A failed snapshot check must not erase a committed database fact.
+                            self.value.update(
+                                committed=True, result=safe_result(entry.get("result"))
+                            )
+                            self.save()
+                            break
                 finally:
                     db.close()
             except (OSError, ValueError, sqlite3.Error):
                 return self.blocked("database_unverified")
+        if not self.snapshot_verified():
+            return self.blocked("snapshot_unverified")
+        if self.value["committed"]:
+            self.committed()
+            return self.public()
         if self.value["state"] in {"accepted", "preparing", "transaction"}:
             self.phase("interrupted")
             return self.public()

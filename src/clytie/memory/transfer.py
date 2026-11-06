@@ -458,6 +458,11 @@ class Transfers:
                 raise ValueError("导入前快照校验失败")
             db = open_database(checked, self.home, self.cid)
             db.close()
+            from clytie.api.management_journal import current
+
+            journal = current.get()
+            if journal is not None:
+                journal.snapshot(path, pending.read_bytes())
             pending.replace(path)
         finally:
             if pending.exists():
