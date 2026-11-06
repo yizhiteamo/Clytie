@@ -89,11 +89,15 @@ def catalog_names(response):
 
 
 def disable_catalogs(response):
-    """TOML quoted keys; arguments go directly to Popen, never a shell."""
+    """Quoted keys belong inside TOML values, not the CLI's dotted-key parser."""
     return [
-        category + "." + json.dumps(name, ensure_ascii=False) + ".enabled=false"
+        category
+        + "={"
+        + ",".join(
+            json.dumps(name, ensure_ascii=False) + "={enabled=false}" for name in sorted(names)
+        )
+        + "}"
         for category, names in catalog_names(response).items()
-        for name in sorted(names)
     ]
 
 
@@ -551,7 +555,8 @@ def preflight(cli, candidate, destination):
             overrides = disable_catalogs(config)
             evidence["diagnostic"] = {
                 "purpose": "catalog_identifiers_only",
-                "override_count": len(overrides),
+                "override_count": sum(len(names) for names in catalog_names(config).values()),
+                "override_argument_count": len(overrides),
                 "no_thread": True,
             }
             del config

@@ -212,6 +212,9 @@ def test_safe_toml_identifiers_roundtrip_and_requirement_independence(monkeypatc
         }
     }
     overrides = review.disable_catalogs(response)
+    # This CLI splits the key portion itself; a TOML parser accepting a quoted
+    # dotted assignment alone is insufficient. Only fixed top-level keys go there.
+    assert {arg.partition("=")[0] for arg in overrides} == {"mcp_servers", "plugins"}
     parsed = tomllib.loads("\n".join(overrides))
     assert set(parsed["mcp_servers"]) == set(parsed["plugins"]) == set(names)
     assert all(v["enabled"] is False for group in parsed.values() for v in group.values())

@@ -7,6 +7,7 @@
 
 - 在已有禁用项之外，显式关闭 plugins、computer_use、in_app_local_automation、remote_plugin、plugin_discovery_prefetch、skill_mcp_dependency_install，并设置空 notify。
 - 无线程、无模型的诊断进程只提取有效配置及各来源层的 MCP、插件标识符；为每个标识符生成 `enabled=false` 的 TOML 带引号键，通过参数数组传递。特殊字符不会被当作 TOML 路径或 shell 语法执行。
+- 本机 CLI 实测发现，带引号 dotted key 虽然能通过 TOML 库测试，却会让 CLI 初始化失败。覆盖因此使用固定顶层键和内联表，把带特殊字符的标识符放在 TOML 值内。虚构配置的 config/read 对照试验中，前一种形式退出失败，后一种正常返回；没有创建线程或初始化服务。失败尝试保留，不当作通过证明。
 - 诊断进程不提供通过证明。之后的独立实例重新读取自己的 config/read、configRequirements/read，重新核对所有门槛；有新继承项、管理策略冲突或初始化错误时停止。
 - 安全要求清单与启动参数独立。移除启动开关不会移除对应的验收要求。插件入口门槛现在依据有效功能状态、逐项禁用状态、插件默认状态、技能加载状态和 notify 判断，不再使用无条件拒绝占位项。
 - 文件系统只将本版协议中的 `glob_scan_max_depth:null` 视为无效力的可选字段；不忽略非空值、未知字段、extends、额外路径规则或 workspace roots。仍要求根目录拒绝、最小运行文件读取、唯一快照根只读、网络禁用。
