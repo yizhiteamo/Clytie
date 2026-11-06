@@ -16,6 +16,10 @@ class APIError(Exception):
         super().__init__(code)
 
 
+class RequestNotDelivered(APIError):
+    """Local rejection before any request frame is handed to the transport."""
+
+
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 

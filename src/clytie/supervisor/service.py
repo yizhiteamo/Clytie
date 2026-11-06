@@ -389,18 +389,23 @@ class Supervisor:
         )
         return dict(results)
 
-    async def request(self, cid, op, args, *, timeout=30):
+    async def request(self, cid, op, args, *, timeout=30, before_send=None):
         from uuid import uuid4
 
-        from clytie.api.auth import APIError
+        from clytie.api.auth import APIError, RequestNotDelivered
 
         if self.rows.get(cid, {}).get("state") not in {"running", "degraded"}:
-            raise APIError("companion_busy", 409)
+            raise RequestNotDelivered("companion_busy", 409)
+        child = self.children.get(cid)
+        if child is None:
+            raise RequestNotDelivered("companion_busy", 409)
+        if before_send is not None:
+            before_send(child)
         key = uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self.requests[cid, key] = future
         try:
-            await self.command(self.children[cid], "request", id=key, op=op, args=args)
+            await self.command(child, "request", id=key, op=op, args=args)
             try:
                 result = (
                     await asyncio.shield(future)

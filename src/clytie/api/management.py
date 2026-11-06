@@ -11,7 +11,7 @@ from clytie.plugin_host.snapshots import identifier
 from clytie.plugin_host.support import timed
 from clytie.supervisor.common import read, write
 
-from .auth import APIError
+from .auth import APIError, RequestNotDelivered
 from .config_write import ConfigWriter
 from .management_workers import Workers
 from .operations import load_plan
@@ -266,6 +266,16 @@ class Management:
                     raise APIError("companion_running", 409)
 
                 async def online(journal, arguments, control):
+                    def dispatch(child):
+                        try:
+                            identity = child.identity()
+                        except OSError:
+                            raise RequestNotDelivered("companion_busy", 409) from None
+                        # Persist the intended receiver before transport. An uncertain
+                        # send must not leave the still-live daemon recorded as writer.
+                        journal.value["executor"] = identity
+                        journal.save()
+
                     def cancel():
                         child = self.svc.children.get(cid)
                         if child is not None:
@@ -279,12 +289,17 @@ class Management:
                             )
 
                     control(cancel)
-                    return await self.svc.request(
-                        cid,
-                        "managed_memory/" + op,
-                        {"operation_id": journal.value["id"], "arguments": arguments},
-                        timeout=None,
-                    )
+                    try:
+                        return await self.svc.request(
+                            cid,
+                            "managed_memory/" + op,
+                            {"operation_id": journal.value["id"], "arguments": arguments},
+                            timeout=None,
+                            before_send=dispatch,
+                        )
+                    except RequestNotDelivered:
+                        journal.phase("failed")
+                        raise
 
                 return await self.memory_workers.execute(cid, op, data, key, runner=online)
             if self.svc.rows[cid]["state"] in {"starting", "stopping", "backoff"}:

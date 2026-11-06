@@ -163,6 +163,11 @@ class Child:
         self.lines = Lines(process.stdout)
         self.waiter = asyncio.create_task(asyncio.to_thread(process.wait))
 
+    def identity(self):
+        from clytie.plugin_host.locking import process_identity
+
+        return process_identity(self.process.pid)
+
     async def send(self, message):
         frame(self.process.stdin, message)
 
