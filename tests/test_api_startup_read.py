@@ -225,6 +225,9 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
     shutil.copytree(Path(__file__).resolve().parents[1] / "examples/home", home)
     config_path = home / "clytie.local.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    # Use an approved stop budget shorter than the OS observation bound. A forced
+    # stop is still a test failure, not a way to make the exit assertion pass.
+    config["supervisor"] = {"stop": {"timeout_seconds": 10}}
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         config["api"] = {"port": sock.getsockname()[1]}
@@ -275,8 +278,23 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
             assert not result["ok"] and result["error"]["code"] == expected
         assert len(processes) == 1 and processes[0].stdin.closed
         # Closing the unconfirmed launch pipe must drive the real safe-stop path.
-        assert await asyncio.to_thread(processes[0].wait, timeout=30) == 0
+        try:
+            assert await asyncio.to_thread(processes[0].wait, timeout=30) == 0
+        except (subprocess.TimeoutExpired, AssertionError):
+            print("fictional daemon health:", read(home / "run/health.json", {}))
+            for log in (
+                home / "logs/supervisor/process.log",
+                home / "companions/companion_a/logs/process.log",
+            ):
+                if log.exists():
+                    print(log.relative_to(home), log.read_text(encoding="utf-8", errors="replace"))
+            raise
         assert not status(home)["running"]
+        audit = [
+            json.loads(line) for line in (home / "supervisor/audit.jsonl").read_bytes().splitlines()
+        ]
+        assert any(row["operation"] == "stop" for row in audit), audit
+        assert not any(row["operation"] == "force_stop" for row in audit), audit
     finally:
         if not task.done():
             task.cancel()
