@@ -39,7 +39,7 @@ jobs:
       - name: Supervisor subprocess smoke
         run: uv run --no-sync pytest tests/test_supervisor_smoke.py
       - name: API and management subprocess smoke
-        run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
+        run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
         run: uv run --no-sync pytest
       - name: Validate fictional home
