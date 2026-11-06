@@ -1,5 +1,6 @@
 """独立淡化状态；读取投影不改动内容或修订指纹。"""
 
+from contextlib import nullcontext
 from datetime import datetime
 
 
@@ -60,7 +61,7 @@ def projected(store, record):
     )
 
 
-def reinforce(store, records):
+def reinforce(store, records, *, transaction=True):
     config = store.config.get("memory", {}).get("fade", {})
     rows = []
     for record in records:
@@ -74,5 +75,5 @@ def reinforce(store, records):
                 )
             )
     if rows:
-        with store.transaction():
+        with store.transaction() if transaction else nullcontext():
             store.db.executemany("INSERT OR REPLACE INTO fade VALUES(?,?,?)", rows)

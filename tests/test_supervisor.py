@@ -27,6 +27,11 @@ class FakeChild:
         self.auto_stop, self.ack = stop, ack
         self.killed = False
 
+    def identity(self):
+        from clytie.plugin_host.locking import process_identity
+
+        return process_identity()
+
     async def send(self, msg):
         self.commands.append(msg)
         if msg["type"] == "stop" and self.auto_stop:

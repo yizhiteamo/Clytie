@@ -34,7 +34,7 @@ from clytie.sdk.types import (
 from .context import BackendUnavailable, build_context
 from .dependencies import DependencyError, resolve, stop_order
 from .journal import Journals
-from .locking import MetadataLockTimeout, OperationBusy, Operations
+from .locking import MetadataLockTimeout, OperationBusy, Operations, file_lock, process_identity
 from .manifests import discover
 from .memory import bind_scene
 from .migration import MigrationMixin
@@ -395,14 +395,33 @@ class PluginHost(MigrationMixin):
         self.refresh()
         return self._plan("uninstall", companion_id, target)
 
-    async def apply(self, plan_id):
+    async def apply(self, plan_id, *, coordinated=False):
         plan = self._plans.get(plan_id)
         if plan is None:
             raise PlanStale("unknown operation plan")
         plugins = set(plan.steps) | {plan.target}
         try:
             with self.operations.hold(plan.companion_id, plugins, plan.operation):
-                return await self._apply_locked(plan_id)
+                if coordinated:
+                    return await self._apply_locked(plan_id)
+                # Startup and direct host callers coordinate with daemon management.
+                until = self.clock.monotonic() + 30
+                while True:
+                    lock = file_lock(
+                        self.home / "plugins/.host/operations.lock",
+                        {**process_identity(), "operation": plan.operation},
+                    )
+                    try:
+                        lock.__enter__()
+                    except OperationBusy:
+                        if self.clock.monotonic() >= until:
+                            raise
+                        await self.clock.sleep(0.05)
+                        continue
+                    try:
+                        return await self._apply_locked(plan_id)
+                    finally:
+                        lock.__exit__(None, None, None)
         except OperationBusy as exc:
             return exc.result(multiple=len(plugins) > 1)
 
@@ -463,8 +482,17 @@ class PluginHost(MigrationMixin):
             latest[plan.target] = plan_id
             atomic_write(latest_file, canonical(latest))
         if plan.operation == "uninstall":
-            self._excluded.add(plan.target)
-            atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
+            with file_lock(
+                self._excluded_file.with_suffix(".lock"),
+                {**process_identity(), "operation": "plugin_exclusions"},
+            ):
+                self._excluded = (
+                    set(json.loads(self._excluded_file.read_bytes()))
+                    if self._excluded_file.exists()
+                    else set()
+                )
+                self._excluded.add(plan.target)
+                atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
             self.refresh()
         return {
             "enabled": enabled,
@@ -1090,6 +1118,11 @@ class PluginHost(MigrationMixin):
         }
 
     def refresh(self):
+        self._excluded = (
+            set(json.loads(self._excluded_file.read_bytes()))
+            if self._excluded_file.exists()
+            else set()
+        )
         self.manifests = discover(
             self.repo_root / "plugins", self.home / "plugins", repo_root=self.repo_root
         )
@@ -1102,8 +1135,17 @@ class PluginHost(MigrationMixin):
         )
         if plugin_id not in available:
             raise ValueError("plugin code unavailable; update it externally")
-        self._excluded.discard(plugin_id)
-        atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
+        with file_lock(
+            self._excluded_file.with_suffix(".lock"),
+            {**process_identity(), "operation": "plugin_exclusions"},
+        ):
+            self._excluded = (
+                set(json.loads(self._excluded_file.read_bytes()))
+                if self._excluded_file.exists()
+                else set()
+            )
+            self._excluded.discard(plugin_id)
+            atomic_write(self._excluded_file, canonical(sorted(self._excluded)))
         self.refresh()
         return self.manifests[plugin_id]
 

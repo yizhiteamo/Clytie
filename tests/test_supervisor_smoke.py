@@ -4,6 +4,8 @@ import asyncio
 import shutil
 from pathlib import Path
 
+import pytest
+
 from clytie.clock import SystemClock
 from clytie.plugin_host.support import timed
 from clytie.supervisor.processes import ProcessLauncher
@@ -252,7 +254,10 @@ async def receive_ready(child, clock):
             return
 
 
-async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start(tmp_path):
+@pytest.mark.parametrize("eof_stage", ["memory_blocked", "before_memory"])
+async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start(
+    tmp_path, eof_stage
+):
     import subprocess
 
     from clytie.supervisor.processes import Child, creation, frame, python_process
@@ -260,27 +265,60 @@ async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start
     home = tmp_path / "fictional-home"
     shutil.copytree(ROOT / "examples/home", home)
     release = tmp_path / "release-migration"
+    entered = tmp_path / "memory-entered"
+    completed = tmp_path / "memory-completed"
+    allow_memory = tmp_path / "allow-memory"
     code = """
 import asyncio, sys, threading
 from pathlib import Path
 import clytie.supervisor.entry as entry
+import clytie.supervisor.heartbeat as heartbeat
+class ObservedHeartbeat(heartbeat.Heartbeat):
+    def __init__(self, clock, emit):
+        def observed(kind, **fields):
+            emit(kind, **fields, test_memory_entered=Path(sys.argv[3]).exists())
+        super().__init__(clock, observed)
+heartbeat.Heartbeat = ObservedHeartbeat
 Original = entry.Companion
 class Blocking(Original):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         original = self.host.memory_store
         def blocked(cid):
+            Path(sys.argv[3]).write_text("memory-entered", encoding="utf-8")
             while not Path(sys.argv[2]).exists():
                 threading.Event().wait(0.01)
-            return original(cid)
+            result = original(cid)
+            Path(sys.argv[4]).write_text("memory-completed", encoding="utf-8")
+            return result
         self.host.memory_store = blocked
+        original_open = self.runtime.open
+        async def open_ledger():
+            ledger = await original_open()
+            # Two real phase notifications are deliberately emitted before memory open.
+            # They must not be mistaken for entry into the synchronous blocking section.
+            self.on_phase("migrating")
+            self.on_phase("migrating")
+            while not Path(sys.argv[5]).exists():
+                await self.clock.sleep(0.01)
+            return ledger
+        self.runtime.open = open_ledger
 entry.Companion = Blocking
 raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_a")))
 """
     executable, env = python_process()
     log = (tmp_path / "child-log.txt").open("wb")
     process = subprocess.Popen(
-        [executable, "-c", code, str(home), str(release)],
+        [
+            executable,
+            "-c",
+            code,
+            str(home),
+            str(release),
+            str(entered),
+            str(completed),
+            str(allow_memory),
+        ],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -296,11 +334,32 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
             msg = await timed(child.receive(), clock, 12)
             assert msg and msg["type"] != "ready"
             migrating += msg.get("phase") == "migrating"
+        assert not entered.exists()
+        if eof_stage == "memory_blocked":
+            allow_memory.write_text("continue", encoding="utf-8")
+
+            async def wait_entered():
+                while not entered.exists():
+                    assert process.poll() is None
+                    await clock.sleep(0.01)
+
+            await timed(wait_entered(), clock, 12)
+            # The independent heartbeat must continue while the event loop is blocked.
+            while True:
+                msg = await timed(child.receive(), clock, 12)
+                assert msg["type"] == "heartbeat" and msg["phase"] == "migrating"
+                if msg["test_memory_entered"]:
+                    break
         process.stdin.close()
-        await clock.sleep(6)
-        assert process.poll() is None
-        release.write_text("continue", encoding="utf-8")
+        if eof_stage == "memory_blocked":
+            await clock.sleep(6)
+            assert process.poll() is None
+            assert not completed.exists()
+            release.write_text("continue", encoding="utf-8")
+        else:
+            allow_memory.write_text("continue", encoding="utf-8")
         assert await timed(child.wait(), clock, 12) == 0
+        assert entered.exists() == completed.exists() == (eof_stage == "memory_blocked")
         assert not (home / "companions/companion_a/plugin-versions.json").exists()
         while True:
             msg = await timed(child.receive(), clock, 5)
@@ -309,5 +368,6 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
             assert msg["type"] != "ready"
     finally:
         release.write_text("continue", encoding="utf-8")
+        allow_memory.write_text("continue", encoding="utf-8")
         await child.kill()
         child.close()

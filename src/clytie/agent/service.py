@@ -108,6 +108,7 @@ class Agent:
         self.model = model or self.model_registration.implementation
         self.features = self.model.features()
         self.persona = Persona(persona_root, config)
+        self.actor_names = {}
         self.boundary = Boundary(
             persona_root.parent / "boundary/state.json",
             config.get("boundary", {}),
@@ -343,6 +344,9 @@ class Agent:
         return specs, "\n".join(lines)
 
     async def receive(self, event):
+        if event.companion_id == self.cid and event.message:
+            actor = event.message.sender
+            self.actor_names[actor.actor_id] = actor.display_name
         reason = (
             "silenced"
             if self.kernel.delivery.silenced

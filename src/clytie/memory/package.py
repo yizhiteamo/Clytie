@@ -215,6 +215,20 @@ def _validate_database(connection, version):
         raise
 
 
+def write_temporary(path, data):
+    """Register the exact unpublished file before writing; never register it as an export."""
+    from clytie.api.management_journal import current
+
+    journal = current.get()
+    if journal is not None:
+        journal.temporary(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def payload(store, companion_id, home):
     try:
         clytie_version = metadata.version("clytie")
@@ -322,16 +336,32 @@ class Exports:
         return file_lock(path, {**process_identity(), "operation": "memory_export"})
 
     def _rotate_recovery(self):
+        from clytie.api.management_journal import current
+
+        journal = current.get()
         code, public = new_recovery()
         path = self.recovery_path()
+        if journal is not None:
+            journal.prepare_file_audit(
+                self.store,
+                "memory_recovery_rotated",
+                fingerprint=hashlib.sha256(public).hexdigest(),
+            )
+            journal.prepare_file(path, public)
         previous = path.read_bytes() if path.exists() else None
         try:
             atomic_write(path, public)
             with self.store.transaction():
                 self.store.audit(
-                    "memory_recovery_rotated", fingerprint=hashlib.sha256(public).hexdigest()
+                    "memory_recovery_rotated",
+                    fingerprint=hashlib.sha256(public).hexdigest(),
+                    **({"operation_id": journal.value["id"]} if journal else {}),
                 )
+            if journal is not None:
+                journal.committed()
         except BaseException:
+            if journal is not None:
+                raise
             if previous is None:
                 if path.exists():
                     path.unlink()
@@ -347,6 +377,9 @@ class Exports:
             return self._export(out, passphrase=passphrase, format=format)
 
     def _export(self, out, *, passphrase, format):
+        from clytie.api.management_journal import current, publish_file
+
+        journal = current.get()
         out = Path(out)
         if format == "jsonl":
             exports = self.home / "exports"
@@ -354,7 +387,7 @@ class Exports:
             data = "".join(
                 canonical(r.model_dump(mode="json")) + "\n" for r in self.store.all_records()
             )
-            atomic_write(out, data.encode())
+            publish_file(out, data.encode())
             return {"path": str(out), "recovery_code": None}
         if format != "encrypted":
             raise ValueError("unsupported export format")
@@ -375,20 +408,33 @@ class Exports:
         pending = out.with_name(out.name + "." + uuid4().hex + ".pending")
         created_public = False
         try:
-            atomic_write(pending, encrypted)
+            write_temporary(pending, encrypted)
             _, checked = unpack(
                 decrypt(pending.read_bytes(), passphrase=passphrase), self.home, self.companion_id
             )
             checked.close()
+            if journal is not None:
+                journal.prepare_file_audit(
+                    self.store, "memory_export", records=len(self.store.all_records())
+                )
+                journal.prepare_file(out, encrypted)
+                if code is not None:
+                    journal.prepare_public(path, recipient)
             if code is not None:
                 atomic_write(path, recipient)
                 created_public = True
             pending.replace(out)
             with self.store.transaction():
-                self.store.audit("memory_export", records=len(self.store.all_records()))
+                self.store.audit(
+                    "memory_export",
+                    records=len(self.store.all_records()),
+                    **({"operation_id": journal.value["id"]} if journal else {}),
+                )
+            if journal is not None:
+                journal.committed()
         except BaseException:
             # 首次导出失败不能留下没有交给用户恢复码的公钥。
-            if created_public:
+            if created_public and journal is None:
                 path.unlink()
             raise
         finally:

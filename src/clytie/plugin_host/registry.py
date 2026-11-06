@@ -140,7 +140,12 @@ def assemble(runtime, *, role=None, primary=True, scope="companion"):
                     raise TypeError("API route handler must be asynchronous")
             registrations.append(
                 Registration(
-                    point, declaration[key], declaration, None, runtime.priority, manifest.id
+                    point,
+                    declaration[key],
+                    declaration,
+                    member if field == "api_routes" else None,
+                    runtime.priority,
+                    manifest.id,
                 )
             )
     # config 是声明式扩展点，不执行代码。

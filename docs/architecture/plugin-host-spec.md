@@ -14,7 +14,7 @@ api_route、webui_panel 在 A2 只登记并校验命名空间；CLI 处理函数
 
 内部 API 为 plan_enable、plan_disable、plan_uninstall 与 apply(plan_id)。计划包含操作、伴侣、目标、步骤、错误、依赖图指纹、上次连带停用列表。规范 JSON 的 SHA-256 生成确定的指纹和计划标识；依赖、冲突、版本、启用/失败状态或配置变化后，执行旧计划会报 PlanStale。
 
-启用按依赖拓扑顺序；可选依赖未启用时不自动启用。连带停用按依赖倒序执行，记录保存在 `companions/<id>/plugin-data/_host/cascades.json`，每项包含目标、连带插件、时间和操作标识；计划只读，apply 才写入。返回配置补丁供 A4 API 保存，宿主不改写 companion.yaml。
+启用按依赖拓扑顺序；可选依赖未启用时不自动启用。连带停用按依赖倒序执行，记录保存在 `companions/<id>/plugin-data/_host/cascades.json`，每项包含目标、连带插件、时间和操作标识；计划只读，apply 才写入。返回配置补丁供 A4 API 保存，宿主不改写 companion.yaml。A4.2 由 API 将 apply 返回的 patch 写回配置；注释/顺序/格式保留、写前副本、逐个历史文件清理、写后校验还原及 applied_not_saved 提醒按 `api-spec.md` §4.4。
 
 代码由外部更新；宿主不安装、移动、替换或删除插件代码。卸载仅从本实例的可装配集合移除，标记保存在 `plugins/.host/uninstalled.json`；公开源包、私有状态及版本记录保留。其他伴侣仍运行该插件时，要求先确认它们的停用计划，避免一次确认影响未列出的伴侣。本体模块始终拒绝停用和卸载。
 

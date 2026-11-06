@@ -121,7 +121,9 @@ def test_status_and_cli_export_do_not_expose_memory_or_secrets(tmp_path, monkeyp
     } <= codes
     from clytie.memory import cli
 
-    monkeypatch.setattr(cli, "MemoryAPI", lambda selected: api)
+    from .api_helpers import fake_memory_client
+
+    fake_memory_client(monkeypatch, api)
     passphrase = "fictional-cli-passphrase"
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: passphrase)
     out = home / "memory.enc"

@@ -41,8 +41,9 @@ class OperationBusy(ValueError):
         }
 
 
-def process_identity():
+def process_identity(pid=None):
     """从 OS 读取进程创建时间，不用应用时钟推测进程存活。"""
+    pid = os.getpid() if pid is None else pid
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -53,14 +54,32 @@ def process_identity():
             ctypes.POINTER(wintypes.FILETIME)
         ] * 4
         times = [wintypes.FILETIME() for _ in range(4)]
-        if not kernel.GetProcessTimes(
-            kernel.GetCurrentProcess(), *(ctypes.byref(t) for t in times)
-        ):
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = (
+            kernel.GetCurrentProcess()
+            if pid == os.getpid()
+            else kernel.OpenProcess(0x1000 | 0x10_0000, False, pid)
+        )
+        if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            if pid != os.getpid() and kernel.WaitForSingleObject(handle, 0) == 0:
+                raise ProcessLookupError(pid)
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            if pid != os.getpid():
+                kernel.CloseHandle(handle)
         ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
         started = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
     elif sys.platform.startswith("linux"):
-        fields = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            raise ProcessLookupError(pid)
         ticks = int(fields[19])
         boot = next(
             line.split()[1]
@@ -72,7 +91,7 @@ def process_identity():
         )
     else:
         raise RuntimeError("process identity currently supports Windows and Linux")
-    return {"pid": os.getpid(), "started_at": started.isoformat()}
+    return {"pid": pid, "started_at": started.isoformat()}
 
 
 def _task():

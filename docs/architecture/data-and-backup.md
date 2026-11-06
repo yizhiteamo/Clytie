@@ -10,9 +10,12 @@ Clytie-home/
 ├─ docs/                      部署专属文档（伴侣设定说明、旧系统迁移记录、私有问题记录）
 ├─ private-denylist.txt       本机提交扫描用的真实名字/号码名单
 ├─ clytie.local.yaml          全局配置：平台账号映射、会话逻辑名、通知方式
-├─ secrets/                   凭据和登录态（WebUI 不显示内容）
+├─ secrets/                   凭据和登录态（WebUI 不显示内容，不备份）
+│  ├─ admin.json              管理口令的 scrypt 哈希及参数
+│  └─ sessions.json           网页会话（只存标识的哈希）
 ├─ companions/<companion-id>/
 │  ├─ companion.yaml          模型、平台账号、启用的插件及配置、场景与人设层
+│  ├─ config-history/         API 写回配置前的旧文件，最近 10 份（A4.3 备份）
 │  ├─ persona/                人设文件
 │  ├─ memory/                 记忆库及记忆资产
 │  ├─ ledger/                 统一任务账本
@@ -29,6 +32,8 @@ Clytie-home/
 ├─ supervisor/                silence.json、notify-state.json、audit.jsonl（A4.3 备份）
 ├─ logs/supervisor/            守护进程日志（不备份，A4.3 轮转）
 └─ run/                       supervisor.lock、health.json；memory-temp/ 为实例内短暂 SQLite 校验文件
+   ├─ api.json                实际端口、pid、启动时间（不备份）
+   └─ api-token               本次启动的 CLI 通行证（不备份）
 ```
 
 迁移到另一台电脑 = 克隆代码仓库 + 恢复实例目录的备份。
@@ -254,3 +259,9 @@ A3.3 导入器 CLI 技术接入：`memory import plan ... --importer <插件ID> 
 6. **无从判断时不淡化**：A3.3 格式的旧包没有会话清单，以及 A3.4 之前写入、配置中已经找不到的本地来源，都无法得知平台身份：按原规则只在对内场景可见。插件写入时没有绑定会话的为 `null`。这些记录和 `origin_conversation_id = null` 的非印象记录**一律不淡化**。A3.4 的模式迁移按迁移时的配置，为现有记录引用的、配置中存在的会话补登记。
 7. 平台插件更换（同一平台换了接入插件，`channel` 不同）时不自动对应，按"找不到"处理，以后由 WebUI 或新插件的迁移设计提供手动对应。
 
+
+## A4.2 管理操作的中断记录
+
+按 api-spec §4.3a（Issue #57，用户已确认），`companions/<cid>/management/operations/` 保存稳定操作编号、阶段、执行者进程身份、提交证据及明确临时产物；恢复受阻的标记也属于该伴侣。此处不保存口令、恢复码、密钥、聊天或记忆正文，不把它当成可重新执行的请求队列。
+
+停止伴侣的记忆管理由独立工作进程执行，共用 MemoryAPI。启动前核对锁、进程创建身份、事务与文件，不重做原操作；无法确认安全就只阻止受影响伴侣。快照、导出、公钥与数据库按 api-spec 的逐类顺序提交和核验；不完整文件不登记有效，临时产物仅逐个清理已记录的明确文件。提交后响应丢失仍保留提交结果。恢复码生成但未送达单独报告，原文不持久化、不自动轮换或重新生成。完整备份及其保留规则仍属于 A4.3。

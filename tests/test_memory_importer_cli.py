@@ -52,7 +52,9 @@ def test_manifest_importer_cli_reimport_approval_and_lifecycle(tmp_path, monkeyp
 
     report = load_home(home, repo_root=ROOT)
     assert report.valid, [(e.pointer, e.expected) for e in report.errors]
-    monkeypatch.setattr("clytie.memory.cli.MemoryAPI", lambda home: api)
+    from .api_helpers import fake_memory_client
+
+    fake_memory_client(monkeypatch, api)
     monkeypatch.setattr(
         "clytie.memory.cli.getpass.getpass",
         lambda _: (_ for _ in ()).throw(AssertionError("no decryption needed")),

@@ -134,13 +134,13 @@ def test_written_package_is_verified_before_publication(export_case, monkeypatch
 
     store, exports, home = export_case
     seed(store)
-    original = module.atomic_write
+    original = module.write_temporary
 
     def corrupted(path, data):
         original(path, b"fictional broken package" if path.suffix == ".pending" else data)
 
     with monkeypatch.context() as context:
-        context.setattr(module, "atomic_write", corrupted)
+        context.setattr(module, "write_temporary", corrupted)
         with pytest.raises(PackageError):
             exports.export(home / "broken.enc", passphrase=PASSPHRASE)
     assert not (home / "broken.enc").exists()
