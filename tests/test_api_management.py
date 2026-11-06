@@ -22,6 +22,45 @@ def management(tmp_path):
     return Management(svc, None)
 
 
+@pytest.mark.parametrize("clear_by", ["save", "restart"])
+async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path, clear_by):
+    api = management(tmp_path)
+    api.svc.notifications = SimpleNamespace(undelivered=0)
+    api.svc.rows["companion_a"].update(state="running", restart_count=0)
+    api.fingerprint = lambda: "fictional configuration"
+    key = uuid4().hex
+    api.plans[key] = {
+        "plan_id": key,
+        "configuration": api.fingerprint(),
+        "operation": "enable",
+        "steps": ["echo-tool"],
+    }
+    patch = {"plugins": {"echo-tool": {"enabled": True}}}
+
+    async def transfer(*args):
+        return {"patch": patch}
+
+    def fail(*args):
+        raise OSError("fictional write failure")
+
+    api.transfer = transfer
+    api.writer.preview = lambda *args: None
+    api.writer.save = fail
+    with pytest.raises(APIError, match="applied_not_saved") as error:
+        await api.plugin_call("/companions/<cid>/plugins/apply", "companion_a", {"plan_id": key})
+    assert error.value.result["patch"] == patch
+    for _ in range(2):
+        assert (await api.call("/status", {}, {}, {}, "GET"))["warnings"] == [
+            {"companion_id": "companion_a", "code": "applied_not_saved"}
+        ]
+    if clear_by == "save":
+        api.writer.save = lambda *args: None
+        await api.plugin_call("/companions/<cid>/plugins/apply", "companion_a", {"plan_id": key})
+    else:
+        api.svc.rows["companion_a"]["restart_count"] += 1
+    assert (await api.call("/status", {}, {}, {}, "GET"))["warnings"] == []
+
+
 @pytest.mark.parametrize(
     "route,params,data,expected",
     [
@@ -221,7 +260,8 @@ async def test_single_force_stop_persists_result_audit_and_notification(tmp_path
         await svc.stop()
 
 
-async def test_online_management_stopping_before_dispatch_releases_admission(tmp_path):
+@pytest.mark.parametrize("via_http", [False, True])
+async def test_online_management_stopping_before_dispatch_releases_admission(tmp_path, via_http):
     from clytie.api.management_journal import pending
 
     from .test_supervisor import make, spin
@@ -237,21 +277,47 @@ async def test_online_management_stopping_before_dispatch_releases_admission(tmp
         return await original(*args, **kwargs)
 
     svc.request = delayed
-    call = asyncio.create_task(
-        api.call(
-            "/companions/<cid>/memory/thaw",
-            {"cid": "companion_0"},
-            {"record_id": "fictional"},
-            {},
-            "POST",
+    server = client = None
+    if via_http:
+        from aiohttp import ClientSession
+
+        from clytie.api.server import Server
+
+        server = Server(tmp_path, clock, api, svc.audit, {"port": 0})
+        await server.start()
+        client = ClientSession()
+
+        async def request():
+            headers = {}
+            headers["Authorization"] = "Bearer " + server.auth.token
+            async with client.post(
+                f"http://127.0.0.1:{server.port}/api/v1/companions/companion_0/memory/thaw",
+                headers=headers,
+                json={"record_id": "fictional"},
+            ) as response:
+                return response.status, await response.json()
+
+        call = asyncio.create_task(request())
+    else:
+        call = asyncio.create_task(
+            api.call(
+                "/companions/<cid>/memory/thaw",
+                {"cid": "companion_0"},
+                {"record_id": "fictional"},
+                {},
+                "POST",
+            )
         )
-    )
     await entered.wait()
     svc.rows["companion_0"]["state"] = "stopping"
     release.set()
     try:
-        with pytest.raises(APIError, match="companion_busy"):
-            await call
+        if via_http:
+            status, response = await call
+            assert status == 409 and response["error"]["code"] == "companion_busy"
+        else:
+            with pytest.raises(APIError, match="companion_busy"):
+                await call
         assert pending(tmp_path, "companion_0", clock) == []
         assert not api.memory_workers.tasks
         assert not any(c["type"] == "request" for c in launcher.children[0][1].commands)
@@ -260,6 +326,10 @@ async def test_online_management_stopping_before_dispatch_releases_admission(tmp
         await spin()
         assert svc.rows["companion_0"]["state"] != "blocked"
     finally:
+        if client:
+            await client.close()
+        if server:
+            await server.close()
         await svc.stop()
 
 

@@ -64,6 +64,33 @@ async def test_real_plugin_route_mount_panel_and_unavailable(tmp_path):
             "json": {"method": "POST", "value": "harmless"},
         }
         assert (await companion_operation(runtime, "panels", {}))[0]["id"] == "summary"
+        from aiohttp import ClientSession
+
+        from clytie.api.server import Server
+        from clytie.supervisor.common import Audit
+
+        from .test_api_management import management
+
+        api = management(tmp_path)
+        api.svc.rows["companion_a"]["state"] = "running"
+
+        async def transfer(cid, operation, arguments):
+            return await companion_operation(runtime, operation, arguments)
+
+        api.transfer = transfer
+        server = Server(tmp_path, h.clock, api, Audit(tmp_path, h.clock), {"port": 0})
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                headers = {}
+                headers["Authorization"] = "Bearer " + server.auth.token
+                url = f"http://127.0.0.1:{server.port}/api/v1/companions/companion_a/plugins/api-example/update"
+                async with client.post(url, headers=headers, json={}) as response:
+                    assert response.status == 201
+                    assert (await response.json())["result"]["value"] == "harmless"
+                assert '"result":"ok"' in server.audit.path.read_text(encoding="utf-8")
+        finally:
+            await server.close()
         await h.apply(h.plan_disable("companion_a", "api-example").plan_id)
         with pytest.raises(APIError, match="plugin_unavailable"):
             await companion_operation(runtime, "plugin_route", args)

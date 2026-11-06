@@ -154,6 +154,10 @@ async def test_all_confirmation_routes_and_password_policies(tmp_path):
                     assert target in value["result"]["description"]
                     if protected:
                         assert "建议设置管理口令" in value["result"]["description"]
+                async with client.post(
+                    base + path, json={**data, "confirm": True}, headers=bearer
+                ) as response:
+                    assert response.status == 200, await response.json()
             phrase = secrets.token_urlsafe(24)
             server.auth.set_password(phrase)
             credentials = {}
@@ -165,8 +169,15 @@ async def test_all_confirmation_routes_and_password_policies(tmp_path):
                 }
                 web["Cookie"] = "clytie_session=" + response.cookies["clytie_session"].value
             api.clock.advance(16 * 60)
-            for path, data, _, protected in routes:
+            # Logout-all invalidates the web session used by the reauthentication cases.
+            for path, data, _, protected in sorted(
+                routes, key=lambda row: row[0] == "/admin/logout-all"
+            ):
                 if not protected:
+                    async with client.post(
+                        base + path, json={**data, "confirm": True}, headers=bearer
+                    ) as response:
+                        assert response.status == 200, await response.json()
                     continue
                 for headers, expected in ((bearer, "invalid_password"), (web, "reauth_required")):
                     async with client.post(

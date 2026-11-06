@@ -185,3 +185,57 @@ def test_launch_scripts_only_start_foreground():
         assert ".venv" in text
         for forbidden in ("schtasks", "systemctl", "crontab", "mklink", "New-Item", "setx"):
             assert forbidden not in text
+
+
+async def test_real_foreground_survives_all_default_ports_occupied(tmp_path):
+    import asyncio
+    import subprocess
+
+    from clytie.supervisor.common import read
+    from clytie.supervisor.processes import creation, python_process
+
+    from .test_supervisor_smoke import wait_until
+
+    home = tmp_path / "fictional-home"
+    shutil.copytree(ROOT / "examples/home", home)
+    blockers = []
+    front = None
+    clock = SystemClock()
+    try:
+        for port in range(8765, 8775):
+            sock = socket.socket()
+            try:
+                sock.bind(("127.0.0.1", port))
+                sock.listen()
+            except OSError:
+                sock.close()
+            else:
+                blockers.append(sock)
+        executable, env = python_process()
+        env.pop("CLYTIE_HOME", None)
+        with (tmp_path / "frontend.txt").open("wb") as output:
+            front = subprocess.Popen(
+                [executable, "-m", "clytie", "supervisor", "start", "--home", str(home)],
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=output,
+                env=env,
+                **creation(),
+            )
+            await wait_until(
+                lambda: any(
+                    row["state"] == "running"
+                    for row in read(home / "run/health.json", {}).get("companions", {}).values()
+                ),
+                clock,
+            )
+            assert front.poll() is None
+            assert read(home / "run/health.json")["api_port"] is None
+            assert "api_bind_failed" in (tmp_path / "frontend.txt").read_text(encoding="utf-8")
+    finally:
+        if front is not None and front.poll() is None:
+            front.kill()
+            await asyncio.to_thread(front.wait)
+            await wait_until(lambda: not status(home)["running"], clock, 130)
+        for sock in blockers:
+            sock.close()
