@@ -33,6 +33,7 @@ async def test_real_sync_importer_http_disconnect_query_and_parallel_stop(tmp_pa
     svc = Supervisor(home, ["companion_a", "companion_b"], launcher, clock)
     api = Management(svc, load_home(home))
     server = Server(home, clock, api, svc.audit, {"port": 0})
+    svc.finalize = server.close
     control = FrontendCommands(svc)
 
     # Same post-start wiring as daemon_main; only the orchestration clock is
@@ -155,19 +156,32 @@ async def test_real_sync_importer_http_disconnect_query_and_parallel_stop(tmp_pa
             assert result["companion_b"]["state"] == "stopped"
             if eof:
                 assert await eof is True
-            assert (await get(route))["state"] == "cancelled"
-            assert not (await get(route))["committed"]
+            assert Journal.load(path, clock).value["state"] == "cancelled"
+            assert not Journal.load(path, clock).value["committed"]
             assert not api.memory_workers.tasks and executor_alive(identity) is False
+            assert server.runner is None
             assert not list((home / "run/memory-plans").glob("*.json"))
             # The process exited because the barrier opened, without advancing
             # the virtual clock further or waiting another fixed grace period.
             assert clock.monotonic() - since == 121
-            assert "fictional memory" not in json.dumps(await get("/status"))
         # Fresh supervisor and real startup: interrupted work is not replayed.
         fresh = Supervisor(home, ["companion_a"], launcher, MockClock())
+        fresh_api = Management(fresh, load_home(home))
+        fresh_server = Server(home, fresh.clock, fresh_api, fresh.audit, {"port": 0})
+        fresh.finalize = fresh_server.close
         try:
             await fresh.start()
             await until(lambda: fresh.rows["companion_a"]["state"] == "running")
+            await fresh_server.start()
+            headers["Authorization"] = "Bearer " + fresh_server.auth.token
+            async with ClientSession(headers=headers) as restarted_client:
+                async with restarted_client.get(
+                    f"http://127.0.0.1:{fresh_server.port}/api/v1" + route
+                ) as response:
+                    assert response.status == 200
+                    saved = (await response.json())["result"]
+                    assert saved["state"] == "cancelled" and not saved["committed"]
+                    assert "fictional memory" not in json.dumps(saved)
             assert len((source.parent / "entered").read_text().splitlines()) == 1
             assert Journal.load(path, clock).value["state"] == "cancelled"
         finally:
