@@ -13,7 +13,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from codex_review import EFFORT, MODEL, SETTINGS, client_environment
+from codex_review import EFFORT, MODEL, SETTINGS, client_environment, snapshot_manifest
 from review_protocol import ReviewIncomplete
 
 from clytie.clock import SystemClock
@@ -29,20 +29,100 @@ NO_MODEL_METHODS = frozenset(
         "app/installed",
     }
 )
-DISABLED_FEATURES = {
-    item.split("=", 1)[0].removeprefix("features.")
-    for item in SETTINGS
-    if item.startswith("features.") and item.endswith("=false")
-}
+# Requirements are deliberately independent of launch switches. Removing a switch
+# must never remove the corresponding acceptance check.
+DISABLED_FEATURES = frozenset(
+    {
+        "apps",
+        "multi_agent",
+        "multi_agent_v2",
+        "hooks",
+        "memories",
+        "image_generation",
+        "view_image",
+        "browser_use",
+        "browser_use_external",
+        "in_app_browser",
+        "in_app_chat",
+        "tool_suggest",
+        "skill_search",
+        "plugins",
+        "computer_use",
+        "in_app_local_automation",
+        "remote_plugin",
+        "plugin_discovery_prefetch",
+        "skill_mcp_dependency_install",
+    }
+)
 EXTRA_SETTINGS = [
     'model="gpt-6-astra"',
     'approval_policy="never"',
     "analytics.enabled=false",
+    "features.plugins=false",
+    "features.computer_use=false",
+    "features.in_app_local_automation=false",
+    "features.remote_plugin=false",
+    "features.plugin_discovery_prefetch=false",
+    "features.skill_mcp_dependency_install=false",
+    "notify=[]",
 ]
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def catalog_names(response):
+    result = {"mcp_servers": set(), "plugins": set()}
+    configs = [response.get("config", {})]
+    configs.extend(layer.get("config", {}) for layer in response.get("layers", []))
+    for config in configs:
+        if not isinstance(config, dict):
+            raise ReviewIncomplete("invalid catalog layer")
+        for category in result:
+            catalog = config.get(category, {})
+            if not isinstance(catalog, dict):
+                raise ReviewIncomplete("invalid catalog")
+            result[category].update(catalog)
+    result["plugins"].discard("_default")
+    return result
+
+
+def disable_catalogs(response):
+    """TOML quoted keys; arguments go directly to Popen, never a shell."""
+    return [
+        category + "." + json.dumps(name, ensure_ascii=False) + ".enabled=false"
+        for category, names in catalog_names(response).items()
+        for name in sorted(names)
+    ]
+
+
+def permission_checks(config):
+    permissions = config.get("permissions", {})
+    profile = permissions.get("clytie-review", {}) if isinstance(permissions, dict) else {}
+    if not isinstance(profile, dict):
+        profile = {}
+    filesystem = profile.get("filesystem")
+    if isinstance(filesystem, dict):
+        filesystem = dict(filesystem)
+        # This version emits a nullable traversal-depth option even when unset.
+        # Only this exact null field is semantically inert; all other differences fail.
+        if "glob_scan_max_depth" in filesystem and filesystem["glob_scan_max_depth"] is None:
+            filesystem.pop("glob_scan_max_depth")
+    expected = {":root": "deny", ":minimal": "read", ":workspace_roots": {".": "read"}}
+    return {
+        "profile_shape": set(profile) == {"filesystem", "network"},
+        "filesystem": filesystem == expected,
+        "network_disabled": profile.get("network") == {"enabled": False},
+        "no_extra_runtime_roots": not any(
+            config.get(name)
+            for name in (
+                "runtime_workspace_roots",
+                "additional_workspace_roots",
+                "workspace_roots",
+            )
+        ),
+    }
 
 
 def inspect_config(response, requirements):
@@ -98,7 +178,7 @@ def inspect_config(response, requirements):
             blockers.append("invalid_catalog")
         names.update(effective)
         rows = []
-        for name in sorted(names - {"_default"}):
+        for name in sorted(names - ({"_default"} if category == "plugins" else set())):
             entry = effective.get(name)
             disabled = isinstance(entry, dict) and entry.get("enabled") is False
             rows.append({"id_sha256": digest(name), "explicitly_disabled": disabled})
@@ -126,19 +206,21 @@ def inspect_config(response, requirements):
             }
             if enabled is True and name != "skip_host_skill_discovery":
                 blockers.append("additional_entrypoint_enabled")
-    profile = config.get("permissions", {}).get("clytie-review", {})
-    expected_fs = {":root": "deny", ":minimal": "read", ":workspace_roots": {".": "read"}}
     policy = {
         "mxc": config.get("windows", {}).get("sandbox") == "mxc",
         "profile": config.get("default_permissions") == "clytie-review",
-        "filesystem": profile.get("filesystem") == expected_fs,
-        "network_disabled": profile.get("network", {}).get("enabled") is False,
+        **permission_checks(config),
         "model": config.get("model") == MODEL,
         "effort": config.get("model_reasoning_effort") == EFFORT,
         "approval_never": config.get("approval_policy") == "never",
         "private_docs_disabled": config.get("project_doc_max_bytes") == 0,
         "tool_environment_none": config.get("shell_environment_policy", {}).get("inherit")
         == "none",
+        "tool_environment_fixed": config.get("shell_environment_policy", {}).get("set")
+        == {"SystemRoot": "C:/Windows", "WINDIR": "C:/Windows", "SystemDrive": "C:"},
+        "no_environment_includes": not config.get("shell_environment_policy", {}).get(
+            "include_only"
+        ),
         "web_disabled": config.get("web_search") == "disabled",
     }
     if not all(policy.values()):
@@ -184,13 +266,45 @@ def inspect_config(response, requirements):
             )
             if name in req
         )
-    # Config catalogs alone do not enumerate installed plugin hooks/skills/remote discovery.
-    blockers.append("plugin_entrypoint_inventory_not_verified")
+        for name, wanted in (
+            ("allowedWindowsSandboxImplementations", "mxc"),
+            ("allowedApprovalPolicies", "never"),
+            ("allowedWebSearchModes", "disabled"),
+        ):
+            if req.get(name) is not None and wanted not in req[name]:
+                blockers.append("managed_policy_conflict")
+        if (
+            req.get("allowedPermissionProfiles") is not None
+            and req["allowedPermissionProfiles"].get("clytie-review") is not True
+        ):
+            blockers.append("managed_policy_conflict")
+        if (
+            any(req.get("featureRequirements", {}).get(name) is True for name in DISABLED_FEATURES)
+            if req.get("featureRequirements")
+            else False
+        ):
+            blockers.append("managed_policy_conflict")
+    entrypoints = {
+        "features_disabled": all(feature_checks.values()),
+        "mcp_explicitly_disabled": all(r["explicitly_disabled"] for r in inventory["mcp_servers"]),
+        "plugins_explicitly_disabled": all(r["explicitly_disabled"] for r in inventory["plugins"]),
+        "plugin_default_disabled": config.get("plugins", {}).get("_default", {}).get("enabled")
+        is False,
+        "host_skills_skipped": features.get("skip_host_skill_discovery") is True,
+        "bundled_skills_disabled": config.get("skills", {}).get("bundled", {}).get("enabled")
+        is False,
+        "skill_instructions_disabled": config.get("skills", {}).get("include_instructions")
+        is False,
+        "notify_disabled": config.get("notify") == [],
+    }
+    if not all(entrypoints.values()):
+        blockers.append("plugin_entrypoint_inventory_not_verified")
     return {
         "ready_for_thread": not blockers,
         "blockers": sorted(set(blockers)),
         "policy": policy,
         "features_disabled": feature_checks,
+        "entrypoints": entrypoints,
         "additional_entrypoints": extra_entries,
         "instruction_presence": instructions,
         "layers": sources,
@@ -218,7 +332,7 @@ def all_pages(rpc, method, thread_id):
             raise ReviewIncomplete("pagination bound exceeded")
 
 
-def inspect_runtime(features, servers, apps):
+def inspect_runtime(features, servers, apps, expected_mcp=()):
     known = {row["name"]: row.get("enabled") for row in features}
     feature_checks = {name: known.get(name) is False for name in sorted(DISABLED_FEATURES)}
     rows = []
@@ -239,13 +353,34 @@ def inspect_runtime(features, servers, apps):
         }
         for row in apps.get("apps", [])
     ]
+    extra_enabled = any(
+        row.get("enabled") is True
+        and row["name"] not in DISABLED_FEATURES
+        and row["name"] != "skip_host_skill_discovery"
+        and any(
+            word in row["name"]
+            for word in ("plugin", "app", "hook", "browser", "computer", "skill")
+        )
+        for row in features
+    )
+    inventory_complete = set(expected_mcp) <= {row["id_sha256"] for row in rows}
     passed = (
         all(feature_checks.values())
+        and len(known) == len(features)
+        and not extra_enabled
+        and inventory_complete
         and isinstance(apps.get("apps"), list)
         and all(r["disabled"] and r["tools_empty"] and r["discovery_ok"] for r in rows)
         and all(r["disabled"] and r["uncallable"] for r in installed)
     )
-    return {"passed": passed, "features": feature_checks, "mcp": rows, "apps": installed}
+    return {
+        "passed": passed,
+        "features": feature_checks,
+        "mcp": rows,
+        "apps": installed,
+        "additional_entrypoint_enabled": extra_enabled,
+        "inventory_complete": inventory_complete,
+    }
 
 
 class NoModelServer:
@@ -313,6 +448,7 @@ class NoModelServer:
                 if "error" in message:
                     event["status"] = "error"
                     event["error_sha256"] = digest(message["error"])
+                    event["error_mentions_mxc"] = "mxc" in str(message["error"]).lower()
                     raise ReviewIncomplete("metadata request rejected")
                 event["status"] = "ok"
                 return message["result"]
@@ -344,6 +480,24 @@ class NoModelServer:
         }
 
 
+def app_server_args(cli, overrides=()):
+    args = [str(cli), "--no-daemon", "app-server", "--stdio", "--strict-config"]
+    for value in [*SETTINGS, *EXTRA_SETTINGS, *overrides]:
+        args.extend(["-c", value])
+    return args
+
+
+def initialize(server):
+    server.rpc(
+        "initialize",
+        {
+            "clientInfo": {"name": "clytie_review_preflight", "version": "1"},
+            "capabilities": {"experimentalApi": True},
+        },
+    )
+    server.send({"method": "initialized", "params": {}})
+
+
 def preflight(cli, candidate, destination):
     destination.mkdir(parents=True, exist_ok=False)
     cli = cli.resolve(strict=True)
@@ -354,10 +508,7 @@ def preflight(cli, candidate, destination):
         .strip()
     )
     metadata = json.loads((candidate / "metadata.json").read_text(encoding="utf-8"))
-    settings = SETTINGS + EXTRA_SETTINGS
-    args = [str(cli), "--no-daemon", "app-server", "--stdio", "--strict-config"]
-    for value in settings:
-        args.extend(["-c", value])
+    args = app_server_args(cli)
     evidence = {
         "status": "review_incomplete",
         "formal_rounds_consumed": 0,
@@ -370,7 +521,7 @@ def preflight(cli, candidate, destination):
             "sha256": hashlib.sha256(cli.read_bytes()).hexdigest(),
         },
         "args": args,
-        "snapshot_sha256": digest(str(snapshot)),
+        "snapshot_path_sha256": digest(str(snapshot)),
         "client_environment_names": sorted(client_environment(os.environ)),
         "ignore_user_config_supported": False,
         "raw_config_saved": False,
@@ -380,22 +531,46 @@ def preflight(cli, candidate, destination):
     try:
         if version != metadata["cli_version"]:
             raise ReviewIncomplete("CLI version differs from candidate")
+        if (
+            metadata.get("cli_sha256") != evidence["cli"]["sha256"]
+            or metadata.get("cli_path_sha256") != hashlib.sha256(str(cli).encode()).hexdigest()
+        ):
+            raise ReviewIncomplete("CLI pin differs from candidate")
+        manifest = snapshot_manifest(snapshot)
+        declared = json.loads((candidate / "snapshot-manifest.json").read_text(encoding="utf-8"))
+        if declared != manifest or metadata.get("snapshot_manifest_sha256") != manifest["sha256"]:
+            raise ReviewIncomplete("snapshot content mismatch")
+        evidence["snapshot_content_sha256"] = manifest["sha256"]
+        with (destination / "snapshot-manifest.json").open("x", encoding="utf-8") as output:
+            json.dump(manifest, output, ensure_ascii=False, indent=2)
+        # A discovery-only instance supplies identifiers, never an acceptance certificate.
+        diagnostic = NoModelServer(args, snapshot)
+        try:
+            initialize(diagnostic)
+            config = diagnostic.rpc("config/read", {"cwd": str(snapshot), "includeLayers": True})
+            overrides = disable_catalogs(config)
+            evidence["diagnostic"] = {
+                "purpose": "catalog_identifiers_only",
+                "override_count": len(overrides),
+                "no_thread": True,
+            }
+            del config
+        finally:
+            evidence["diagnostic_process"] = diagnostic.close()
+            evidence["diagnostic_events"] = diagnostic.events
+        if hashlib.sha256(cli.read_bytes()).hexdigest() != evidence["cli"]["sha256"]:
+            raise ReviewIncomplete("CLI file changed")
+        args = app_server_args(cli, overrides)
+        evidence["args"] = args
         server = NoModelServer(args, snapshot)
-        server.rpc(
-            "initialize",
-            {
-                "clientInfo": {"name": "clytie_review_preflight", "version": "1"},
-                "capabilities": {"experimentalApi": True},
-            },
-        )
-        server.send({"method": "initialized", "params": {}})
+        initialize(server)
         config = server.rpc("config/read", {"cwd": str(snapshot), "includeLayers": True})
         requirements = server.rpc("configRequirements/read")
+        config_hash = digest([config, requirements])
         evidence["config"] = inspect_config(config, requirements)
         del config, requirements
         if not evidence["config"]["ready_for_thread"]:
             raise ReviewIncomplete("pre_thread_configuration_gate")
-        # Not reachable until every pre-thread entrypoint has positive disable evidence.
         result = server.rpc(
             "thread/start",
             {
@@ -403,6 +578,10 @@ def preflight(cli, candidate, destination):
                 "ephemeral": True,
                 "model": MODEL,
                 "approvalPolicy": "never",
+                "permissions": "clytie-review",
+                "runtimeWorkspaceRoots": [str(snapshot)],
+                "selectedCapabilityRoots": [],
+                "allowProviderModelFallback": False,
                 "config": {"model_reasoning_effort": EFFORT},
             },
         )
@@ -411,19 +590,37 @@ def preflight(cli, candidate, destination):
         evidence["thread_id_sha256"] = digest(thread["id"])
         if (
             not thread.get("ephemeral")
-            or thread.get("model") != MODEL
-            or thread.get("reasoningEffort") != EFFORT
+            or result.get("model") != MODEL
+            or result.get("reasoningEffort") != EFFORT
+            or result.get("runtimeWorkspaceRoots") != [str(snapshot)]
+            or result.get("activePermissionProfile", {}).get("id") != "clytie-review"
+            or result.get("activePermissionProfile", {}).get("extends") is not None
         ):
             raise ReviewIncomplete("effective_thread_mismatch")
         features = all_pages(server.rpc, "experimentalFeature/list", thread["id"])
         servers = all_pages(server.rpc, "mcpServerStatus/list", thread["id"])
         apps = server.rpc("app/installed", {"threadId": thread["id"], "forceRefresh": False})
-        evidence["runtime"] = inspect_runtime(features, servers, apps)
+        evidence["runtime"] = inspect_runtime(
+            features,
+            servers,
+            apps,
+            [row["id_sha256"] for row in evidence["config"]["inventory"]["mcp_servers"]],
+        )
         if not evidence["runtime"]["passed"]:
             raise ReviewIncomplete("thread_runtime_gate")
+        current = server.rpc("config/read", {"cwd": str(snapshot), "includeLayers": True})
+        current_requirements = server.rpc("configRequirements/read")
+        evidence["configuration_unchanged"] = digest([current, current_requirements]) == config_hash
+        del current, current_requirements
+        if not evidence["configuration_unchanged"]:
+            raise ReviewIncomplete("configuration changed during preflight")
+        if snapshot_manifest(snapshot) != manifest:
+            raise ReviewIncomplete("snapshot changed during preflight")
         raise ReviewIncomplete("thread_bound_tool_probe_interface_unverified")
     except ReviewIncomplete as exc:
         evidence["stopped_at"] = str(exc)
+    except (OSError, ValueError, KeyError, TypeError):
+        evidence["stopped_at"] = "invalid_or_missing_preflight_input"
     finally:
         if server is not None:
             evidence["process"] = server.close()

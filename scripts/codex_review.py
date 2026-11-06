@@ -153,6 +153,39 @@ def extract_snapshot(archive, destination):
     )
 
 
+def snapshot_manifest(root):
+    """Content inventory, never follow links/reparse points outside the snapshot."""
+    root = Path(root)
+    entries = []
+
+    def visit(path):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+        ):
+            raise ReviewIncomplete("snapshot link rejected")
+        if stat.S_ISDIR(info.st_mode):
+            for child in sorted(path.iterdir()):
+                visit(child)
+        elif stat.S_ISREG(info.st_mode):
+            content = path.read_bytes()
+            entries.append(
+                {
+                    "path": path.relative_to(root).as_posix(),
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            )
+        else:
+            raise ReviewIncomplete("snapshot special file rejected")
+
+    visit(root)
+    return {
+        "files": entries,
+        "sha256": hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest(),
+    }
+
+
 def prepare(root, pr, specs, evidence):
     gh = ["gh", "pr", "view", str(pr), "--json", "body,title,commits,headRefOid,baseRefOid,url"]
     view_bytes = capture(gh, root)
@@ -200,6 +233,8 @@ def prepare(root, pr, specs, evidence):
         "checklist": ["docs/roadmap.md A4.2", "docs/architecture/api-spec.md §10"],
         "rules": rules_hash(root),
         "cli_version": version,
+        "cli_sha256": hashlib.sha256(Path(cli).read_bytes()).hexdigest(),
+        "cli_path_sha256": hashlib.sha256(str(Path(cli).resolve()).encode()).hexdigest(),
         "model": MODEL,
         "effort": EFFORT,
     }
@@ -217,6 +252,10 @@ def prepare(root, pr, specs, evidence):
     )
     archive = capture(["git", "archive", "--format=zip", head], root)
     extract_snapshot(archive, directory / "snapshot")
+    manifest = snapshot_manifest(directory / "snapshot")
+    save(directory / "snapshot-manifest.json", manifest)
+    metadata["snapshot_manifest_sha256"] = manifest["sha256"]
+    save(directory / "metadata.json", metadata)
     after = json.loads(capture(gh, root))
     if after["headRefOid"] != head or after["baseRefOid"] != view["baseRefOid"]:
         raise ReviewIncomplete("PR changed while collecting snapshot")
