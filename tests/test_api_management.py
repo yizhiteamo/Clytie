@@ -7,7 +7,7 @@ import pytest
 from clytie.api.auth import APIError
 from clytie.api.management import Management
 from clytie.sdk.testing import MockClock
-from clytie.supervisor.common import write
+from clytie.supervisor.common import read, write
 
 
 def management(tmp_path):
@@ -168,3 +168,54 @@ async def test_single_wait_stop_escalates_with_normal_timeout(tmp_path):
     assert (await stopping)["reason"] == "timeout_killed"
     assert launcher.children[0][1].killed
     await svc.stop()
+
+
+@pytest.mark.parametrize("mode", ["cancel", "wait"])
+async def test_single_force_stop_persists_result_audit_and_notification(tmp_path, mode):
+    import json
+
+    from .test_supervisor import make, spin
+
+    svc, launcher, clock = await make(tmp_path, count=2, stop=False, config={"hang_seconds": 900})
+    notices = []
+
+    class Notifier:
+        async def notify(self, notice, cancel):
+            notices.append(notice)
+            return SimpleNamespace(status="sent")
+
+    svc.notifications.plugins = [(Notifier(), False)]
+    stopping = asyncio.create_task(svc.stop_companion("companion_0", mode))
+    await spin()
+    if mode == "wait":
+        clock.advance(300)
+        await spin()
+        assert not stopping.done()
+        await svc.escalate()
+        await spin()
+    clock.advance(120)
+    await spin()
+    result = await stopping
+    try:
+        assert result["reason"] == "timeout_killed"
+        assert svc.stop_results["companion_0"] == result
+        assert svc.rows["companion_0"]["stop_result"] == result
+        clock.advance(5)
+        await spin()
+        assert (
+            read(tmp_path / "run/health.json")["companions"]["companion_0"]["stop_result"] == result
+        )
+        events = [json.loads(line) for line in svc.audit.path.read_text().splitlines()]
+        killed = [event for event in events if event["operation"] == "force_stop"]
+        assert len(killed) == 1
+        assert killed[0]["companion_id"] == "companion_0"
+        assert killed[0]["reason"] == "timeout_killed"
+        assert [notice.dedupe_key for notice in notices] == ["stop_killed:companion_0"]
+        await svc.notifications.update(svc.problems)
+        await svc.stop_companion("companion_0", mode)
+        assert len(notices) == 1
+        assert svc.rows["companion_1"]["state"] == "running"
+        assert not launcher.children[1][1].killed
+    finally:
+        launcher.children[1][1].auto_stop = True
+        await svc.stop()

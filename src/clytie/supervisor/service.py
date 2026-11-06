@@ -429,7 +429,7 @@ class Supervisor:
             self.monitors[cid].cancel()
             await asyncio.gather(self.monitors[cid], return_exceptions=True)
             row["state"] = "stopped"
-            return {"stopped": [], "not_stopped": {}}
+            return self.stop_results.get(cid, {"stopped": [], "not_stopped": {}})
         row["state"] = "stopping"
         self.stop_results.pop(cid, None)
         mode = mode or self.setting("stop", "task_mode", "cancel")
@@ -461,11 +461,18 @@ class Supervisor:
         except TimeoutError:
             await child.kill()
             await child.wait()
-            return {"stopped": [], "not_stopped": {}, "reason": "timeout_killed"}
+            result = {"stopped": [], "not_stopped": {}, "reason": "timeout_killed"}
+            self.audit.append("force_stop", cid, reason="timeout_killed", source="companion_stop")
+            self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"
+            self.stop_results[cid] = result
+            row["stop_result"] = result
+            await self.notifications.update(self.problems, pending=self.pending_health)
+            return result
         finally:
             self.monitors[cid].cancel()
             await asyncio.gather(self.monitors[cid], return_exceptions=True)
             row["state"] = "stopped"
+            await self.flush_health()
 
     async def start_companion(self, cid):
         if self.rows[cid]["state"] in {"running", "degraded", "starting"}:
