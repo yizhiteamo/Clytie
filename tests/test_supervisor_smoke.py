@@ -13,6 +13,20 @@ from clytie.supervisor.processes import ProcessLauncher
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def retain_child_stacks(monkeypatch):
+    """Only wrap this test's real companion CLI; no fake runtime or relaxed deadline."""
+    import subprocess
+
+    popen = subprocess.Popen
+
+    def launch(args, *positional, **kwargs):
+        if args[1:4] == ["-m", "clytie", "companion"]:
+            args = [args[0], str(ROOT / "tests/fixtures/companion_diagnostic.py"), *args[3:]]
+        return popen(args, *positional, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+
+
 async def test_real_companion_ready_heartbeat_stop(tmp_path):
     home = tmp_path / "fictional-home"
     shutil.copytree(ROOT / "examples/home", home)
@@ -108,9 +122,10 @@ async def test_real_frontend_disappears_daemon_stops(tmp_path):
             await wait_until(lambda: not status(home)["running"], clock, 130)
 
 
-async def test_real_supervisor_crash_restart_then_stop(tmp_path):
+async def test_real_supervisor_crash_restart_then_stop(tmp_path, monkeypatch):
     from clytie.supervisor.service import Supervisor
 
+    retain_child_stacks(monkeypatch)
     home = tmp_path / "fictional-home"
     shutil.copytree(ROOT / "examples/home", home)
     clock = SystemClock()
@@ -141,9 +156,10 @@ async def test_real_supervisor_crash_restart_then_stop(tmp_path):
         launcher.close()
 
 
-async def test_real_child_eof_exits_and_lock_released(tmp_path):
+async def test_real_child_eof_exits_and_lock_released(tmp_path, monkeypatch):
     from clytie.plugin_host.locking import file_lock, process_identity
 
+    retain_child_stacks(monkeypatch)
     home = tmp_path / "fictional-home"
     shutil.copytree(ROOT / "examples/home", home)
     launcher = ProcessLauncher(home)
@@ -155,6 +171,11 @@ async def test_real_child_eof_exits_and_lock_released(tmp_path):
         assert await timed(child.wait(), clock, 6) == 0
         with file_lock(home / "companions/companion_a/ledger/.lock", process_identity()):
             pass
+    except (AssertionError, TimeoutError):
+        log = home / "companions/companion_a/logs/process.log"
+        if log.exists():
+            print(log.read_text(encoding="utf-8", errors="replace"))
+        raise
     finally:
         await child.kill()
         launcher.close()
