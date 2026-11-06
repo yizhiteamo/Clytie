@@ -342,18 +342,25 @@ class Exports:
         code, public = new_recovery()
         path = self.recovery_path()
         if journal is not None:
+            journal.prepare_file_audit(
+                self.store,
+                "memory_recovery_rotated",
+                fingerprint=hashlib.sha256(public).hexdigest(),
+            )
             journal.prepare_file(path, public)
         previous = path.read_bytes() if path.exists() else None
         try:
             atomic_write(path, public)
-            if journal is not None:
-                journal.committed()
             with self.store.transaction():
                 self.store.audit(
-                    "memory_recovery_rotated", fingerprint=hashlib.sha256(public).hexdigest()
+                    "memory_recovery_rotated",
+                    fingerprint=hashlib.sha256(public).hexdigest(),
+                    **({"operation_id": journal.value["id"]} if journal else {}),
                 )
+            if journal is not None:
+                journal.committed()
         except BaseException:
-            if journal is not None and journal.value["committed"]:
+            if journal is not None:
                 raise
             if previous is None:
                 if path.exists():
@@ -407,6 +414,9 @@ class Exports:
             )
             checked.close()
             if journal is not None:
+                journal.prepare_file_audit(
+                    self.store, "memory_export", records=len(self.store.all_records())
+                )
                 journal.prepare_file(out, encrypted)
                 if code is not None:
                     journal.prepare_public(path, recipient)
@@ -414,13 +424,17 @@ class Exports:
                 atomic_write(path, recipient)
                 created_public = True
             pending.replace(out)
+            with self.store.transaction():
+                self.store.audit(
+                    "memory_export",
+                    records=len(self.store.all_records()),
+                    **({"operation_id": journal.value["id"]} if journal else {}),
+                )
             if journal is not None:
                 journal.committed()
-            with self.store.transaction():
-                self.store.audit("memory_export", records=len(self.store.all_records()))
         except BaseException:
             # 首次导出失败不能留下没有交给用户恢复码的公钥。
-            if created_public and not (journal is not None and journal.value["committed"]):
+            if created_public and journal is None:
                 path.unlink()
             raise
         finally:

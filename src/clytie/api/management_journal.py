@@ -194,6 +194,116 @@ class Journal:
         }
         self.save()
 
+    def prepare_file_audit(self, store, kind, **fields):
+        store.materialize()
+        self.value["file_audit"] = {
+            "database": str(store.path.resolve()),
+            "kind": kind,
+            "fields": fields,
+        }
+        self.save()
+
+    def finish_file_audit(self):
+        """Complete only a recorded file-publication audit, never replay the operation."""
+        from pathlib import Path
+
+        evidence = self.value.get("file_audit")
+        if evidence is None:
+            return
+        if evidence["kind"] not in {"memory_export", "memory_recovery_rotated"}:
+            raise ValueError("invalid file audit kind")
+        path = Path(evidence["database"])
+        expected = self.path.parents[2] / "memory/memory.sqlite3"
+        if path != expected.resolve() or path.is_symlink() or path.resolve() != path:
+            raise ValueError("invalid file audit database")
+        db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                raise ValueError("invalid file audit database")
+            entries = [json.loads(row[0]) for row in db.execute("SELECT data FROM audit")]
+            if not any(
+                row.get("operation_id") == self.value["id"] and row.get("kind") == evidence["kind"]
+                for row in entries
+            ):
+                entry = dict(
+                    kind=evidence["kind"],
+                    at=self.clock.now().isoformat(),
+                    operation_id=self.value["id"],
+                    **evidence["fields"],
+                )
+                db.execute("INSERT INTO audit(data) VALUES(?)", (json.dumps(entry),))
+                generation = db.execute(
+                    "SELECT value FROM metadata WHERE key='generation'"
+                ).fetchone()
+                db.execute(
+                    "INSERT OR REPLACE INTO metadata VALUES('generation',?)",
+                    (json.dumps((json.loads(generation[0]) if generation else 0) + 1),),
+                )
+            db.commit()
+        finally:
+            db.close()
+
+    def file_audit_exists(self):
+        from pathlib import Path
+
+        evidence = self.value.get("file_audit")
+        if evidence is None:
+            return False
+        path = Path(evidence["database"])
+        expected = self.path.parents[2] / "memory/memory.sqlite3"
+        if path != expected.resolve() or path.is_symlink() or path.resolve() != path:
+            raise ValueError("invalid file audit database")
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            return any(
+                entry.get("operation_id") == self.value["id"]
+                and entry.get("kind") == evidence["kind"]
+                and all(entry.get(key) == value for key, value in evidence["fields"].items())
+                for entry in (json.loads(row[0]) for row in db.execute("SELECT data FROM audit"))
+            )
+        finally:
+            db.close()
+
+    def recover_file(self, artifact):
+        from clytie.plugin_host.locking import file_lock
+
+        home = self.path.parents[4]
+        with file_lock(home / "run/memory-recovery.lock", process_identity()):
+            return self._recover_file(artifact)
+
+    def _recover_file(self, artifact):
+        from pathlib import Path
+
+        path = Path(artifact["path"])
+        if path.is_symlink() or path.resolve() != path:
+            return self.blocked("artifact_unsafe")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        published = actual == artifact["sha256"]
+        if published:
+            self.value["committed"] = True
+            self.save()
+        try:
+            audited = self.file_audit_exists()
+        except (OSError, ValueError, sqlite3.Error, KeyError):
+            return self.blocked("file_audit_unverified")
+        if audited and not published:
+            self.value["committed"] = True
+            self.save()
+        if not audited and not self._recover_public(published):
+            return self.blocked("public_key_unverified")
+        if published:
+            try:
+                self.finish_file_audit()
+            except (OSError, ValueError, sqlite3.Error, KeyError):
+                return self.blocked("file_audit_unverified")
+            self.committed(artifact.get("result"))
+            return self.public()
+        if actual == artifact.get("previous_sha256"):
+            self.phase("interrupted")
+            return self.public()
+        return self.blocked("artifact_unverified")
+
     def temporary(self, path):
         path = path.absolute()
         if path.suffix != ".pending" or path.exists() or path.resolve() != path:
@@ -296,20 +406,7 @@ class Journal:
 
         artifact = self.value.get("file")
         if artifact:
-            path = Path(artifact["path"])
-            if path.is_symlink() or path.resolve() != path:
-                return self.blocked("artifact_unsafe")
-            actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-            published = actual == artifact["sha256"]
-            if not self.recover_public(published):
-                return self.blocked("public_key_unverified")
-            if published:
-                self.committed(artifact.get("result"))
-                return self.public()
-            if actual == artifact.get("previous_sha256"):
-                self.phase("interrupted")
-                return self.public()
-            return self.blocked("artifact_unverified")
+            return self.recover_file(artifact)
         database = self.value.get("database")
         if database:
             path = Path(database)
