@@ -92,10 +92,23 @@ async def _await_start(process, client, clock):
     from clytie.supervisor.processes import frame
 
     deadline = clock.monotonic() + 30
+    unreadable = False
     while clock.monotonic() < deadline:
         if process.poll() is not None:
             return {"ok": False, "error": {"code": "startup_failed", "message": "后台启动失败"}}
-        info = read(client.home / "run/api.json", {})
+        try:
+            info = read(client.home / "run/api.json", {})
+            unreadable = False
+        except PermissionError:
+            # Readiness is not established. This may be persistent denial, not
+            # necessarily a transient sharing conflict; keep the original deadline.
+            unreadable = True
+            info = {}
+        except OSError:
+            return {
+                "ok": False,
+                "error": {"code": "startup_failed", "message": "后台启动状态文件无法读取"},
+            }
         if info.get("pid") == process.pid:
             try:
                 response = await timed(
@@ -120,5 +133,12 @@ async def _await_start(process, client, clock):
     # Closing the launch pipe requests safe cancellation even if HTTP never became ready.
     return {
         "ok": False,
-        "error": {"code": "startup_timeout", "message": "后台启动超时，已请求安全停止"},
+        "error": {
+            "code": "startup_timeout",
+            "message": (
+                "后台启动超时：状态文件不可读，已请求安全停止"
+                if unreadable
+                else "后台启动超时，已请求安全停止"
+            ),
+        },
     }
