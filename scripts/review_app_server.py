@@ -94,7 +94,8 @@ def disable_catalogs(response):
         category
         + "={"
         + ",".join(
-            json.dumps(name, ensure_ascii=False) + "={enabled=false}" for name in sorted(names)
+            json.dumps(name, ensure_ascii=False) + "={enabled=false}"
+            for name in sorted(names | ({"_default"} if category == "plugins" else set()))
         )
         + "}"
         for category, names in catalog_names(response).items()
@@ -126,6 +127,41 @@ def permission_checks(config):
                 "workspace_roots",
             )
         ),
+    }
+
+
+def representation_status(config):
+    """Record only types/nullness and known booleans, never path/env values."""
+
+    def shape(value):
+        if not isinstance(value, dict):
+            return {"type": type(value).__name__}
+        return {
+            digest(key): {"type": type(item).__name__, "null": item is None}
+            for key, item in value.items()
+        }
+
+    profile = config.get("permissions", {}).get("clytie-review", {})
+    network = profile.get("network", {})
+    environment = config.get("shell_environment_policy", {}).get("set", {})
+    return {
+        "profile_shape": shape(profile),
+        "network_shape": shape(network),
+        "environment_shape": shape(environment),
+        "network_enabled_flag_false": network.get("enabled") is False,
+        "extends_absent_or_null": profile.get("extends") is None,
+        "native_environment_entries": {
+            name: {
+                "present": name in environment,
+                "type": type(environment.get(name)).__name__,
+                "matches_requested_value": environment.get(name) == value,
+            }
+            for name, value in {
+                "SystemRoot": "C:/Windows",
+                "WINDIR": "C:/Windows",
+                "SystemDrive": "C:",
+            }.items()
+        },
     }
 
 
@@ -307,6 +343,7 @@ def inspect_config(response, requirements):
         "ready_for_thread": not blockers,
         "blockers": sorted(set(blockers)),
         "policy": policy,
+        "representation": representation_status(config),
         "features_disabled": feature_checks,
         "entrypoints": entrypoints,
         "additional_entrypoints": extra_entries,

@@ -216,7 +216,9 @@ def test_safe_toml_identifiers_roundtrip_and_requirement_independence(monkeypatc
     # dotted assignment alone is insufficient. Only fixed top-level keys go there.
     assert {arg.partition("=")[0] for arg in overrides} == {"mcp_servers", "plugins"}
     parsed = tomllib.loads("\n".join(overrides))
-    assert set(parsed["mcp_servers"]) == set(parsed["plugins"]) == set(names)
+    assert set(parsed["mcp_servers"]) == set(names)
+    assert set(parsed["plugins"]) == set(names) | {"_default"}
+    assert parsed["plugins"]["_default"]["enabled"] is False
     assert all(v["enabled"] is False for group in parsed.values() for v in group.values())
     monkeypatch.setattr(review, "SETTINGS", [])
     monkeypatch.setattr(review, "EXTRA_SETTINGS", [])
