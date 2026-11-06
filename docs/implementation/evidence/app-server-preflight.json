@@ -1,0 +1,262 @@
+{
+  "status": "review_incomplete",
+  "formal_rounds_consumed": 0,
+  "model_calls": 0,
+  "thread_created": false,
+  "head": "46f4f0df28ddf36d106e6d8fc6f6a8fc720fe1d1",
+  "cli": {
+    "version": "codex-cli 0.166.0-alpha.6",
+    "sha256": "925c7d0665ffa49b0dcf748e034a805a04da984164ac92301432073b47789b99",
+    "path_sha256": "359b4d628986a2d00f862a67d4a3f8f340dde3b67ccf6e36e168432ed70aac9d"
+  },
+  "args": [
+    "<PINNED_CLI>",
+    "--no-daemon",
+    "app-server",
+    "--stdio",
+    "--strict-config",
+    "-c",
+    "windows.sandbox=\"mxc\"",
+    "-c",
+    "default_permissions=\"clytie-review\"",
+    "-c",
+    "permissions.clytie-review.filesystem={\":root\"=\"deny\",\":minimal\"=\"read\",\":workspace_roots\"={\".\"=\"read\"}}",
+    "-c",
+    "permissions.clytie-review.network.enabled=false",
+    "-c",
+    "model_reasoning_effort=\"high\"",
+    "-c",
+    "features.apps=false",
+    "-c",
+    "features.multi_agent=false",
+    "-c",
+    "features.multi_agent_v2=false",
+    "-c",
+    "features.hooks=false",
+    "-c",
+    "features.memories=false",
+    "-c",
+    "features.image_generation=false",
+    "-c",
+    "features.view_image=false",
+    "-c",
+    "features.browser_use=false",
+    "-c",
+    "features.browser_use_external=false",
+    "-c",
+    "features.in_app_browser=false",
+    "-c",
+    "features.in_app_chat=false",
+    "-c",
+    "features.tool_suggest=false",
+    "-c",
+    "features.skill_search=false",
+    "-c",
+    "features.skip_host_skill_discovery=true",
+    "-c",
+    "plugins._default.enabled=false",
+    "-c",
+    "mcp_servers={}",
+    "-c",
+    "web_search=\"disabled\"",
+    "-c",
+    "project_doc_max_bytes=0",
+    "-c",
+    "skills.bundled.enabled=false",
+    "-c",
+    "skills.include_instructions=false",
+    "-c",
+    "shell_environment_policy.inherit=\"none\"",
+    "-c",
+    "shell_environment_policy.set={SystemRoot=\"C:/Windows\",WINDIR=\"C:/Windows\",SystemDrive=\"C:\"}",
+    "-c",
+    "model=\"gpt-6-astra\"",
+    "-c",
+    "approval_policy=\"never\"",
+    "-c",
+    "analytics.enabled=false"
+  ],
+  "snapshot_sha256": "233bac9653b0899361d9d8dd87bc9503ceb8cb8881fea921ef0b2c3317983e34",
+  "client_environment_names": [
+    "APPDATA",
+    "COMSPEC",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR"
+  ],
+  "ignore_user_config_supported": false,
+  "raw_config_saved": false,
+  "reusable_certificate": false,
+  "config": {
+    "ready_for_thread": false,
+    "blockers": [
+      "additional_entrypoint_enabled",
+      "effective_policy_mismatch",
+      "inherited_instructions_or_notify",
+      "mcp_not_explicitly_disabled",
+      "plugin_entrypoint_inventory_not_verified",
+      "plugin_not_explicitly_disabled",
+      "requirements_not_available"
+    ],
+    "policy": {
+      "mxc": true,
+      "profile": true,
+      "filesystem": false,
+      "network_disabled": true,
+      "model": true,
+      "effort": true,
+      "approval_never": true,
+      "private_docs_disabled": true,
+      "tool_environment_none": true,
+      "web_disabled": true
+    },
+    "features_disabled": {
+      "apps": true,
+      "browser_use": true,
+      "browser_use_external": true,
+      "hooks": true,
+      "image_generation": true,
+      "in_app_browser": true,
+      "in_app_chat": true,
+      "memories": true,
+      "multi_agent": true,
+      "multi_agent_v2": true,
+      "skill_search": true,
+      "tool_suggest": true,
+      "view_image": true
+    },
+    "additional_entrypoints": {
+      "137148b620b8455cee506c6da6ffe6f4828942ea8972e82e9458ae4ca45df709": {
+        "enabled": true
+      },
+      "dad6921403670660613e82ceee3df2bc4577c902873cb22248dd8b1ee29b44f0": {
+        "enabled": false
+      },
+      "cb2226e5373f08790777458fa870c4233e007ccecb20623f36e0a2938509e957": {
+        "enabled": true
+      }
+    },
+    "instruction_presence": {
+      "instructions": false,
+      "developer_instructions": false,
+      "model_instructions_file": false,
+      "experimental_instructions_file": false,
+      "compact_prompt": false,
+      "notify": true
+    },
+    "layers": [
+      {
+        "kind": "sessionFlags",
+        "source_sha256": "4555bbdedbd8843e91ae5a316bcd29939d52c7c5b6a5cbe4a9830a91905ebf5d",
+        "disabled": false,
+        "version_sha256": "c3c5ffca742294ed2a75fa29f29558f9f28894dc51fe4c9cf49c689c4acbe8a3"
+      },
+      {
+        "kind": "user",
+        "source_sha256": "8b8e426720988e2ebea63900370f66ca78ba393544abe9a95acd55d3d3f13d77",
+        "disabled": false,
+        "version_sha256": "ab73695ad63927d35da711817fd632c4526ab2bc999cfac2a7530bd99361b7ab"
+      },
+      {
+        "kind": "system",
+        "source_sha256": "91c4863465371b4926b589750010e7b2325bf42da6d4db3acffc9b87e8b4d2b4",
+        "disabled": false,
+        "version_sha256": "dee06a0144151a768a14782a9ec187fcfbfd99fd825e620d2155ae1b4b0964b4"
+      }
+    ],
+    "origins_sha256": "f44b1675df3a085b2d3b1402fcbe0cd9c5f8986ec29789a0ecfc81abfba1c93b",
+    "inventory": {
+      "mcp_servers": [
+        {
+          "id_sha256": "846e4369b37908a446fb0e1dd2bc4848a0147416da467c6c38e957330de61004",
+          "explicitly_disabled": false
+        }
+      ],
+      "plugins": [
+        {
+          "id_sha256": "61f17f8c2b7394ead4e6cd61d1b53fd46a4e22edd0bab7cdd10962a01e3176aa",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "64ad37648604acf9636ac15d7035ed31537672cfd1ad11256ac269d5e1f88d4a",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "2672edf68fb28bcf57d1235c1904a36f628b1806976650de106722e9c625c9c3",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "43197957c8f5941c015b91c075f0c66e8d113ba953889d34fc79bfedfc3fa4ec",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "67e7a684f91dfd15b90813b3637e0d814767fa84155d853bdb5e811bded5e259",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "14a750a2ecb3380f324a2268279971f8c392fd96b03daa4b3933d162bff042bc",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "883a0b0f7913ef6db1a7cc58c54ac3c462164754add3ea643485e0530c3f65d9",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "136c227cecca706fdbd0ff4fd5d5a4d660c3acee53cc9f0fd2385c297d66d06a",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "4fff9ba1508c7237b2d7d9a11f99b6dc72b346bdbc9da1468b797199b3cd0238",
+          "explicitly_disabled": false
+        },
+        {
+          "id_sha256": "8058f9ced2e33548e9ee26902d0dbc7703e6076578292037cd6ef6889f8606c1",
+          "explicitly_disabled": false
+        }
+      ]
+    },
+    "requirements": {
+      "present": false
+    }
+  },
+  "stopped_at": "pre_thread_configuration_gate",
+  "process": {
+    "exit_code": 0,
+    "stderr_bytes": 0,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "events": [
+    {
+      "method": "initialize",
+      "status": "ok"
+    },
+    {
+      "method": "config/read",
+      "status": "ok"
+    },
+    {
+      "notification_sha256": "7ab9381651bbd84d0f396cc708bd8825a2fe4e6b6d1a3da854406ef1f56c9cbb"
+    },
+    {
+      "method": "configRequirements/read",
+      "status": "ok"
+    }
+  ],
+  "instance_closed_preflight_invalidated": true,
+  "runner_sha256": "85ba5cf422f192ee4a5a422ecfc0a1ed02b6b4eb302048662e3cc5ffeb8d3354",
+  "local_evidence_sha256": "18ddcb028a3e0b6ad6838d68d453a4215c545b58ba6a780ea8f8749be7199e54",
+  "interpretation_notes": [
+    "requirements_not_available was an overly strict classification of a successful response without published requirements; not an RPC failure.",
+    "filesystem=false means exact representation comparison failed; no claim that a broader policy was enforced.",
+    "No thread was created. Runtime catalogs and tool probes were not executed. This is not a transferable preflight certificate."
+  ]
+}

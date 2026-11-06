@@ -114,32 +114,8 @@ def test_round_limit_and_same_head_not_restarted(tmp_path):
     assert len(protocol.rounds()) == 3
 
 
-def test_codex_command_pins_model_mxc_and_cleans_tool_environment(tmp_path):
-    client_environment, command = codex_review.client_environment, codex_review.command
-
-    args = command(
-        "codex.exe",
-        tmp_path / "snapshot with space",
-        tmp_path / "report.txt",
-        tmp_path / "schema.json",
-    )
-    assert args[args.index("-m") + 1] == "gpt-6-astra"
-    assert 'model_reasoning_effort="high"' in args
-    assert 'windows.sandbox="mxc"' in args
-    assert "--ignore-user-config" in args and "--ignore-rules" in args
-    assert "--no-daemon" in args and "--ephemeral" in args
-    assert "--strict-config" in args
-    assert 'shell_environment_policy.inherit="none"' in args
-    assert "permissions.clytie-review.network.enabled=false" in args
-    assert not any(
-        flag in args
-        for flag in (
-            "resume",
-            "fork",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--approve-for-me",
-        )
-    )
+def test_review_client_environment_excludes_private_locators():
+    client_environment = codex_review.client_environment
     assert client_environment(
         {
             "SystemDrive": "C:",
@@ -222,66 +198,12 @@ def test_nonblocking_findings_remain_in_full_report(tmp_path):
     assert (protocol.directory / "round-1/report.txt").read_text(encoding="utf-8") == raw
 
 
-@pytest.mark.parametrize("outcome", ["success", "exit_failure", "missing_report"])
-def test_fresh_review_fake_executor_and_incomplete_results(tmp_path, outcome):
-    import hashlib
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    policy_hash, run_candidate = codex_review.policy_hash, codex_review.run_candidate
-
-    candidate = tmp_path / "candidate"
-    (candidate / "snapshot").mkdir(parents=True)
-    (candidate / "metadata.json").write_text(json.dumps(metadata()), encoding="utf-8")
-    for name in ("view.json", "diff.patch", "checks.txt", "ci.json", "scan-evidence.json"):
-        (candidate / name).write_text("fictional evidence", encoding="utf-8")
-    proof = tmp_path / "proof.json"
-    proof.write_text("fictional preflight", encoding="utf-8")
-    preflight = {
-        "cli_version": metadata()["cli_version"],
-        "policy_sha256": policy_hash(),
-        "checks": dict.fromkeys(
-            [
-                "inside_read",
-                "outside_read",
-                "write_denied",
-                "traversal",
-                "links",
-                "tool_environment",
-                "network",
-                "mcp_plugins",
-                "effective_exec_policy",
-            ],
-            True,
-        ),
-        "evidence": [
-            {"path": str(proof), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest()}
-        ],
-    }
+def test_external_preflight_cannot_start_exec_or_consume_round(tmp_path):
     protocol = ReviewProtocol(tmp_path / "reviews", 1)
     calls = []
-
-    def execute(args, **kwargs):
-        calls.append(args)
-        assert kwargs["cwd"] == candidate / "snapshot"
-        assert "CLYTIE_HOME" not in kwargs["env"]
-        if outcome == "success":
-            Path(args[args.index("-o") + 1]).write_text(json.dumps(report()), encoding="utf-8")
-        return SimpleNamespace(returncode=1 if outcome == "exit_failure" else 0)
-
-    with pytest.raises(ReviewIncomplete, match="preflight"):
-        run_candidate(candidate, protocol, "fictional-codex", {}, executor=execute)
-    assert not calls and protocol.rounds() == []
-    if outcome == "success":
-        assert (
-            run_candidate(candidate, protocol, "fictional-codex", preflight, executor=execute)[1]
-            == report()
+    with pytest.raises(ReviewIncomplete, match="same-instance"):
+        codex_review.run_candidate(
+            tmp_path, protocol, "fictional-codex", {"passed": True}, executor=calls.append
         )
-    else:
-        with pytest.raises(ReviewIncomplete):
-            run_candidate(candidate, protocol, "fictional-codex", preflight, executor=execute)
-        assert protocol.rounds()[0]["status"] == "review_incomplete"
-    assert len(calls) == 1
-    with pytest.raises(ReviewIncomplete):
-        run_candidate(candidate, protocol, "fictional-codex", preflight, executor=execute)
-    assert len(calls) == 1
+    assert not calls
+    assert protocol.rounds() == []
