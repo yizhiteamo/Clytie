@@ -12,6 +12,21 @@ SCHEMA_VERSION = 2
 EXEC_TERMINAL = {"ok", "error", "denied", "cancelled", "interrupted"}
 INTENT_TERMINAL = {"sent", "failed", "unknown"}
 TABLES = {"inbound", "record", "invocation", "intent", "attempt", "dedupe"}
+SCHEMA_SQL = (
+    *(
+        f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
+        for table in sorted(TABLES)
+    ),
+    "CREATE TABLE audit (id INTEGER PRIMARY KEY, data TEXT NOT NULL)",
+    "CREATE UNIQUE INDEX task_id ON \"record\"(json_extract(data,'$.task_id'))",
+    "CREATE UNIQUE INDEX source_event ON \"record\"(json_extract(data,'$.source_event_id'))",
+    "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))",
+)
+HEALTH_SQL = (
+    "CREATE INDEX IF NOT EXISTS health_tasks ON record("
+    "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))",
+    "CREATE INDEX IF NOT EXISTS health_sending ON intent(json_extract(data,'$.status'))",
+)
 
 
 class LedgerError(ValueError):
@@ -57,33 +72,13 @@ class Ledger:
                     raise LedgerError("ledger_unavailable", "WAL unavailable")
             if not readonly and version == 0:
                 with self.db:
-                    for table in sorted(TABLES):
-                        self.db.execute(
-                            f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
-                        )
-                    self.db.execute(
-                        "CREATE TABLE audit (id INTEGER PRIMARY KEY, data TEXT NOT NULL)"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX task_id ON \"record\"(json_extract(data,'$.task_id'))"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX source_event ON \"record\"(json_extract(data,'$.source_event_id'))"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))"
-                    )
+                    for statement in SCHEMA_SQL:
+                        self.db.execute(statement)
                     self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if not readonly:
                 with self.db:
-                    self.db.execute(
-                        "CREATE INDEX IF NOT EXISTS health_tasks ON record("
-                        "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))"
-                    )
-                    self.db.execute(
-                        "CREATE INDEX IF NOT EXISTS health_sending ON intent("
-                        "json_extract(data,'$.status'))"
-                    )
+                    for statement in HEALTH_SQL:
+                        self.db.execute(statement)
         except BaseException:
             self.db.close()
             raise

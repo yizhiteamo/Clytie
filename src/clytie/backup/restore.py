@@ -243,11 +243,64 @@ def _member(root, name):
     return path
 
 
+def _legacy_ledger_schema(db):
+    """Read an affected SQLite ledger only after exact core DDL allowlisting.
+
+    Some SQLite builds mark their built-in JSON functions as unsafe. The
+    immutable/query-only connection cannot parse our expression indexes with
+    trusted_schema=OFF on those builds. No schema SQL from the file is executed;
+    before any data or integrity query, compare every object with core DDL.
+    """
+    from clytie.kernel.ledger import HEALTH_SQL, SCHEMA_SQL
+
+    def authorize(action, first, second, database, source):
+        if action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ}:
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_FUNCTION and second in {"json_extract", "like"}:
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_PRAGMA and first in {
+            "trusted_schema",
+            "query_only",
+            "user_version",
+            "integrity_check",
+            "table_info",
+        }:
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+
+    db.set_authorizer(authorize)
+    db.execute("PRAGMA trusted_schema=ON")
+    expected_db = sqlite3.connect(":memory:")
+    try:
+        for statement in (*SCHEMA_SQL, *HEALTH_SQL):
+            expected_db.execute(statement)
+        expected = {
+            name: (kind, sql)
+            for name, kind, sql in expected_db.execute("SELECT name,type,sql FROM sqlite_master")
+        }
+    finally:
+        expected_db.close()
+    actual = {
+        name: (kind, sql)
+        for name, kind, sql in db.execute("SELECT name,type,sql FROM sqlite_master")
+    }
+    optional = {"health_tasks", "health_sending"}
+    if not (set(expected) - optional <= set(actual) <= set(expected)) or any(
+        item != expected[name] for name, item in actual.items()
+    ):
+        raise RestoreError("restore_database_invalid")
+
+
 def _database(path, required):
     db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
     try:
         db.execute("PRAGMA trusted_schema=OFF")
         db.execute("PRAGMA query_only=ON")
+        if required is LEDGER_TABLES and any(
+            row[0] == "json_extract" and not row[5] & (1 << 21)
+            for row in db.execute("PRAGMA function_list")
+        ):
+            _legacy_ledger_schema(db)
         objects = db.execute(
             "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
         ).fetchall()
