@@ -224,7 +224,7 @@
 | 属性 | 权限 |
 |---|---|
 | `memory` | `memory.read.public` / `memory.read.private` / `memory.write` |
-| `assets` | `assets.write`（读取始终允许） |
+| `assets` | `assets.write`（读取仅限当前调用方获授权的资产，不另要求写权限） |
 | `services` | 声明了依赖的服务时出现，只能查到已声明的服务 |
 | `peer` | `peer` |
 | `model` | `model.invoke` |
@@ -524,3 +524,7 @@ async release(ticket: BackupTicket) -> None
 - `BackupSink` 只允许 `async write(relative_path: str, chunks: AsyncIterator[bytes]) -> BackupEntry`。宿主计算字节数与哈希；返回相对路径、size、sha256。路径限定当前插件备份命名空间，拒绝重复/穿越/链接，不把任意宿主文件句柄交给插件。sink 拒绝写入声明为凭据的内容；内容完整性仍由插件契约和测试保证，不以扫描代替。
 - materialize 在门闩释放后运行，只读稳定视图；取消/超时后不再接受其迟到写入。release 在成功、失败、取消时均执行且应幂等，默认 2 秒；记录释放失败，不吞掉它导致的资源泄漏。迟到资源继续被跟踪，不能把失去跟踪的 provider 说成已结束。
 - 该接口提供备份快照，不授予通用恢复执行脚本权限。每个 sink 相对路径精确映射到恢复目标 companions/<cid>/plugin-data/<pid>/ 下的同一相对路径；成员必须是同一 data_version 可直接加载的完整持久布局。数据库须输出可直接打开的一致数据库文件，不接受需要执行 SQL 导入脚本、反序列化可执行对象或运行转换程序才能还原的逻辑导出。需要转换的 provider 本阶段视为 unsupported，结果 partial。宿主只做安全文件重建和格式校验，插件只在用户后来正常启动时按原生命周期加载。
+
+## A4.3 最小资产后端（Issue #69，用户已确认）
+
+assets.info/read/path 不增加写权限要求，但始终核验当前可信调用上下文的资产归属/共享授权；asset_id 是内容哈希，不是访问凭证。asset_writer.put 的 origin 不能设置归属或提升权限，新产物默认归当前伴侣，发布内容和登记成功后才返回 AssetRef。生产后端、捕获与完整恢复遵守 backup-spec §2.2a；不增加看图、转换、自动共享或单独记忆包资产导入。
