@@ -324,12 +324,12 @@
 | POST /operations/<id>/cancel；cancel <id> | 确认；协作取消，不覆盖已提交事实 |
 | POST /verify；verify <id> | 独立校验、结果版本和时间，不把模型联网启动当验证 |
 | POST /config/plan、/config/apply；config plan/apply | 版本绑定、确认、保留注释，复用 A4.2 配置写回与历史 |
-| POST /restore/plan、/restore/apply；restore plan/apply | 源、目标、空间与兼容性计划；apply 确认及管理口令 |
+| POST /restore/plan、/restore/apply；restore plan/apply | 源、目标、空间与兼容性计划；跨 home 受管源按 backup-spec §8.7 绑定并确认保护写入；apply 确认及管理口令 |
 | GET /plans/<kind>/<plan_id>；plan show <kind> <plan_id> | 恢复预览生命周期、到期时间、关联操作；正常鉴权、不续期 |
 | POST /plans/<kind>/<plan_id>/cancel；plan cancel <kind> <plan_id> | 取消未消费预览；鉴权及确认，无额外口令；已接受执行提示原操作编号 |
 | POST /restore/source-stopped；restore source-stopped <id> | 目标 maintenance API 登记启动前源停用确认，确认及管理口令；同机源活跃拒绝 |
 | POST /restore/acknowledge；restore acknowledge <id> | 正常启动后核验并登记切换完成；确认，不自动改环境变量或启动平台 |
-| POST /memory/plan；memory-plan <backup_id> | memory 备份源适配到原记忆计划；后续查询/预览/apply/undo 沿用原入口与保护 |
+| POST /memory/plan；memory-plan <backup_id> | memory 备份源适配到原记忆计划；跨 home 受管源按 backup-spec §8.7 绑定并确认保护写入；后续沿用原入口与保护 |
 | POST /cleanup/plan、/cleanup/apply；cleanup plan/apply | 分类明确的备份/旧实例清理；apply 确认及管理口令，重新核验保护 |
 | GET /key/fingerprint；show-key-fingerprint | 只显示指纹/保管确认状态 |
 | POST /key/export、/key/verify、/key/acknowledge；export-key、verify-key、acknowledge-key | 导出确认及管理口令；核验不回传密钥；保管声明不等于核验 |
@@ -352,3 +352,9 @@
 面向用户称“恢复预览”，内部 plan 保留；不是预约恢复、进程有效期或已恢复目录的有效期。仅完整 instance 恢复与 source_type=backup 的 memory 恢复预览在生成完成后有效 24 小时，不自动续期；重新生成要重新校验。普通记忆包导入/撤销、其他计划原语义不变。
 GET /backup/plans/<kind>/<plan_id> 查询状态，POST 同路径 /cancel 鉴权、CSRF及确认后取消未消费预览，不额外要求管理口令。kind 为 instance 或 memory，服务器校验持久来源。过期/取消拒绝新的 apply/内容读取，但已有执行/读取/核验引用不中断。consumed 取消返回 plan_in_use 和原操作编号，不能把取消预览转成取消执行；原执行取消入口与保护不变。
 接受执行、到期、取消与轮转须原子协调并持久交接引用；恢复受阻仍需要的源不能因计划期限被删除。状态、幂等、错误码与验收以 backup-spec §8.6、§13 第 16a 项为准。取消不删除源、不撤销恢复，也不改写生成预览的成功事实。
+
+### Issue #67：跨管理目录的源保护（用户已确认，选项 1）
+
+restore/plan 和 memory/plan 使用另一个 home 管理的备份时，用户须明确选择源仓库，提交 source_repository（root、repository_id、backup_id），经服务器核验并 confirm 后，才可写源仓库的保护元数据并读取源包。初次缺少确认/预期仓库身份返回 428 及必要绑定说明，不读取恢复内容。该确认仅授权本次操作及其派生引用，不授权业务数据修改、读取凭据或删除源包；正常鉴权、Host/Origin、CSRF、文件权限均须满足，不提权，不新增登记口令复核，原 apply 口令不变。
+源仓库持有唯一权威登记，预览及管理日志仍归发起 home；源在线/离线/重启均依同一持久引用与跨进程锁决定轮转。不能从备份包历史路径推导写权限。A4.3 限同机、可核验身份与锁的本地仓库；只读、不可达、身份不符或登记故障时不开始未受保护的恢复，不退回本地引用，不自动复制。独立副本仅用户显式选择，转出受管源须保护复制过程；详见 backup-spec §8.7。
+源与维护 status 显示本方可核验的持有者和待处理原因，失联不得伪装已释放；原 24 小时只限制未消费预览，执行及恢复依赖不自动过期。API 字段、CLI 对应源选择/确认参数和结构化错误映射须写入 ADR 并同步实现文档；验收按 backup-spec §13 第 16b 项，不另建绕过 API 的离线 CLI。

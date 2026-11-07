@@ -459,3 +459,5 @@ complete instance 包中账本、记忆和 recollect_progress 属于同一可核
 新增本体备份源适配器，不以第三方 memory.importer 身份加载。`POST /backup/memory/plan`（CLI `backup memory-plan <backup_id> --companion <cid> --mode new或merge或restore`）验证 memory 包、实例密钥和 companion_uid，将允许导入的记忆材料交给已有 Transfers 计划引擎。排除本机回想进度、进程/管理记录等运行状态；保留原生记忆的修订指纹、basis、来源、淡化与撤销，不降为第三方提议。
 结果仍是原 `/memory/import/plans/<plan_id>` 可查询的计划，执行仍走原 `/memory/import/apply`，模式/UID/冲突/可信程度/前置快照/停止要求/撤销导入及口令保护不变。apply 与内容预览重新校验源包和解密密钥；计划只存 source_type=backup、包指纹、密钥指纹及绑定信息，不保存明文或密钥。不是从 instance/partial 包任意抽取一部分覆盖当前库。
 源包保护按 backup-spec §8.6 的恢复预览与执行操作分别持有：预览默认有效 24 小时且不自动续期；过期或取消只释放该预览的引用，已接受 apply、正在核验或恢复受阻仍需要的引用保持。崩溃后按持久证据核验，不能永久遗失跟踪或提前删除。明文临时材料只在受控本次工作区，结果不返回原文，预览仍使用原明确内容入口。普通 memory import 的包口令/恢复码路径保持不变；源适配器字段及解密选择由服务端已保存的计划决定，不信任 apply 客户端换格式以绕过保护。
+
+备份源属于其他管理 home 时，按 backup-spec §8.7 显式绑定并确认写入源仓库保护元数据；源仓库轮转读取该唯一权威登记。不得只在目标记忆实例登记就开始读取；权限/身份/引用核验失败时停止此恢复路径。此规则只扩展备份源保护，不改变普通记忆包导入、撤销、UID、可信程度或现有 apply 的停止/口令要求。
