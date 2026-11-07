@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 
+from clytie.backup.coordination import run_sync, transaction
 from clytie.config import thaw
 from clytie.kernel.events import background
 from clytie.kernel.ledger import EXEC_TERMINAL
@@ -360,9 +361,9 @@ class Agent:
             if event.companion_id != self.cid:
                 raise ValueError("wrong companion")
             if event.dedupable:
-                key, new = self.ledger.claim_inbound(event)
+                key, new = await run_sync(self.ledger, self.ledger.claim_inbound, event)
                 if new:
-                    self.ledger.ignore(key, reason)
+                    await run_sync(self.ledger, self.ledger.ignore, key, reason)
             return None
         if hasattr(self, "recollector"):
             self.recollector.activity(event.conversation)
@@ -377,20 +378,20 @@ class Agent:
             return None
         if event.message and self.boundary.paused(event.message.sender):
             if event.dedupable:
-                key, new = self.ledger.claim_inbound(event)
+                key, new = await run_sync(self.ledger, self.ledger.claim_inbound, event)
                 if new:
-                    self.ledger.ignore(key, "boundary_paused")
+                    await run_sync(self.ledger, self.ledger.ignore, key, "boundary_paused")
             return None
         if not event.dedupable:
             await self.host.behavior(self.cid, "message_received", event)
             return None
-        key, new = self.ledger.claim_inbound(event)
+        key, new = await run_sync(self.ledger, self.ledger.claim_inbound, event)
         if not new:
             self.kernel.duplicates += 1
             return None
         if not event.message:
             await self.host.behavior(self.cid, "message_received", event)
-            self.ledger.ignore(key)
+            await run_sync(self.ledger, self.ledger.ignore, key)
             return None
         mentioned = any(p.type == "mention" and p.is_self for p in event.message.parts)
         cancel = fast_cancel(
@@ -406,17 +407,17 @@ class Agent:
             and self.cancellable(event.conversation, event.message.sender)
         ):
             await self.cancel(event, cancel)
-            self.ledger.ignore(key, "cancel_only")
+            await run_sync(self.ledger, self.ledger.ignore, key, "cancel_only")
             return None
         await self.host.behavior(self.cid, "message_received", event)
         before = await self.host.behavior(
             self.cid, "before_attention", (event, self.host.companion_state(self.cid))
         )
         if isinstance(before, Ignore):
-            self.ledger.ignore(key)
+            await run_sync(self.ledger, self.ledger.ignore, key)
             return None
         if isinstance(before, ReactOnly):
-            record = self.kernel.open_record(event_id=key)
+            record = await run_sync(self.ledger, self.kernel.open_record, event_id=key)
             intent = self.intent(
                 record, [], kind="react", emoji=before.emoji, target=event.message.ref
             )
@@ -467,11 +468,13 @@ class Agent:
         self.batches.pop(key)
         if isinstance(opinion, Skip):
             for e in batch["events"]:
-                self.ledger.ignore(e.event_id)
+                await run_sync(self.ledger, self.ledger.ignore, e.event_id)
             return None
-        record = self.kernel.open_record(event_id=event.event_id)
+        record = await run_sync(self.ledger, self.kernel.open_record, event_id=event.event_id)
         trace = record["trace_id"]
-        self.ledger.merge([e.event_id for e in batch["events"][:-1]], trace)
+        await run_sync(
+            self.ledger, self.ledger.merge, [e.event_id for e in batch["events"][:-1]], trace
+        )
         extra = ""
         cancel = fast_cancel(
             event.message,
@@ -542,12 +545,13 @@ class Agent:
                 result = await task
             except (Exception, asyncio.CancelledError):
                 return
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 self.ledger.audit(
                     "model.late_result", trace_id=trace, content=result.model_dump(mode="json")
                 )
 
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
+            record = self.ledger.get("record", trace)
             record["model_calls"] = record.get("model_calls", 0) + 1
             self.ledger.put("record", trace, record)
         try:
@@ -663,7 +667,7 @@ class Agent:
                     text = turn.text or ""
                     break
                 rounds += 1
-                with self.ledger.transaction():
+                async with transaction(self.ledger):
                     row = self.ledger.get("record", trace)
                     row["tool_rounds"] = rounds
                     self.ledger.put("record", trace, row)
@@ -689,7 +693,7 @@ class Agent:
                         )
                     )
             if proactive and not text:
-                with self.ledger.transaction():
+                async with transaction(self.ledger):
                     self.ledger.audit("proactive_declined", trace_id=trace)
             intents = await self.outgoing(
                 trace, conversation, actor, events, text, assets, token, proactive=proactive
@@ -709,7 +713,7 @@ class Agent:
                 else "agent_error"
             )
             self.log.warning("agent.failed", trace_id=trace, code=code)
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 self.ledger.audit("agent.failed", trace_id=trace, code=code)
             intents = []
             if not proactive and conversation.kind == "private" and not token.cancelled:
@@ -778,7 +782,7 @@ class Agent:
                 content = await self.boundary.report(
                     trace, actor, call.arguments["category"], token
                 )
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 self.ledger.audit(
                     "core.tool",
                     trace_id=trace,
@@ -881,11 +885,11 @@ class Agent:
                     hits = self.outbound.check(text_parts(draft.parts), conversation.scene)
             except (TimeoutError, RuntimeError):
                 pass
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 row = self.ledger.get("record", trace)
                 row["rewritten"] = True
                 self.ledger.put("record", trace, row)
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
             row = self.ledger.get("record", trace)
             row["outbound_categories"] = list(hits)
             self.ledger.put("record", trace, row)
@@ -955,7 +959,7 @@ class Agent:
             or self.model_health == "auth_invalid"
         ):
             trace = uuid4().hex
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 self.ledger.audit("proactive.dropped", trace_id=trace)
             return trace
         validate_proactive(topic=topic, material=material, parts=parts)
@@ -974,9 +978,9 @@ class Agent:
             kind=target["kind"],
             scene=target["scene"],
         )
-        record = self.kernel.open_record(conversation=conversation)
+        record = await run_sync(self.ledger, self.kernel.open_record, conversation=conversation)
         trace = record["trace_id"]
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
             self.ledger.audit("proactive.submitted", trace_id=trace, reason=reason)
         self.log.info("proactive.submitted", trace_id=trace, reason=reason)
         extra = "这是你主动开口，不是在回复谁。话题和材料仅为内部说明：" + json.dumps(

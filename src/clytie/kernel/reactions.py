@@ -3,6 +3,7 @@
 import asyncio
 from uuid import uuid4
 
+from clytie.backup.coordination import run_sync
 from clytie.sdk.types import DeliveryIntent
 
 from .events import background
@@ -80,7 +81,7 @@ class Reactions:
             task_id=r["task_id"],
             trace_id=trace,
         )
-        self.ledger.register_intents(trace, [intent], reaction=state)
+        await run_sync(self.ledger, self.ledger.register_intents, trace, [intent], reaction=state)
         await self.delivery.send_one(intent.intent_id)
 
     async def restart(self, interrupted):

@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -51,7 +52,11 @@ def source_fingerprint(source):
     root = source if source.is_dir() else source.parent
     contained(root, source)
     if source.is_file():
-        return hashlib.sha256(source.read_bytes()).hexdigest()
+        hashed = hashlib.sha256()
+        with source.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                hashed.update(block)
+        return hashed.hexdigest()
     rows = []
     for path in sorted(source.rglob("*")):
         contained(root, path)
@@ -72,12 +77,23 @@ def runtime_lock(home, companion_id, operation="memory_runtime"):
 
 
 class Transfers:
-    def __init__(self, store, home, companion_id, *, importers=None, log=None, runtime_owned=False):
+    def __init__(
+        self,
+        store,
+        home,
+        companion_id,
+        *,
+        importers=None,
+        log=None,
+        runtime_owned=False,
+        source_adapter=None,
+    ):
         self.store, self.home = store, Path(home).resolve()
         self.cid = identifier(companion_id)
         self.importers = importers or {}
         self.log = log or HostLog()
         self.runtime_owned = runtime_owned
+        self.source_adapter = source_adapter
 
     def plan_path(self, plan_id):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
@@ -187,10 +203,19 @@ class Transfers:
                 raise ValueError("导入器没有产生记录")
             manifest = {"companion_uid": self.store.uid, "record_count": len(records)}
         else:
-            raw = decrypt(source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code)
-            manifest, db = unpack(raw, self.home, self.cid)
+            resources = ExitStack()
             fades = {}
             try:
+                if self.source_adapter is not None:
+                    if passphrase is not None or recovery_code is not None:
+                        raise ValueError("backup_source_credentials_invalid")
+                    manifest, db = resources.enter_context(self.source_adapter.open(source))
+                else:
+                    raw = decrypt(
+                        source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code
+                    )
+                    manifest, db = unpack(raw, self.home, self.cid)
+                    resources.callback(db.close)
                 if manifest["version"] == 3:
                     registry = {
                         r["key"]: {k: r[k] for k in origins.FIELDS}
@@ -216,7 +241,7 @@ class Transfers:
                     dict(row) for row in db.execute("SELECT * FROM foreign_revisions")
                 ]
             finally:
-                db.close()
+                resources.close()
         if source_fingerprint(source) != before:
             raise ValueError("源数据发生变化，请重新生成计划")
         return dict(
@@ -340,7 +365,17 @@ class Transfers:
                 chain.append(value)
         return chain
 
-    async def plan(
+    async def plan(self, source, **options):
+        if self.source_adapter is not None:
+            self.source_adapter.begin(source)
+        try:
+            return await self._plan(source, **options)
+        except BaseException:
+            if self.source_adapter is not None:
+                self.source_adapter.failed_generation()
+            raise
+
+    async def _plan(
         self,
         source,
         *,
@@ -406,7 +441,13 @@ class Transfers:
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )
-        publish_file(self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]})
+        if self.source_adapter is not None:
+            plan.update(source_type="backup", backup_binding=self.source_adapter.binding)
+            self.source_adapter.publish(plan, self.plan_path(plan["id"]))
+        else:
+            publish_file(
+                self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]}
+            )
         preview = dict(plan)
         if show_content:
             preview["content"] = {
@@ -489,6 +530,10 @@ class Transfers:
 
     async def apply(self, plan_id, *, passphrase=None, recovery_code=None):
         plan = json.loads(self.plan_path(plan_id).read_bytes())
+        if plan.get("source_type") == "backup" and (
+            self.source_adapter is None or self.source_adapter.binding != plan.get("backup_binding")
+        ):
+            raise ValueError("backup_source_adapter_required")
         if plan["companion_id"] != self.cid or plan["id"] != plan_id:
             raise ValueError("计划目标不匹配")
         from contextlib import nullcontext
@@ -692,6 +737,7 @@ class Transfers:
     def _record_import(self, import_id, changes, **metadata):
         value = dict(at=self.store.clock.now().isoformat(), changes=changes, **metadata)
         self.store.db.execute("INSERT INTO imports VALUES(?,?)", (import_id, canonical(value)))
+        self.store.mark_backup_dirty()
         self.store.audit("memory_import", import_id=import_id, changed=len(changes))
         transaction_committed(self.store, {"import_id": import_id})
 

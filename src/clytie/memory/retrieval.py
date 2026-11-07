@@ -2,6 +2,7 @@
 
 import math
 
+from clytie.backup.coordination import run_sync, transaction
 from clytie.sdk import CancelToken
 
 from .store import BASIS, canonical, fingerprint, query_tokens
@@ -135,10 +136,10 @@ class Retrieval:
         cancel = cancel or CancelToken()
         records = [r for r in self.store.all_records() if not r.retracted]
         self.progress = {"complete": 0, "total": len(records)}
-        with self.store.transaction():
+        async with transaction(self.store):
             self.store.set_meta("embedding_progress", self.progress)
         if self.embedder is None:
-            self.warn()
+            await run_sync(self.store, self.warn)
             return
         from clytie.plugin_host.support import timed
 
@@ -157,25 +158,25 @@ class Retrieval:
                     if len(result) != 1:
                         raise ValueError("invalid embedding result")
                     values = vector(result[0])
-                    current = self.store.get_raw(record.record_id)
-                    if (
-                        current
-                        and current.revision == record.revision
-                        and identifier == self.embedder_id
-                    ):
-                        with self.store.transaction():
+                    async with transaction(self.store):
+                        current = self.store.get_raw(record.record_id)
+                        if (
+                            current
+                            and current.revision == record.revision
+                            and identifier == self.embedder_id
+                        ):
                             self.store.db.execute(
                                 "INSERT OR REPLACE INTO vectors VALUES(?,?,?,?)",
                                 (record.record_id, record.revision, identifier, canonical(values)),
                             )
                 except Exception:
-                    self.warn()
+                    await run_sync(self.store, self.warn)
                     continue
             self.progress["complete"] += 1
-            with self.store.transaction():
+            async with transaction(self.store):
                 self.store.set_meta("embedding_progress", self.progress)
         if self.progress["complete"] == self.progress["total"]:
-            with self.store.transaction():
+            async with transaction(self.store):
                 self.store.set_meta("embedder_unavailable", False)
 
     async def search(
@@ -205,7 +206,7 @@ class Retrieval:
         routes = [sorted(lexical_scores.items(), key=lambda pair: (-pair[1], pair[0]))]
         semantic_ids = set()
         if self.embedder is None:
-            self.warn()
+            await run_sync(self.store, self.warn)
         else:
             try:
                 response = await timed(self.embedder.embed([query], cancel), self.clock, 30)
@@ -225,10 +226,10 @@ class Retrieval:
                 routes.append(sorted(scores, key=lambda p: (-p[1], p[0])))
                 self.warnings = []
                 if self.store.meta("embedder_unavailable", False):
-                    with self.store.transaction():
+                    async with transaction(self.store):
                         self.store.set_meta("embedder_unavailable", False)
             except Exception:
-                self.warn()
+                await run_sync(self.store, self.warn)
         fused = {}
         for route in routes:
             rank, previous = 0, None

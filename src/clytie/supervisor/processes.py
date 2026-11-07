@@ -197,13 +197,13 @@ class ProcessLauncher:
     async def launch(self, cid):
         directory = self.home / "companions" / cid / "logs"
         directory.mkdir(parents=True, exist_ok=True)
-        log = (directory / "process.log").open("ab")
+        log = None
         executable, env = python_process()
         process = subprocess.Popen(
             [executable, "-m", "clytie", "companion", "run", cid, "--home", str(self.home)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=log,
+            stderr=None,
             env=env,
             **creation(),
         )
@@ -216,7 +216,8 @@ class ProcessLauncher:
         except BaseException:
             process.kill()
             process.wait()
-            log.close()
+            if log:
+                log.close()
             raise
 
     def close(self):

@@ -295,6 +295,16 @@ class Journal:
         if published:
             try:
                 self.finish_file_audit()
+                if self.value.get("backup_preview") is not None:
+                    from clytie.backup.memory_source import publish_preview
+
+                    plan = json.loads(path.read_bytes())
+                    if (
+                        plan["id"] != self.value["backup_preview"]["plan_id"]
+                        or plan["companion_id"] != self.value["companion_id"]
+                    ):
+                        raise ValueError("backup_preview_mismatch")
+                    publish_preview(self.path.parents[4], self.clock, plan)
             except (OSError, ValueError, sqlite3.Error, KeyError):
                 return self.blocked("file_audit_unverified")
             self.committed(artifact.get("result"))
@@ -398,6 +408,25 @@ class Journal:
 
     def recover(self):
         """Called only while holding the companion's OS management/runtime locks."""
+        result = self._recover()
+        # Execution references survive response loss and the admission/journal gap.
+        # Only verified terminal operations may release their own source protection.
+        if self.value["state"] in TERMINAL and self.value["state"] != "recovery_blocked":
+            from clytie.backup.previews import PreviewCatalog
+
+            catalog = PreviewCatalog(self.path.parents[4], self.clock)
+            try:
+                plans = catalog.for_operation(self.value["id"])
+                for plan in plans:
+                    if plan["kind"] == "memory":
+                        catalog.release(self.value["id"])
+            except (OSError, ValueError, KeyError):
+                # Unknown source authority is not evidence that a dependency ended.
+                self.value["backup_release_pending"] = True
+                self.save()
+        return result
+
+    def _recover(self):
         if not self.cleanup_temporaries():
             return self.blocked("temporary_unverified")
         if self.value["state"] in TERMINAL:

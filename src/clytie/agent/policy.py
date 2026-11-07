@@ -5,6 +5,7 @@ import json
 import unicodedata
 from datetime import datetime, timedelta
 
+from clytie.backup.coordination import run_sync
 from clytie.config import compile_input_pattern
 from clytie.kernel.events import background
 from clytie.plugin_host.snapshots import atomic_write, canonical
@@ -138,7 +139,14 @@ class Boundary:
             or not enabled.get(category, True)
         ):
             raise ValueError("invalid boundary category or actor")
-        self.audit("boundary.report", trace_id=trace, actor_id=actor.actor_id, category=category)
+        await run_sync(
+            self.ledger,
+            self.audit,
+            "boundary.report",
+            trace_id=trace,
+            actor_id=actor.actor_id,
+            category=category,
+        )
         if trace in self.state["records"]:
             return "已记录"
         self.state["records"].append(trace)
@@ -157,8 +165,13 @@ class Boundary:
             )
             if notify:
                 row["notified_at"] = now.isoformat()
-            self.audit(
-                "boundary.paused", trace_id=trace, actor_id=actor.actor_id, until=row["until"]
+            await run_sync(
+                self.ledger,
+                self.audit,
+                "boundary.paused",
+                trace_id=trace,
+                actor_id=actor.actor_id,
+                until=row["until"],
             )
         self.save()
         if notify:

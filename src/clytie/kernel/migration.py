@@ -12,7 +12,8 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from clytie.plugin_host.locking import file_lock, process_identity
+from clytie.backup.coordination import run_sync
+from clytie.plugin_host.locking import OperationBusy, file_lock, process_identity
 from clytie.plugin_host.snapshots import (
     UpgradeSnapshots,
     atomic_write,
@@ -243,7 +244,7 @@ class LedgerRuntime:
                 continue
             try:
                 self.snapshots.cleanup(self.retention_days)
-                self.ledger.expire_content(self.retention_days)
+                await run_sync(self.ledger, self.ledger.expire_content, self.retention_days)
             except Exception as exc:
                 self.log.warning("ledger.retention_failed", error=type(exc).__name__)
 
@@ -269,12 +270,32 @@ class LedgerRuntime:
         self.save(record)
 
     async def open(self, cancel=None):
+        from clytie.backup.old_instances import startup_gate
+
         cancel = cancel or CancelToken()
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self.guard = file_lock(
-            self.directory / ".lock", {**process_identity(), "operation": "ledger"}, self.log
-        )
-        self.guard.__enter__()
+        deadline = self.clock.monotonic() + 2
+        while True:
+            cancel.raise_if_cancelled()
+            startup = startup_gate(self.home)
+            try:
+                startup.__enter__()
+            except OperationBusy:
+                if self.clock.monotonic() >= deadline:
+                    raise
+                await self.clock.sleep(0.01)
+                continue
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                guard = file_lock(
+                    self.directory / ".lock",
+                    {**process_identity(), "operation": "ledger"},
+                    self.log,
+                )
+                guard.__enter__()
+                self.guard = guard
+            finally:
+                startup.__exit__(None, None, None)
+            break
         try:
             if self.journal.exists():
                 record = json.loads(self.journal.read_bytes())
@@ -361,9 +382,16 @@ class LedgerRuntime:
                 self.journal.unlink()
                 migrated = True
             if self.ledger is None:
-                self.ledger = Ledger(self.path, self.cid, self.clock)
+                from clytie.backup.coordination import companion_coordinator
+
+                self.ledger = Ledger(
+                    self.path,
+                    self.cid,
+                    self.clock,
+                    coordination=companion_coordinator(self.home, self.cid, self.clock),
+                )
             self.snapshots.cleanup(self.retention_days, migrated=migrated)
-            self.ledger.expire_content(self.retention_days)
+            await run_sync(self.ledger, self.ledger.expire_content, self.retention_days)
             if self.retention_days is not None:
                 self.maintenance = background(self._maintain())
             return self.ledger

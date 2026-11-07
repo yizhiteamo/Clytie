@@ -92,6 +92,8 @@ def close_exited_launcher(launcher):
     for child in launcher.children:
         assert child.process.poll() is not None
         for stream in (child.process.stdin, child.process.stdout, child.log):
+            if stream is None:  # Child owns/drains its rotating log; no parent log handle.
+                continue
             try:
                 stream.close()
             except OSError as exc:

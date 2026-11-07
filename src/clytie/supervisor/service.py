@@ -68,10 +68,13 @@ class Supervisor:
         return self.config.get(group, {}).get(key, default)
 
     async def start(self, prepare=None):
+        from clytie.backup.old_instances import startup_gate
+
         self.lock = file_lock(
             self.home / "run/supervisor.lock", {**process_identity(), "operation": "supervisor"}
         )
-        self.update_lock = self.lock.__enter__()
+        with startup_gate(self.home):
+            self.update_lock = self.lock.__enter__()
         try:
             if prepare:
                 await prepare()
@@ -312,6 +315,10 @@ class Supervisor:
     async def tick(self):
         while True:
             try:
+                if (self.home / "supervisor/old-instances.json").exists() and (
+                    self.clock.monotonic() >= getattr(self, "_old_instances_next", 0)
+                ):
+                    await self.refresh_old_instances()
                 await self.notifications.update(self.problems, pending=self.pending_health)
                 await self.flush_health()
             except OSError as exc:
@@ -319,11 +326,40 @@ class Supervisor:
                 self.log.warning("supervisor.health_write_failed", error=type(exc).__name__)
             await self.clock.sleep(1)
 
+    async def refresh_old_instances(self):
+        from clytie.backup.old_instances import OldInstances
+        from clytie.backup.restore import read_state
+
+        options = getattr(self, "old_instance_options", {})
+        summary = await asyncio.to_thread(
+            OldInstances(self.home, self.clock).status,
+            warn_count=options.get("warn_count", 3),
+            warn_bytes=options.get("warn_gib", 20) * 1024**3,
+        )
+        self.old_instances_summary = summary
+        self._old_instances_next = self.clock.monotonic() + 60
+        key = "old_instances:instance"
+        restored = read_state(self.home)
+        if restored and restored.get("switched"):
+            key += ":" + restored["operation_id"]
+        for previous in list(self.problems):
+            if previous.startswith("old_instances:instance") and previous != key:
+                self.problems.pop(previous)
+        if summary["count"]:
+            self.problems[key] = (
+                f"old_instances count={summary['count']} known_bytes={summary['known_bytes']} "
+                f"unknown={summary['unknown']} warning={summary['warning']}"
+            )
+        else:
+            self.problems.pop(key, None)
+        return summary
+
     async def flush_health(self):
         external = []
         for component in self.external:
             external.append(await component.status())
         content = dict(
+            old_instances=getattr(self, "old_instances_summary", None),
             companions=self.rows,
             external=external,
             undelivered=self.notifications.undelivered,
@@ -539,6 +575,9 @@ class Supervisor:
 
     async def _stop(self, mode, source):
         self.stopping = True
+        backup_controller = getattr(self, "backup_controller", None)
+        if backup_controller:
+            await backup_controller.pause()
         management_stop = None
         if self.management_workers:
             self.management_workers.stopping = True
@@ -608,6 +647,8 @@ class Supervisor:
         await self.notifications.update(self.problems, pending=self.pending_health)
         if management_stop:
             await management_stop
+        if backup_controller:
+            await backup_controller.shutdown()
         for task in (*self.monitors.values(), self.ticker):
             if task:
                 task.cancel()

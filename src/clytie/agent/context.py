@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
+from clytie.backup.coordination import transaction
 from clytie.kernel.projection import visible
 from clytie.sdk.types import Actor, ChatMessage, ContextRequest, MessagePart, TextPart
 
@@ -132,7 +133,7 @@ class Context:
                 for r in sorted(rows, key=lambda x: x["split"]["index"])
             ]
             result.append(message("system", "上次拆分消息：" + "；".join(parts)))
-            with ledger.transaction():
+            async with transaction(ledger):
                 ledger.audit("partial_group_context", group_id=group)
         memory_position = len(result)
         budget = agent.config.get("context", {}).get("material_budget_chars", 6000)

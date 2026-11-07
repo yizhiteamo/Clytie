@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime
 
+from clytie.backup.coordination import run_sync, transaction
 from clytie.sdk import CancelToken
 from clytie.sdk.types import ChatMessage, Conversation, TextPart
 
@@ -59,7 +60,7 @@ class RecollectionModel:
             result = await agent.host.invoke(
                 agent.cid, reg.plugin_id, "model", reg.key, request, cancel, method="generate"
             )
-        with agent.ledger.transaction():
+        async with transaction(agent.ledger):
             agent.ledger.audit(
                 "memory.recollect_model",
                 purpose=purpose,
@@ -165,12 +166,12 @@ class Recollector:
 
     async def set_enabled(self, enabled):
         self.config["enabled"] = enabled
-        self.sync_enabled()
+        await run_sync(self.store, self.sync_enabled)
         if enabled:
             await self.prepare()
 
     async def start(self):
-        if self.sync_enabled():
+        if await run_sync(self.store, self.sync_enabled):
             await self.prepare()
         task = self.agent.track(self.run())
         jobs = self.agent.host.memory_jobs.setdefault(self.agent.cid, set())
@@ -204,7 +205,7 @@ class Recollector:
         try:
             while True:
                 await self.clock.sleep(60)
-                if not self.sync_enabled():
+                if not await run_sync(self.store, self.sync_enabled):
                     continue
                 await self.prepare()
                 for cid in self.agent.instance.get("conversations", {}):
@@ -233,7 +234,7 @@ class Recollector:
             token.cancel("new_activity")
 
     async def process(self, conversation):
-        if not self.sync_enabled():
+        if not await run_sync(self.store, self.sync_enabled):
             return
         cid = conversation.conversation_id
         if cid in self.current:
@@ -254,7 +255,7 @@ class Recollector:
         ):
             return
         cid = conversation.conversation_id
-        progress = self.progress(cid)
+        progress = await run_sync(self.store, self.progress, cid)
         rows, end = fresh_rows(self.agent.ledger, progress, cid)
         if not rows:
             return
@@ -298,7 +299,7 @@ class Recollector:
                 attempt = dict(
                     progress, day=day, count=count + 1, attempt_at=self.clock.now().isoformat()
                 )
-                with self.store.transaction():
+                async with transaction(self.store):
                     self.store.db.execute(
                         "INSERT OR REPLACE INTO recollect_progress VALUES(?,?)",
                         (cid, canonical(attempt)),
@@ -332,7 +333,7 @@ class Recollector:
                     rejected = await self.guard.rejected(items, retracted, token)
                 except Exception:
                     attempt["failures"] = attempt.get("failures", 0) + 1
-                    with self.store.transaction():
+                    async with transaction(self.store):
                         self.store.db.execute(
                             "INSERT OR REPLACE INTO recollect_progress VALUES(?,?)",
                             (cid, canonical(attempt)),
@@ -344,9 +345,11 @@ class Recollector:
                     attempt_at=attempt["attempt_at"],
                     failures=attempt.get("failures", 0),
                 )
-            self.sync_enabled()
+            await run_sync(self.store, self.sync_enabled)
             token.raise_if_cancelled()
-            return RecollectionCommit(self.store).commit(
+            return await run_sync(
+                self.store,
+                RecollectionCommit(self.store).commit,
                 items,
                 window,
                 reader,

@@ -2,6 +2,7 @@
 
 import json
 
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.support import timed
 
 from .retrieval import cosine, vector
@@ -74,7 +75,7 @@ class RetractedGuard:
             }
         except Exception:
             cancel.raise_if_cancelled()
-            self.degraded()
+            await run_sync(self.store, self.degraded)
             return rejected
         cancel.raise_if_cancelled()
         return rejected | semantic

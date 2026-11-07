@@ -25,7 +25,44 @@ def add_parser(commands):
     plugin.add_argument("plugin_args", nargs="*")
     admin = commands.add_parser("admin")
     admin.add_argument("action", choices=["set-password", "logout-all"])
-    for p in (companion, boundary, plugin, admin):
+    backup = commands.add_parser("backup")
+    backup.add_argument(
+        "action",
+        choices=[
+            "status",
+            "show-key-fingerprint",
+            "export-key",
+            "verify-key",
+            "acknowledge-key",
+            "restore",
+            "plan",
+            "list",
+            "create",
+            "verify",
+            "operation",
+            "cancel",
+            "memory-plan",
+            "config",
+            "cleanup",
+        ],
+    )
+    backup.add_argument("value", nargs="?")
+    backup.add_argument("restore_id", nargs="?")
+    backup.add_argument("plan_id", nargs="?")
+    backup.add_argument("--scope", choices=["instance", "memory"], default="instance")
+    backup.add_argument("--companion")
+    backup.add_argument("--source")
+    backup.add_argument("--source-repository")
+    backup.add_argument("--repository-id")
+    backup.add_argument("--backup-id")
+    backup.add_argument("--backup-ids", nargs="+")
+    backup.add_argument("--key-path")
+    backup.add_argument("--target")
+    backup.add_argument("--mode", choices=["new", "merge", "restore"], default="new")
+    backup.add_argument("--confirm-identity", action="store_true")
+    backup.add_argument("--patch")
+    backup.add_argument("--preserved")
+    for p in (companion, boundary, plugin, admin, backup):
         p.add_argument("--home")
         p.add_argument("--yes", action="store_true")
         p.add_argument("--json", action="store_true")
@@ -39,7 +76,18 @@ class CLI:
 
     async def request(self, method, path, data=None, query=None):
         data = dict(data or {})
-        if method == "POST" and "/memory/" in path:
+        if method == "POST" and (
+            "/memory/" in path
+            or path
+            in {
+                "/backup/create",
+                "/backup/verify",
+                "/backup/restore/plan",
+                "/backup/restore/apply",
+                "/backup/cleanup/plan",
+                "/backup/cleanup/apply",
+            }
+        ):
             from uuid import uuid4
 
             data.setdefault("operation_id", uuid4().hex)
@@ -54,6 +102,13 @@ class CLI:
         )
         if response.status == 428:
             print(response.json.get("result", {}).get("description", ""))
+            source = response.json.get("result", {}).get("source_repository")
+            if source is not None:
+                print("将向所选源仓库登记本次恢复保护，不修改源业务数据：")
+                print(json.dumps(source, ensure_ascii=False))
+                data["source_repository"] = {
+                    key: source[key] for key in ("root", "repository_id", "backup_id")
+                }
             if not self.yes and self.input("继续？[y/N] ").strip().lower() != "y":
                 return response
             data["confirm"] = True
@@ -74,6 +129,124 @@ async def execute(args, client=None):
     )
     await cli.request("GET", "/status")
     command = args.command
+    if command == "backup":
+        source_binding = None
+        if getattr(args, "source_repository", None):
+            source_binding = {
+                "root": args.source_repository,
+                "backup_id": args.backup_id or args.value,
+            }
+            if args.repository_id:
+                source_binding["repository_id"] = args.repository_id
+        if args.action == "list":
+            return await cli.request("GET", "/backup/list")
+        if args.action == "create":
+            data = {"scope": args.scope}
+            if args.companion:
+                data["companion_id"] = args.companion
+            return await cli.request("POST", "/backup/create", data)
+        if args.action in {"operation", "cancel", "verify"}:
+            if not args.value:
+                raise ValueError("需要明确的操作或备份编号")
+            if args.action == "verify":
+                return await cli.request("POST", "/backup/verify", {"backup_id": args.value})
+            return await cli.request(
+                "GET" if args.action == "operation" else "POST",
+                "/backup/operations/" + args.value + ("/cancel" if args.action == "cancel" else ""),
+            )
+        if args.action == "config":
+            if args.value == "plan" and args.patch:
+                return await cli.request(
+                    "POST", "/backup/config/plan", {"patch": json.loads(args.patch)}
+                )
+            if args.value == "apply" and args.restore_id:
+                return await cli.request(
+                    "POST", "/backup/config/apply", {"plan_id": args.restore_id}
+                )
+            raise ValueError("config 需要 plan --patch JSON 或 apply 计划编号")
+        if args.action == "cleanup":
+            if args.value == "plan" and args.backup_ids:
+                if args.restore_id or args.preserved:
+                    raise ValueError("常规备份选择不能同时指定旧实例或文件路径")
+                return await cli.request(
+                    "POST",
+                    "/backup/cleanup/plan",
+                    {
+                        "category": "regular",
+                        "backup_ids": args.backup_ids,
+                    },
+                )
+            if args.value == "plan" and args.restore_id:
+                return await cli.request(
+                    "POST",
+                    "/backup/cleanup/plan",
+                    {
+                        "category": "old_instance",
+                        "old_id": args.restore_id,
+                        "preserved": json.loads(args.preserved) if args.preserved else {},
+                    },
+                )
+            if args.value == "show" and args.restore_id:
+                return await cli.request("GET", "/backup/cleanup/plans/" + args.restore_id)
+            if args.value == "apply" and args.restore_id:
+                return await cli.request(
+                    "POST", "/backup/cleanup/apply", {"plan_id": args.restore_id}
+                )
+            raise ValueError(
+                "cleanup 需要 plan --backup-ids 明确编号、plan 旧实例编号、show 或 apply 计划编号"
+            )
+        if args.action == "memory-plan":
+            data = dict(
+                backup_id=args.value,
+                companion_id=args.companion,
+                mode=args.mode,
+                confirm_identity=args.confirm_identity,
+            )
+            if source_binding:
+                data.update(source_repository=source_binding, key_path=args.key_path)
+            return await cli.request("POST", "/backup/memory/plan", data)
+        if args.action == "plan":
+            if (
+                args.value not in {"show", "cancel"}
+                or args.restore_id not in {"instance", "memory"}
+                or not args.plan_id
+            ):
+                raise ValueError("恢复预览需要 show 或 cancel、instance 或 memory 及预览编号")
+            path = f"/backup/plans/{args.restore_id}/{args.plan_id}"
+            return await cli.request(
+                "GET" if args.value == "show" else "POST",
+                path + ("/cancel" if args.value == "cancel" else ""),
+            )
+        if args.action == "status":
+            return await cli.request("GET", "/backup/status")
+        if args.action == "restore":
+            if args.value == "plan":
+                data = {"source": args.source, "key_path": args.key_path, "target": args.target}
+                if source_binding:
+                    data["source_repository"] = source_binding
+                return await cli.request("POST", "/backup/restore/plan", data)
+            if args.value == "apply" and args.restore_id:
+                return await cli.request(
+                    "POST", "/backup/restore/apply", {"plan_id": args.restore_id}
+                )
+            if args.value not in {"source-stopped", "acknowledge"} or not args.restore_id:
+                raise ValueError("restore 需要 source-stopped 或 acknowledge 及恢复编号")
+            return await cli.request(
+                "POST", "/backup/restore/" + args.value, {"restore_id": args.restore_id}
+            )
+        operation = {
+            "show-key-fingerprint": "fingerprint",
+            "export-key": "export",
+            "verify-key": "verify",
+            "acknowledge-key": "acknowledge",
+        }[args.action]
+        if operation in {"export", "verify"} and not args.value:
+            raise ValueError("需要明确的本机文件路径")
+        return await cli.request(
+            "GET" if operation == "fingerprint" else "POST",
+            "/backup/key/" + operation,
+            {"path": args.value},
+        )
     if command == "supervisor":
         path = (
             "/status"

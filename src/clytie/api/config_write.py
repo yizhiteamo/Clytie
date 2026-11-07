@@ -108,6 +108,8 @@ class ConfigWriter:
             raise
 
     def save(self, cid, patch):
+        from clytie.backup.configuration import config_commit_lock
+
         identifier(cid)
         path = contained(self.home, self.home / "companions" / cid / "companion.yaml")
         before = path.read_bytes()
@@ -117,13 +119,15 @@ class ConfigWriter:
         suffix = self.clock.now().strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex
         backup = history / ("companion.yaml." + suffix)
         atomic_write(backup, before)
-        atomic_write(path, after)
+        with config_commit_lock(self.home):
+            atomic_write(path, after)
         try:
             valid = self.validate()
         except Exception:
             valid = False
         if not valid:
-            atomic_write(path, before)
+            with config_commit_lock(self.home):
+                atomic_write(path, before)
             raise APIError("config_invalid_after_write")
         files = sorted(
             p

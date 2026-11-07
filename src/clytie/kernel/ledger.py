@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from uuid import uuid4
 
@@ -31,9 +31,10 @@ def dump(value):
 class Ledger:
     """运行期间由上层持有 ledger/.lock；只读实例不修正或创建任何文件。"""
 
-    def __init__(self, path, companion_id, clock, *, readonly=False):
+    def __init__(self, path, companion_id, clock, *, readonly=False, coordination=None):
         self.path, self.companion_id, self.clock = path, companion_id, clock
         self.readonly = readonly
+        self.coordination = coordination
         if readonly and (path.parent / ".migration.json").exists():
             raise LedgerError("ledger_unavailable", "迁移中或待迁移")
         if readonly and not path.is_file():
@@ -51,6 +52,9 @@ class Ledger:
                 raise LedgerError("ledger_unavailable", "迁移中或待迁移")
             if not readonly and 0 < version < SCHEMA_VERSION:
                 raise LedgerError("ledger_unavailable", "migration requires LedgerRuntime")
+            if not readonly:
+                if self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
+                    raise LedgerError("ledger_unavailable", "WAL unavailable")
             if not readonly and version == 0:
                 with self.db:
                     for table in sorted(TABLES):
@@ -94,7 +98,7 @@ class Ledger:
     def transaction(self):
         if self.readonly:
             raise LedgerError("read_only", "ledger is read-only")
-        with self.db:
+        with self.coordination.commit() if self.coordination else nullcontext(), self.db:
             self.db.execute("BEGIN IMMEDIATE")
             yield
 

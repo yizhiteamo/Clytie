@@ -22,7 +22,17 @@ class FakeClient:
         return ApiResponse(status=200, json={"ok": True, "result": result})
 
 
-async def test_memory_response_loss_retains_operation_id_and_never_replays(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/companions/companion_a/memory/export",
+        "/api/v1/backup/create",
+        "/api/v1/backup/restore/apply",
+    ],
+)
+async def test_memory_response_loss_retains_operation_id_and_never_replays(
+    tmp_path, monkeypatch, path
+):
     from aiohttp import ServerDisconnectedError
 
     from clytie.api import client as module
@@ -47,7 +57,7 @@ async def test_memory_response_loss_retains_operation_id_and_never_replays(tmp_p
     monkeypatch.setattr(module, "ClientSession", Session)
     response = await module.Client(tmp_path).request(
         "POST",
-        "/api/v1/companions/companion_a/memory/export",
+        path,
         json={"operation_id": "a" * 32, "passphrase": "harmless"},
     )
     assert response.json["error"]["code"] == "management_result_unconfirmed"

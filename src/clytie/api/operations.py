@@ -33,6 +33,8 @@ async def memory_operation(home, clock, cid, op, args, hosted=None):
         return {"recovery_code": api.new_recovery_code(cid, confirmed=True)}
     if op == "import/plan":
         return await api.plan(cid, **args)
+    if op == "backup/plan":
+        return await api.backup_plan(cid, **args)
     if op == "import/undo":
         return api.undo(cid, **args)
     if op == "import/apply":
@@ -46,6 +48,8 @@ async def memory_operation(home, clock, cid, op, args, hosted=None):
             raise APIError("plan_stale", 409)
         if plan["kind"] == "undo":
             return api.undo(cid, plan["undo"], choices=plan.get("choices"), show_content=True)
+        if plan.get("source_type") == "backup":
+            return await api.backup_content(plan)
         return await api.plan(
             cid,
             plan["source"],
@@ -62,6 +66,10 @@ async def memory_operation(home, clock, cid, op, args, hosted=None):
 
 async def companion_operation(runtime, op, args):
     home, clock, cid, host = runtime.home, runtime.clock, runtime.cid, runtime.host
+    if op == "backup_capture":
+        from clytie.backup.controller import capture_request
+
+        return await capture_request(runtime, args)
     if op.startswith("managed_memory/"):
         from .management_worker import execute
 
@@ -90,7 +98,9 @@ async def companion_operation(runtime, op, args):
         ]
     if op == "boundary/release":
         identifier(args["actor_id"])
-        runtime.agent.boundary.release(cid, args["actor_id"])
+        from clytie.backup.coordination import run_sync
+
+        await run_sync(runtime.agent.ledger, runtime.agent.boundary.release, cid, args["actor_id"])
         return {"released": args["actor_id"]}
     if op == "plugins":
         host.refresh()
@@ -100,6 +110,7 @@ async def companion_operation(runtime, op, args):
                 "version": m.data["version"],
                 "enabled": host.is_active(cid, pid),
                 "reason": host.states.get(cid, {}).get(pid, {}).get("status"),
+                "backup": host.backup_support(cid, pid),
             }
             for pid, m in host.manifests.items()
         ]

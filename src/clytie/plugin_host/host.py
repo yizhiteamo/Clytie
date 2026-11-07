@@ -81,6 +81,7 @@ class HostPlan:
     fingerprint: str
     restore_cascaded: bool = False
     previously_cascaded: tuple[str, ...] = ()
+    backup_support: dict = field(default_factory=dict)
 
     @property
     def ok(self):
@@ -113,7 +114,19 @@ class PluginHost(MigrationMixin):
     def __init__(self, repo_root, home, *, clock, backends=None, log=None, seed=0):
         self.repo_root, self.home = Path(repo_root).resolve(), Path(home).resolve()
         self.clock, self.log, self.seed = clock, log or HostLog(), seed
-        self.backends = backends or (lambda cid, pid: {})
+        from clytie.assets import AssetStore
+
+        self.asset_store = AssetStore(self.home, self.clock)
+
+        def resolve_backends(cid, pid):
+            bound = self.asset_store.bind(cid)
+            return {
+                "assets": bound,
+                "asset_writer": bound,
+                **(backends(cid, pid) if backends is not None else {}),
+            }
+
+        self.backends = resolve_backends
         self.memory_resources = {}
         self.memory_jobs = {}
         self.memory_config = {}
@@ -221,6 +234,7 @@ class PluginHost(MigrationMixin):
     def memory_store(self, companion_id, config=None, instance=None):
         if companion_id in self.memory_resources:
             return self.memory_resources[companion_id][0]
+        from clytie.backup.coordination import companion_coordinator
         from clytie.memory.store import MemoryStore
         from clytie.memory.transfer import runtime_lock
 
@@ -241,6 +255,7 @@ class PluginHost(MigrationMixin):
                 clock=self.clock,
                 config=config,
                 instance=instance,
+                coordination=companion_coordinator(self.home, companion_id, self.clock),
             )
         except BaseException as exc:
             lock.__exit__(None, None, None)
@@ -271,6 +286,27 @@ class PluginHost(MigrationMixin):
             for (cid, pid), r in self.runtimes.items()
             if cid == companion_id and r.status == "active"
         )
+
+    def backup_support(self, companion_id, plugin_id):
+        """报告声明和可观察矛盾；不启动插件、不授予离线复制权限。"""
+        manifest = self.manifests[plugin_id]
+        mode = manifest.backup_mode
+        reason = "snapshot_unsupported" if mode == "unsupported" else None
+        if mode == "stateless":
+            try:
+                path = contained(
+                    self.home,
+                    self.home
+                    / "companions"
+                    / identifier(companion_id)
+                    / "plugin-data"
+                    / identifier(plugin_id),
+                )
+                if path.exists() and (not path.is_dir() or any(path.iterdir())):
+                    reason = "stateless_has_data"
+            except (OSError, ValueError):
+                reason = "snapshot_unavailable"
+        return {"mode": mode, "supported": reason is None, "reason": reason}
 
     def _metadata(self, companion_id, name):
         return contained(
@@ -379,6 +415,7 @@ class PluginHost(MigrationMixin):
             fingerprint,
             restore,
             previous,
+            {pid: self.backup_support(companion_id, pid) for pid in steps},
         )
         self._plans[plan_id] = plan
         return plan

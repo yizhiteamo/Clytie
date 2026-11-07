@@ -566,7 +566,10 @@
         "notifier": {
           "type": "object",
           "properties": {
-          "outward": {"type": "boolean", "default": false},
+            "outward": {
+              "type": "boolean",
+              "default": false
+            },
             "factory": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
@@ -783,6 +786,28 @@
               "data_route"
             ]
           }
+        },
+        "backup": {
+          "type": "object",
+          "properties": {
+            "snapshot": {
+              "type": "object",
+              "properties": {
+                "factory": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false,
+              "required": [
+                "factory"
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       },
       "patternProperties": {
@@ -850,6 +875,22 @@
     "hot_reload": {
       "type": "boolean",
       "default": false
+    },
+    "backup": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": [
+            "stateless",
+            "snapshot",
+            "unsupported"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ]
     }
   },
   "patternProperties": {
@@ -868,5 +909,57 @@
     "contributes",
     "permissions",
     "config"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "backup"
+        ],
+        "properties": {
+          "backup": {
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "const": "snapshot"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "contributes": {
+            "required": [
+              "backup"
+            ],
+            "properties": {
+              "backup": {
+                "required": [
+                  "snapshot"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "contributes": {
+            "properties": {
+              "backup": {
+                "not": {
+                  "required": [
+                    "snapshot"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   ]
 }

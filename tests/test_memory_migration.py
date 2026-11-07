@@ -11,6 +11,66 @@ from clytie.memory.store import MemoryStore, canonical, content_hash
 from clytie.sdk.testing import MockClock
 
 
+def test_migration_retention_only_removes_registered_successes(tmp_path):
+    from clytie.plugin_host.support import HostLog
+
+    path = tmp_path / "companions/companion_a/memory/memory.sqlite3"
+    store = MemoryStore(path, clock=MockClock(), config={}, instance={})
+    directory = tmp_path / "backups/memory/companion_a"
+    directory.mkdir(parents=True)
+    unknown = directory / "pre-migrate-historical.enc"
+    unknown.write_bytes(b"fictional unregistered failed migration")
+    try:
+        for _ in range(5):
+            store.db.executescript(
+                "DROP TABLE fade; DROP TABLE recollect_progress; DROP TABLE revision_origins; "
+                "DROP TABLE conversation_registry; PRAGMA user_version=1;"
+            )
+            migrate(store, tmp_path, "companion_a", HostLog())
+        receipts = json.loads((directory / "migration-receipts.json").read_bytes())
+        assert len(receipts["snapshots"]) == 3
+        assert len(list(directory.glob("*.enc"))) == 4
+        assert unknown.read_bytes() == b"fictional unregistered failed migration"
+        blocked = tmp_path / "companions/companion_a/management/blocked.json"
+        blocked.parent.mkdir(parents=True)
+        blocked.write_text("{}", encoding="utf-8")
+        store.db.executescript(
+            "DROP TABLE fade; DROP TABLE recollect_progress; DROP TABLE revision_origins; "
+            "DROP TABLE conversation_registry; PRAGMA user_version=1;"
+        )
+        migrate(store, tmp_path, "companion_a", HostLog())
+        assert len(list(directory.glob("*.enc"))) == 5
+    finally:
+        store.close()
+
+
+def test_failed_migration_preserves_snapshot_without_success_receipt(tmp_path, monkeypatch):
+    import pytest
+
+    from clytie.memory import origins
+    from clytie.memory.errors import MemoryStartupError
+
+    store = MemoryStore(tmp_path / "memory.sqlite3", clock=MockClock(), config={}, instance={})
+    store.db.executescript(
+        "DROP TABLE fade; DROP TABLE recollect_progress; DROP TABLE revision_origins; "
+        "DROP TABLE conversation_registry; PRAGMA user_version=1;"
+    )
+
+    def fail(store):
+        raise ValueError("fictional migration failure")
+
+    monkeypatch.setattr(origins, "backfill", fail)
+    try:
+        with pytest.raises(MemoryStartupError):
+            migrate(store, tmp_path, "companion_a", None)
+        directory = tmp_path / "backups/memory/companion_a"
+        assert len(list(directory.glob("*.enc"))) == 1
+        assert not (directory / "migration-receipts.json").exists()
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 1
+    finally:
+        store.close()
+
+
 def test_legacy_schema_snapshot_preserves_revisions_and_roundtrip(tmp_path):
     path = tmp_path / "companions/companion_a/memory/memory.sqlite3"
     store = MemoryStore(path, clock=MockClock(), config={}, instance={})

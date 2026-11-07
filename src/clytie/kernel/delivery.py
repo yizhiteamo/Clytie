@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime
 
+from clytie.backup.coordination import admission, run_sync
 from clytie.sdk import CancelToken
 from clytie.sdk.types import DeliveryIntent, Receipt
 
@@ -46,6 +47,15 @@ class Delivery:
         self.session_ending = False
         self.channel_errors = {}
         self.workers = set()
+
+    async def persist(self, function, *args, **kwargs):
+        """收据/执行结果一旦到达，取消调用者也不能丢弃等待提交的结果。"""
+        if self.ledger.coordination is None:
+            return function(*args, **kwargs)
+        task = background(run_sync(self.ledger, function, *args, **kwargs))
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        return await asyncio.shield(task)
 
     def _receipt(self, intent, status, code):
         return Receipt(
@@ -97,7 +107,7 @@ class Delivery:
                             result = await task
                         except (Exception, asyncio.CancelledError):
                             return
-                        self.ledger.record_receipt(intent.intent_id, n, result)
+                        await self.persist(self.ledger.record_receipt, intent.intent_id, n, result)
 
                     watcher = background(collect_late())
                     self.background.add(watcher)
@@ -130,7 +140,7 @@ class Delivery:
         intent = intent_value(row)
         channel = self.channels[intent.channel_id]
         if not self.asset_valid(intent, channel):
-            self.ledger.fail_intent(intent_id, "asset_rejected")
+            await run_sync(self.ledger, self.ledger.fail_intent, intent_id, "asset_rejected")
             return "failed"
         group = (intent.trace_id, intent.split.group_id) if intent.split else None
         while True:
@@ -142,7 +152,9 @@ class Delivery:
                 or self.session_ending
                 or self.channel_errors.get(intent.channel_id) == "auth_invalid"
             ):
-                self.ledger.fail_intent(
+                await run_sync(
+                    self.ledger,
+                    self.ledger.fail_intent,
                     intent_id,
                     "silenced"
                     if self.silenced
@@ -153,8 +165,11 @@ class Delivery:
                 return "failed"
             started = group in self.groups if group else False
             if not row["status_reaction"] and not started and self._cancelled(row):
-                self.ledger.fail_intent(
-                    intent_id, (row["error"] or {}).get("code", "cancelled_before_send")
+                await run_sync(
+                    self.ledger,
+                    self.ledger.fail_intent,
+                    intent_id,
+                    (row["error"] or {}).get("code", "cancelled_before_send"),
                 )
                 return "failed"
             if intent.not_before and self.clock.now() < intent.not_before:
@@ -166,10 +181,12 @@ class Delivery:
                 if row["status"] in INTENT_TERMINAL:
                     return row["status"]
             if started and self.clock.monotonic() >= self.groups[group][0]:
-                self.ledger.fail_intent(intent_id, "group_timeout")
+                await run_sync(self.ledger, self.ledger.fail_intent, intent_id, "group_timeout")
                 return "failed"
             if not row["status_reaction"] and not started and self._cancelled(row):
-                self.ledger.fail_intent(intent_id, "cancelled_before_send")
+                await run_sync(
+                    self.ledger, self.ledger.fail_intent, intent_id, "cancelled_before_send"
+                )
                 return "failed"
             if group and not started:
                 self.groups[group] = (self.clock.monotonic() + self.group_max, CancelToken())
@@ -181,23 +198,34 @@ class Delivery:
                 ).total_seconds()
             cutoff, token = self.groups[group] if group else (first + self.window, CancelToken())
             if previous and self.clock.monotonic() >= first + self.window:
-                self.ledger.fail_intent(intent_id, row["error"]["code"])
-                return "failed"
-            if (
-                self.silenced
-                or self.session_ending
-                or self.channel_errors.get(intent.channel_id) == "auth_invalid"
-            ):
-                self.ledger.fail_intent(
-                    intent_id,
-                    "silenced"
-                    if self.silenced
-                    else "shutdown_before_send"
-                    if self.session_ending
-                    else "auth_invalid",
+                await run_sync(
+                    self.ledger, self.ledger.fail_intent, intent_id, row["error"]["code"]
                 )
                 return "failed"
-            n = self.ledger.begin_attempt(intent_id)
+            async with admission(self.ledger):
+                row = self.ledger.get("intent", intent_id)
+                if row["status"] in INTENT_TERMINAL:
+                    return row["status"]
+                if not row["status_reaction"] and not started and self._cancelled(row):
+                    self.ledger.fail_intent(intent_id, "cancelled_before_send")
+                    return "failed"
+                if (
+                    self.silenced
+                    or self.session_ending
+                    or self.channel_errors.get(intent.channel_id) == "auth_invalid"
+                ):
+                    await run_sync(
+                        self.ledger,
+                        self.ledger.fail_intent,
+                        intent_id,
+                        "silenced"
+                        if self.silenced
+                        else "shutdown_before_send"
+                        if self.session_ending
+                        else "auth_invalid",
+                    )
+                    return "failed"
+                n = await run_sync(self.ledger, self.ledger.begin_attempt, intent_id)
             receipt = await self._call(intent, channel, token, cutoff, n)
             if receipt.intent_id != intent_id and self.log:
                 self.log.warning("delivery.receipt_mismatch", intent_id=intent_id, attempt=n)
@@ -215,7 +243,9 @@ class Delivery:
                 and self.clock.monotonic() + delay < cutoff
                 and (group or not self._cancelled(row))
             )
-            fresh = self.ledger.record_receipt(intent_id, n, receipt, retry=bool(retry))
+            fresh = await self.persist(
+                self.ledger.record_receipt, intent_id, n, receipt, retry=bool(retry)
+            )
             if (
                 fresh
                 and receipt.intent_id == intent_id
@@ -246,7 +276,7 @@ class Delivery:
             stopped = None
             for row in group:
                 if stopped:
-                    self.ledger.fail_intent(row["intent_id"], stopped)
+                    await run_sync(self.ledger, self.ledger.fail_intent, row["intent_id"], stopped)
                     continue
                 status = await self.send_one(row["intent_id"])
                 if status == "unknown":

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 
+from clytie.backup.coordination import run_sync, transaction
 from clytie.plugin_host.support import HostLog
 from clytie.sdk import CancelToken
 from clytie.sdk.types import BusEvent, Denial, Invocation, TaskSummary, ToolResult
@@ -76,14 +77,14 @@ class Kernel:
         self.record_tasks = {}
 
     async def start(self):
-        interrupted = self.ledger.restart()
+        interrupted = await run_sync(self.ledger, self.ledger.restart)
         await self.reactions.restart(interrupted)
 
     def submit(self, trace, actor, operation):
         record = self.ledger.get("record", trace)
 
         async def run():
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 record = self.ledger.get("record", trace)
                 if record["exec_status"] in EXEC_TERMINAL or record["cancelled"]:
                     return None
@@ -125,7 +126,7 @@ class Kernel:
             if self.observe:
                 await self.observe(event)
             return None
-        event_id, new = self.ledger.claim_inbound(event)
+        event_id, new = await run_sync(self.ledger, self.ledger.claim_inbound, event)
         if not new:
             self.duplicates += 1
             self.log.debug("inbound.duplicate", event_id=event_id)
@@ -174,7 +175,9 @@ class Kernel:
         seconds = timeout_s or self.config.get("tasks", {}).get("default_deadline_seconds", 600)
         if seconds > self.max_task_seconds:
             self.log.warning("task.timeout_capped", tool=call.tool)
-        inv, first = self.ledger.claim_invocation(
+        inv, first = await run_sync(
+            self.ledger,
+            self.ledger.claim_invocation,
             trace,
             plugin_id,
             call,
@@ -182,10 +185,10 @@ class Kernel:
             timeout=min(seconds, self.max_task_seconds),
             schema=schema or {},
         )
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
             inv["plan"] = {"summary": plan.summary}
             self.ledger.put("invocation", inv["invocation_id"], inv)
-        if not self.ledger.start_invocation(inv["invocation_id"]):
+        if not await run_sync(self.ledger, self.ledger.start_invocation, inv["invocation_id"]):
             return self._existing(inv)
         r = self.ledger.get("record", trace)
         if first:
@@ -214,7 +217,7 @@ class Kernel:
         settled = False
         task_cancelled = False
 
-        def cancel_invocation():
+        async def cancel_invocation():
             nonlocal settled
             if settled:
                 return None
@@ -228,18 +231,29 @@ class Kernel:
                 data={},
                 error={"code": token.reason or "cancelled", "message": ""},
             )
-            self.ledger.finish_invocation(inv["invocation_id"], result)
 
-            async def late():
-                try:
-                    value = await task
-                except (Exception, asyncio.CancelledError):
-                    return
-                self.ledger.finish_invocation(inv["invocation_id"], value)
+            async def finalize():
+                await run_sync(
+                    self.ledger, self.ledger.finish_invocation, inv["invocation_id"], result
+                )
 
-            watcher = background(late())
-            self.delivery.background.add(watcher)
-            watcher.add_done_callback(self.delivery.background.discard)
+                async def late():
+                    try:
+                        value = await task
+                    except (Exception, asyncio.CancelledError):
+                        return
+                    await self.delivery.persist(
+                        self.ledger.finish_invocation, inv["invocation_id"], value
+                    )
+
+                watcher = background(late())
+                self.delivery.background.add(watcher)
+                watcher.add_done_callback(self.delivery.background.discard)
+
+            finalizer = background(finalize())
+            self.delivery.background.add(finalizer)
+            finalizer.add_done_callback(self.delivery.background.discard)
+            await asyncio.shield(finalizer)
             return result
 
         try:
@@ -253,7 +267,7 @@ class Kernel:
                 try:
                     done, _ = await asyncio.wait({task, grace}, return_when=asyncio.FIRST_COMPLETED)
                     if task not in done:
-                        return cancel_invocation()
+                        return await cancel_invocation()
                 finally:
                     grace.cancel()
                     await asyncio.gather(grace, return_exceptions=True)
@@ -278,13 +292,13 @@ class Kernel:
                     data={},
                     error={"code": type(exc).__name__, "message": ""},
                 )
-            self.ledger.finish_invocation(inv["invocation_id"], result)
+            await self.delivery.persist(self.ledger.finish_invocation, inv["invocation_id"], result)
             settled = True
             return result
         except asyncio.CancelledError:
             # task.result() 的取消仍由原有分支处理；这里只收尾外部取消。
             if not task_cancelled:
-                cancel_invocation()
+                await cancel_invocation()
             raise
         finally:
             self.tasks.pop(trace, None)
@@ -293,7 +307,7 @@ class Kernel:
             try:
                 await asyncio.gather(deadline, cancelled, return_exceptions=True)
             except asyncio.CancelledError:
-                cancel_invocation()
+                await cancel_invocation()
                 raise
 
     def _existing(self, inv):
@@ -307,7 +321,7 @@ class Kernel:
     async def seal(self, trace, status, intents=(), error=None):
         if any(i.kind == "react" and i.intent_id not in self._reaction_exceptions for i in intents):
             raise ValueError("record cannot react without a declared exception")
-        self.ledger.seal(trace, status, intents, error)
+        await run_sync(self.ledger, self.ledger.seal, trace, status, intents, error)
         await self.complete(trace)
 
     async def _sent(self, intent, receipt):
@@ -322,7 +336,7 @@ class Kernel:
         )
 
     async def complete(self, trace):
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
             r = self.ledger.get("record", trace)
             if (
                 r["exec_status"] not in EXEC_TERMINAL
@@ -439,7 +453,8 @@ class Kernel:
             or target["requester"]
             and target["requester"]["actor_id"] == actor.actor_id
         )
-        with self.ledger.transaction():
+        async with transaction(self.ledger):
+            target = self.ledger.get("record", trace)
             self.ledger.audit(
                 "cancel_requested", trace_id=trace, actor_id=actor.actor_id, allowed=bool(allowed)
             )
@@ -458,7 +473,7 @@ class Kernel:
                     if intent["status"] == "retry_wait" and intent["error"]
                     else "cancelled_before_send"
                 )
-                self.ledger.fail_intent(intent["intent_id"], code)
+                await run_sync(self.ledger, self.ledger.fail_intent, intent["intent_id"], code)
                 active = self.delivery.active_tokens.get(intent["intent_id"])
                 if active:
                     active.cancel("cancelled")
@@ -475,7 +490,13 @@ class Kernel:
                 timer.cancel()
                 await asyncio.gather(timer, return_exceptions=True)
         if target["exec_status"] not in EXEC_TERMINAL:
-            self.ledger.seal(trace, "cancelled", error={"code": "cancelled", "message": ""})
+            await run_sync(
+                self.ledger,
+                self.ledger.seal,
+                trace,
+                "cancelled",
+                error={"code": "cancelled", "message": ""},
+            )
         if target["exec_status"] == "pending" and trace in self.queued:
             self.queued[trace].cancel()
         await self.complete(trace)

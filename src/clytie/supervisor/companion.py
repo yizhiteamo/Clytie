@@ -3,6 +3,7 @@
 import asyncio
 
 from clytie.agent import Agent
+from clytie.backup.coordination import run_sync, transaction
 from clytie.config import load_home, repository_root, thaw
 from clytie.kernel.ledger import EXEC_TERMINAL, INTENT_TERMINAL, LedgerError
 from clytie.kernel.migration import LedgerRuntime
@@ -71,6 +72,8 @@ class Companion:
         config = thaw(report.plugin_configs[self.cid]["config"])
         self.on_phase("migrating")
         try:
+            # Runtime atomically acquires the ledger lock against cleanup, then
+            # releases the instance startup gate before any migration awaits.
             ledger = await self.runtime.open()
         except OperationBusy:
             raise StartupBlocked("lock_held") from None
@@ -79,7 +82,7 @@ class Companion:
         if self.stop_requested():
             return False
         # Restart correction precedes plugin start; reactions are initialized by Agent.start.
-        interrupted = ledger.restart()
+        interrupted = await run_sync(ledger, ledger.restart)
         self.host.configure_report(report)
         from clytie.api.management_journal import ManagementBusy, gate, recover_locked
 
@@ -289,7 +292,7 @@ class Companion:
                     if row["status"] == "retry_wait" and row["error"]
                     else "shutdown_before_send"
                 )
-                kernel.ledger.fail_intent(row["intent_id"], code)
+                await run_sync(kernel.ledger, kernel.ledger.fail_intent, row["intent_id"], code)
 
         async def delivery_idle():
             while (kernel.delivery.active_tokens or kernel.delivery.workers) and not self.orphan:
@@ -317,8 +320,9 @@ class Companion:
                 trace = record["trace_id"]
                 token = kernel.tokens.setdefault(trace, CancelToken())
                 token.cancel("cancelled")
-                record["cancelled"] = True
-                with kernel.ledger.transaction():
+                async with transaction(kernel.ledger):
+                    record = kernel.ledger.get("record", trace)
+                    record["cancelled"] = True
                     kernel.ledger.put("record", trace, record)
                 pending = kernel.queued.get(trace)
                 if record["exec_status"] == "pending" and pending:
@@ -332,11 +336,16 @@ class Companion:
                     task.cancel()
             for record in kernel.ledger.rows("record"):
                 if record["exec_status"] not in EXEC_TERMINAL:
-                    record["cancelled"] = True
-                    with kernel.ledger.transaction():
+                    async with transaction(kernel.ledger):
+                        record = kernel.ledger.get("record", record["trace_id"])
+                        record["cancelled"] = True
                         kernel.ledger.put("record", record["trace_id"], record)
-                    kernel.ledger.seal(
-                        record["trace_id"], "cancelled", error={"code": "cancelled", "message": ""}
+                    await run_sync(
+                        kernel.ledger,
+                        kernel.ledger.seal,
+                        record["trace_id"],
+                        "cancelled",
+                        error={"code": "cancelled", "message": ""},
                     )
         if not self.orphan:
             try:
@@ -345,7 +354,12 @@ class Companion:
                 pass
         for row in kernel.ledger.rows("intent"):
             if row["status"] not in INTENT_TERMINAL and row["status"] != "sending":
-                kernel.ledger.fail_intent(row["intent_id"], "shutdown_before_send")
+                await run_sync(
+                    kernel.ledger,
+                    kernel.ledger.fail_intent,
+                    row["intent_id"],
+                    "shutdown_before_send",
+                )
         jobs = tuple(self.host.memory_jobs.get(self.cid, ()))
         for job in jobs:
             job.cancel()

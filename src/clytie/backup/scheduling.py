@@ -216,7 +216,7 @@ class BackupScheduler:
         state["last_poll"] = now.isoformat()
         self._started = True
 
-    def poll(self, *, ready=True, maintenance=False):
+    def poll(self, *, ready=True, maintenance=False, trigger=None):
         if maintenance or not ready:
             return None
         with self._state() as state:
@@ -224,6 +224,8 @@ class BackupScheduler:
             if state["active"]:
                 return None
             for key, job in state["jobs"].items():
+                if trigger is not None and job["trigger"] != trigger:
+                    continue
                 if job["status"] != "pending" or datetime.fromisoformat(job["due"]) > self._now():
                     continue
                 if not job["manual"] and not self.config.get("enabled", True):

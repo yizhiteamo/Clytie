@@ -5,10 +5,11 @@ import json
 import re
 import sqlite3
 import unicodedata
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from uuid import uuid4
 
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.memory import current_conversation, current_scene
 from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import MemoryRecord
@@ -55,11 +56,14 @@ def content_hash(record):
 
 
 class MemoryStore:
-    def __init__(self, path, *, clock, config, instance, readonly=False, transient=False):
+    def __init__(
+        self, path, *, clock, config, instance, readonly=False, transient=False, coordination=None
+    ):
         self.path, self.clock = Path(path), clock
         self.config, self.instance = config, instance
         self.changed = None
         self.transient = transient
+        self.coordination = coordination
         if readonly and not transient:
             self.db = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
         else:
@@ -162,20 +166,27 @@ class MemoryStore:
     def set_meta(self, key, value):
         self.db.execute("INSERT OR REPLACE INTO metadata VALUES(?,?)", (key, canonical(value)))
 
+    def mark_backup_dirty(self):
+        """重要修改与业务事务一起提交；回滚不留下虚假的待备份版本。"""
+        if not self.db.in_transaction:
+            raise RuntimeError("backup_revision_requires_transaction")
+        self.set_meta("backup_revision", self.meta("backup_revision", 0) + 1)
+
     @property
     def uid(self):
         return self.meta("companion_uid")
 
     @contextmanager
     def transaction(self):
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-            self.set_meta("generation", self.meta("generation", 0) + 1)
-            self.db.commit()
-        except BaseException:
-            self.db.rollback()
-            raise
+        with self.coordination.commit() if self.coordination else nullcontext():
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                self.set_meta("generation", self.meta("generation", 0) + 1)
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
 
     def audit(self, kind, **fields):
         self.db.execute(
@@ -280,6 +291,7 @@ class MemoryStore:
             operator=operator,
             import_id=import_id,
         )
+        self.mark_backup_dirty()
         if self.changed:
             self.changed()
         return record
@@ -419,12 +431,20 @@ class PluginMemory:
         return record if record and self.store.visible(record, **self.scope()) else None
 
     async def write(self, draft):
-        return self.store.write(draft, **self.scope())
+        return await run_sync(self.store, self.store.write, draft, **self.scope())
 
     async def revise(self, record_id, expected_revision, changes):
-        return self.store.revise(record_id, expected_revision, changes, **self.scope())
+        return await run_sync(
+            self.store, self.store.revise, record_id, expected_revision, changes, **self.scope()
+        )
 
     async def retract(self, record_id, expected_revision, reason):
-        return self.store.revise(
-            record_id, expected_revision, {"retracted": True}, reason=reason, **self.scope()
+        return await run_sync(
+            self.store,
+            self.store.revise,
+            record_id,
+            expected_revision,
+            {"retracted": True},
+            reason=reason,
+            **self.scope(),
         )

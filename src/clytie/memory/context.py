@@ -6,6 +6,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from clytie.backup.coordination import run_sync, transaction
 from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import ChatMessage, TextPart, ToolResult, ToolSpec
 
@@ -191,7 +192,9 @@ class MemoryContext:
             selected.add(record.record_id)
             used += len(label)
             count += 1
-        reinforce(self.store, [r for r in visible if r.record_id in selected])
+        await run_sync(
+            self.store, reinforce, self.store, [r for r in visible if r.record_id in selected]
+        )
         return [ChatMessage(role="system", parts=[TextPart(text="记忆：\n" + "\n".join(lines))])]
 
     def guard(self, text, scene):
@@ -286,7 +289,7 @@ class MemoryContext:
                     args["query"], **scope, limit=10, cancel=cancel, include_frozen=True
                 )
                 lines = [self.label(r, session) for r in rows]
-                reinforce(self.store, rows)
+                await run_sync(self.store, reinforce, self.store, rows)
                 lines.extend(self.task_recall(args["query"], conversation))
                 content = "\n".join(lines) or "记忆和任务记录里都没有找到相关的事"
             else:
@@ -325,7 +328,9 @@ class MemoryContext:
                         changes["kind"] = original.kind
                         if "visibility" not in args:
                             changes["visibility"] = original.visibility
-                    self.store.revise(
+                    await run_sync(
+                        self.store,
+                        self.store.revise,
                         key,
                         revision,
                         changes,
@@ -336,7 +341,9 @@ class MemoryContext:
                         reason=args.get("reason"),
                     )
                 else:
-                    self.store.write(
+                    await run_sync(
+                        self.store,
+                        self.store.write,
                         {
                             "kind": args["kind"],
                             "content": args["content"],
@@ -373,7 +380,7 @@ class MemoryContext:
                 {"code": "memory_unavailable", "message": ""},
             )
         if self.ledger:
-            with self.ledger.transaction():
+            async with transaction(self.ledger):
                 self.ledger.audit(
                     "core.tool",
                     trace_id=trace,

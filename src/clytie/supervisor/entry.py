@@ -289,10 +289,24 @@ class StartupHandshake:
             self.confirmed = True
 
 
-async def daemon_main(home, detached=False):
+async def daemon_main(home, detached=False, maintenance=False):
     clock = SystemClock()
+    from clytie.backup.restore import RestoreError, assert_start_allowed
+
+    try:
+        assert_start_allowed(home, maintenance=maintenance)
+    except (RestoreError, OSError) as exc:
+        frame(
+            sys.stdout.buffer,
+            dict(
+                type="error",
+                seq=0,
+                code=exc.code if isinstance(exc, RestoreError) else "restore_recovery_blocked",
+            ),
+        )
+        return 1
     report = load_home(home)
-    if report.global_errors or not report.instance:
+    if not maintenance and (report.global_errors or not report.instance):
         frame(
             sys.stdout.buffer,
             dict(
@@ -304,10 +318,16 @@ async def daemon_main(home, detached=False):
         )
         return 1
     launcher = ProcessLauncher(home)
-    instance = thaw(report.instance)
+    instance = thaw(report.instance) if report.instance else {}
     supervisor = Supervisor(
-        home, instance["companions"], launcher, clock, config=instance.get("supervisor", {})
+        home,
+        [] if maintenance else instance["companions"],
+        launcher,
+        clock,
+        config={} if maintenance else instance.get("supervisor", {}),
     )
+    supervisor.maintenance = maintenance
+    supervisor.old_instance_options = instance.get("backup", {}).get("old_instances", {})
     log_seq = 0
 
     def display(entry):
@@ -323,8 +343,13 @@ async def daemon_main(home, detached=False):
     from clytie.plugin_host import PluginHost
     from clytie.plugin_host.instance import InstanceNotifiers
 
-    notifiers = InstanceNotifiers(
-        PluginHost(repository_root(), home, clock=clock), subprocess_backend=ProcessBackend(clock)
+    notifiers = (
+        None
+        if maintenance
+        else InstanceNotifiers(
+            PluginHost(repository_root(), home, clock=clock),
+            subprocess_backend=ProcessBackend(clock),
+        )
     )
     supervisor.notifications.cooldown = instance.get("notify", {}).get("cooldown_hours", 6) * 3600
     detached_events = asyncio.Queue()
@@ -389,11 +414,12 @@ async def daemon_main(home, detached=False):
                     message="还没有设置管理口令：网页登录不可用，危险操作没有口令保护。运行 clytie admin set-password 设置",
                 ),
             )
-        await notifiers.start(
-            instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
-        )
-        supervisor.notifications.plugins = notifiers.notifiers
-        supervisor.finalize = notifiers.close
+        if notifiers is not None:
+            await notifiers.start(
+                instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
+            )
+            supervisor.notifications.plugins = notifiers.notifiers
+            supervisor.finalize = notifiers.close
 
     try:
         await supervisor.start(prepare)
@@ -415,6 +441,11 @@ async def daemon_main(home, detached=False):
         launcher.close()
         return 1
     startup_complete.set()
+    from clytie.backup.controller import BackupController
+
+    supervisor.backup_controller = BackupController(supervisor, management.backup_workers, instance)
+    if not supervisor.stopping:
+        await supervisor.backup_controller.start()
     frame(sys.stdout.buffer, dict(type="ready", seq=0))
 
     async def reminders():
@@ -461,11 +492,12 @@ async def daemon_main(home, detached=False):
         if server:
             await server.close()
         session_events.close()
-        await notifiers.close()
+        if notifiers is not None:
+            await notifiers.close()
         launcher.close()
 
 
-def frontend(home):
+def frontend(home, *, maintenance=False):
     # Redirected Windows stdout may use an ANSI codepage unable to encode this notice.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -482,64 +514,80 @@ def frontend(home):
         asyncio.run(clock.sleep(1))
     directory = home / "logs/supervisor"
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "process.log").open("ab") as log:
-        executable, env = python_process()
-        process = subprocess.Popen(
-            [executable, "-m", "clytie", "_supervisor", "--home", str(home)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=log,
-            env=env,
-            **creation(detached=True),
-        )
-        controls = FrontendSignals(process.stdin)
-        signal.signal(signal.SIGINT, controls.interrupt)
-        if hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, controls.interrupt)
-        signal.signal(signal.SIGTERM, lambda *_: controls.send("session_ending"))
-        handler = None
-        if sys.platform == "win32":
-            import ctypes
+    executable, env = python_process()
+    process = subprocess.Popen(
+        [executable, "-m", "clytie", "_supervisor", "--home", str(home)]
+        + (["--maintenance"] if maintenance else []),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env=env,
+        **creation(detached=True),
+    )
+    controls = FrontendSignals(process.stdin)
+    signal.signal(signal.SIGINT, controls.interrupt)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, controls.interrupt)
+    signal.signal(signal.SIGTERM, lambda *_: controls.send("session_ending"))
+    handler = None
+    if sys.platform == "win32":
+        import ctypes
 
-            callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
 
-            @callback
-            def handler(event):
-                return controls.windows(event)
+        @callback
+        def handler(event):
+            return controls.windows(event)
 
-            ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
-        try:
-            for line in process.stdout:
-                # Only protocol status, never child plugin stdout or content.
-                print(line.decode("utf-8").rstrip(), flush=True)
-            return process.wait()
-        finally:
-            process.stdin.close()
-            process.stdout.close()
-            if handler:
-                ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, False)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
+    try:
+        for line in process.stdout:
+            # Only protocol status, never child plugin stdout or content.
+            print(line.decode("utf-8").rstrip(), flush=True)
+        return process.wait()
+    finally:
+        process.stdin.close()
+        process.stdout.close()
+        if handler:
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, False)
 
 
 def internal(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--home", required=True)
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument("--maintenance", action="store_true")
     if argv[0] == "companion":
         parser.add_argument("verb", choices=["run"])
         parser.add_argument("cid")
     args = parser.parse_args(argv[1:])
     home = Path(args.home).resolve()
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-    if argv[0] == "companion":
-        return asyncio.run(companion_main(home, args.cid))
-    return asyncio.run(daemon_main(home, detached=args.detach))
+    from clytie.backup.logs import RotatingLogWriter, process_logs
+    from clytie.plugin_host.snapshots import identifier
+
+    companion = argv[0] == "companion"
+    relative = (
+        f"companions/{identifier(args.cid)}/logs/process.log"
+        if companion
+        else "logs/supervisor/process.log"
+    )
+    writer = RotatingLogWriter(home, relative)
+    with process_logs(writer, stdout=not companion and args.detach):
+        report = load_home(home)
+        options = (report.instance or {}).get("backup", {}).get("logs", {})
+        writer.rotate_bytes = options.get("rotate_mib", 10) * 1024**2
+        writer.archives = options.get("archives", 10)
+        logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+        if companion:
+            return asyncio.run(companion_main(home, args.cid))
+        return asyncio.run(daemon_main(home, detached=args.detach, maintenance=args.maintenance))
 
 
 def run(args):
     from clytie.api import local_supervisor_start, local_supervisor_status
 
     if args.action == "start":
-        return local_supervisor_start(args.home)
+        return local_supervisor_start(args.home, maintenance=getattr(args, "maintenance", False))
     import json
 
     value = local_supervisor_status(args.home)

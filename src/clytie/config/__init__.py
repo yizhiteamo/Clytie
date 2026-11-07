@@ -21,6 +21,8 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from referencing import Registry
 from referencing.exceptions import NoSuchResource, Unresolvable
 
+from .assets import AssetDeclarationError, resolved_dependencies, validate_asset_schema
+
 
 def compile_input_pattern(pattern):
     """Preserve regex escapes; match normalized input case-insensitively."""
@@ -76,6 +78,7 @@ class ConfigIssue:
     pointer: str
     expected: str
     actual: Any
+    code: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actual", freeze(self.actual))
@@ -86,6 +89,7 @@ class ConfigIssue:
             "pointer": self.pointer,
             "expected": self.expected,
             "actual": thaw(self.actual),
+            **({"code": self.code} if self.code is not None else {}),
         }
 
 
@@ -189,9 +193,12 @@ class _Reader:
         self.root = root
         self.errors: list[ConfigIssue] = []
         self.schemas: dict[str, dict[str, Any]] = {}
+        self.source_overrides: dict[Path, bytes] = {}
 
-    def issue(self, file: Path, parts: Any, expected: str, actual: Any) -> None:
-        self.errors.append(ConfigIssue(str(file), _pointer(parts), expected, actual))
+    def issue(
+        self, file: Path, parts: Any, expected: str, actual: Any, *, code: str | None = None
+    ) -> None:
+        self.errors.append(ConfigIssue(str(file), _pointer(parts), expected, actual, code))
 
     def read(self, file: Path) -> Any:
         try:
@@ -203,7 +210,11 @@ class _Reader:
                     "restricted path",
                 )
                 return _MISSING
-            text = file.read_text(encoding="utf-8-sig")
+            text = (
+                self.source_overrides[file].decode("utf-8-sig")
+                if file in self.source_overrides
+                else file.read_text(encoding="utf-8-sig")
+            )
             value = (
                 json.loads(text, object_pairs_hook=_json_pairs)
                 if file.suffix == ".json"
@@ -236,7 +247,9 @@ class _Reader:
         global_origins: list[tuple[Path, tuple[Any, ...]]] | None = None,
         global_errors: list[ConfigIssue] | None = None,
     ) -> None:
-        def emit(parts: tuple[Any, ...], expected: str, actual: Any) -> None:
+        def emit(
+            parts: tuple[Any, ...], expected: str, actual: Any, *, code: str | None = None
+        ) -> None:
             target, location = file, prefix + parts
             selected_origin = None
             if origins:
@@ -247,7 +260,7 @@ class _Reader:
                         target, base = origin
                         location = base + parts[length:]
                         break
-            self.issue(target, location, expected, actual)
+            self.issue(target, location, expected, actual, code=code)
             if global_errors is not None and any(
                 selected_origin is origin for origin in (global_origins or ())
             ):
@@ -260,12 +273,19 @@ class _Reader:
             errors = sorted(
                 validator.iter_errors(data), key=lambda error: repr(list(error.absolute_path))
             )
+            if not errors:
+                try:
+                    resolved_dependencies(schema, data)
+                except AssetDeclarationError as exc:
+                    emit(exc.parts, exc.code, "invalid declaration", code=exc.code)
             for error in errors:
                 parts = tuple(error.absolute_path)
                 if error.validator == "required" and isinstance(error.instance, dict):
                     for name in error.validator_value:
                         if name not in error.instance:
-                            emit(parts + (name,), "required field", "missing")
+                            emit(
+                                parts + (name,), "required field", "missing", code="schema_required"
+                            )
                     continue
                 if (
                     error.validator == "additionalProperties"
@@ -340,6 +360,11 @@ class _Reader:
                     references(value, position + (index,))
 
         references(schema, parts)
+        try:
+            validate_asset_schema(schema)
+        except (AssetDeclarationError, SchemaError, TypeError, ValueError) as exc:
+            position = getattr(exc, "parts", ())
+            self.issue(file, parts + position, str(exc), "invalid asset declaration")
         return len(self.errors) == start
 
 
@@ -422,7 +447,12 @@ def _safe_child(parent: Path, relative: Any) -> Path | None:
         return None
 
 
-def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) -> HomeReport:
+def load_home(
+    home: str | Path | None = None,
+    *,
+    repo_root: Path | None = None,
+    _instance_source: bytes | None = None,
+) -> HomeReport:
     """Inspect files without importing plugins, opening databases or using the network."""
     root = repo_root.resolve() if repo_root is not None else repository_root()
     reader = _Reader(root)
@@ -435,16 +465,43 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         reader.issue(directory, (), "existing instance directory", "missing")
         return HomeReport(str(directory), False, errors=tuple(reader.errors))
     instance_file = directory / "clytie.local.yaml"
+    if _instance_source is not None:
+        reader.source_overrides[instance_file] = _instance_source
     instance = reader.document(instance_file, "instance")
     if instance is None:
         return HomeReport(str(directory), True, errors=tuple(reader.errors))
     defaults, _ = _default_config(reader.schemas["instance"]["properties"]["limits"], instance_file)
     if isinstance(instance.get("limits", {}), dict):
         instance["limits"] = thaw(deep_merge(defaults, instance.get("limits", {})))
-    for key in ("supervisor", "notify"):
+    for key in ("supervisor", "notify", "backup"):
         defaults, _ = _default_config(reader.schemas["instance"]["properties"][key], instance_file)
         if isinstance(instance.get(key, {}), dict):
             instance[key] = thaw(deep_merge(defaults, instance.get(key, {})))
+    backup = instance.get("backup", {})
+    if isinstance(backup, dict):
+        for group, count, minimum in (
+            ("retention", "recent_memory", "minimum_per_group"),
+            ("mirror", "recent", "minimum"),
+        ):
+            values = backup.get(group, {})
+            if isinstance(values, dict):
+                recent, floor = values.get(count), values.get(minimum)
+                if type(recent) is int and type(floor) is int and recent < floor:
+                    reader.issue(
+                        instance_file,
+                        ("backup", group, count),
+                        f"at least {minimum}",
+                        recent,
+                    )
+        mirror = backup.get("mirror", {})
+        if isinstance(mirror, dict) and mirror.get("enabled") is True:
+            if not isinstance(mirror.get("path"), str) or not mirror["path"].strip():
+                reader.issue(
+                    instance_file,
+                    ("backup", "mirror", "path"),
+                    "explicit mirror directory when enabled",
+                    mirror.get("path"),
+                )
     supervisor = instance.get("supervisor", {})
     if isinstance(supervisor, dict):
         heartbeat = supervisor.get("heartbeat_seconds", 5)
@@ -471,6 +528,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
         relative = account["secret"]
         secret_root = (directory / "secrets").resolve()
         valid = False
+        missing = False
         if isinstance(relative, str) and relative and not PureWindowsPath(relative).drive:
             supplied = Path(relative.replace("\\", "/"))
             try:
@@ -480,6 +538,12 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                     and candidate.is_relative_to(secret_root)
                     and candidate.is_file()
                 )
+                missing = (
+                    not supplied.is_absolute()
+                    and candidate.is_relative_to(secret_root)
+                    and not candidate.exists()
+                    and not candidate.is_symlink()
+                )
             except (OSError, RuntimeError, ValueError):
                 valid = False
         if not valid:
@@ -488,6 +552,7 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 ("accounts", account_ref, "secret"),
                 "existing file relative to secrets",
                 relative,
+                code="credential_reference_missing" if missing else "credential_reference_invalid",
             )
     owners = [
         key
@@ -913,6 +978,8 @@ def load_home(home: str | Path | None = None, *, repo_root: Path | None = None) 
                 plugin_id, file, position + (("plugin",) if kind != "plugins" else ())
             )
             item = {"id": plugin_id, "status": state}
+            if plugin and isinstance(plugin.get("backup", {}), dict):
+                item["backup_mode"] = plugin.get("backup", {}).get("mode", "unsupported")
             if kind == "recollect_model":
                 status["plugins"].append(item)
             elif kind == "model":
