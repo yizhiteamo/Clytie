@@ -325,6 +325,8 @@
 | POST /verify；verify <id> | 独立校验、结果版本和时间，不把模型联网启动当验证 |
 | POST /config/plan、/config/apply；config plan/apply | 版本绑定、确认、保留注释，复用 A4.2 配置写回与历史 |
 | POST /restore/plan、/restore/apply；restore plan/apply | 源、目标、空间与兼容性计划；apply 确认及管理口令 |
+| GET /plans/<kind>/<plan_id>；plan show <kind> <plan_id> | 恢复预览生命周期、到期时间、关联操作；正常鉴权、不续期 |
+| POST /plans/<kind>/<plan_id>/cancel；plan cancel <kind> <plan_id> | 取消未消费预览；鉴权及确认，无额外口令；已接受执行提示原操作编号 |
 | POST /restore/source-stopped；restore source-stopped <id> | 目标 maintenance API 登记启动前源停用确认，确认及管理口令；同机源活跃拒绝 |
 | POST /restore/acknowledge；restore acknowledge <id> | 正常启动后核验并登记切换完成；确认，不自动改环境变量或启动平台 |
 | POST /memory/plan；memory-plan <backup_id> | memory 备份源适配到原记忆计划；后续查询/预览/apply/undo 沿用原入口与保护 |
@@ -344,3 +346,9 @@
 
 `ready_for_switch` 是数据恢复结果，不是普通启动许可。维护模式下的已鉴权 `GET /api/v1/backup/status` 可列出合法凭据缺项并重新进行只读配置校验，分别返回数据恢复状态、缺项与普通启动配置结果；不回传秘密、不加载业务插件、不调用真实平台或模型、不自动启动。显示“数据恢复完成，尚需配置凭据”，不能以单个 ready 状态掩盖配置未通过。
 正常启动不新增凭据豁免：全局配置错误仍拒绝整个实例启动，补配后重新校验。恢复校验只接受认证清单与声明式 Schema 精确对应的排除，其他配置错误不能忽略；详见 backup-spec §8.3a。source_stopped 与 switched 的顺序、确认、管理口令、Host/Origin/CSRF 保护不变。
+
+### Issue #66：恢复预览的期限与取消（用户已确认，选项 1）
+
+面向用户称“恢复预览”，内部 plan 保留；不是预约恢复、进程有效期或已恢复目录的有效期。仅完整 instance 恢复与 source_type=backup 的 memory 恢复预览在生成完成后有效 24 小时，不自动续期；重新生成要重新校验。普通记忆包导入/撤销、其他计划原语义不变。
+GET /backup/plans/<kind>/<plan_id> 查询状态，POST 同路径 /cancel 鉴权、CSRF及确认后取消未消费预览，不额外要求管理口令。kind 为 instance 或 memory，服务器校验持久来源。过期/取消拒绝新的 apply/内容读取，但已有执行/读取/核验引用不中断。consumed 取消返回 plan_in_use 和原操作编号，不能把取消预览转成取消执行；原执行取消入口与保护不变。
+接受执行、到期、取消与轮转须原子协调并持久交接引用；恢复受阻仍需要的源不能因计划期限被删除。状态、幂等、错误码与验收以 backup-spec §8.6、§13 第 16a 项为准。取消不删除源、不撤销恢复，也不改写生成预览的成功事实。
