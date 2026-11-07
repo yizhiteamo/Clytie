@@ -67,3 +67,34 @@ catalog.json 仅从仓库官方清单生成，不读取实例清单；按 id 和
 按 `supervisor-spec.md` §5.1，新增只用于 notifier 的实例装配范围，沿用宿主装配路径和清单校验规则。列表取全局 `notify.plugins`，ctx 只有 config、log、clock、subprocess，没有伴侣、记忆、账本、平台或模型。伴侣级通知仍使用自己的通知插件。
 
 按 §6，close 按依赖方先停逐个停止，单个插件异常后继续停止其余插件，把失败插件与原因记入 not_stopped；一个伴侣失败不影响其他伴侣。关闭取消在所有伴侣完成后传播，完整结果由 ShutdownCancelled.result 携带。
+
+## A4.3 捕获与插件生命周期（待实现）
+
+以下为已批准的 A4.3 契约，尚未实现、未经验收；完整依据为 `backup-spec.md`，不代表历史里程碑已提供这些能力。
+
+协调器准备 → 取得可证明的组件快照边界 → 释放业务协调 → 后台复制/压缩/加密/校验。SQLite 使用独立连接/事务和在线快照能力，不直接复制活动 db/wal 文件，不在 API/聊天事件循环执行大文件同步处理。
+单数据库一致不足以证明完整实例一致。实现 ADR 必须列出逻辑一致性组：至少 memory 与其回想进度/所引用账本、插件状态与其版本/清单/配置、管理提交证据与对应数据、资产引用与内容。为组建立共同捕获边界或可核验版本链；不能拿各自不同时刻的有效文件冒充同一组快照。
+跨组可以记录不同捕获时间，不承诺整个世界在同一微秒冻结；组间有引用的也必须核验。外部消息送达事实不可能靠本地快照倒退，恢复按 §9。
+本体采用跨进程协调捕获与短暂提交门闩，固定锁顺序；捕获前等待组内正在提交的逻辑操作到安全边界，固定数据库读视图/文件版本后立即释放。长时间拷贝、加密、校验不得持有业务提交门闩。每次捕获门闩持有工程默认上限 250 毫秒、等待上限 2 秒；超时放弃本次捕获并释放，不能为凑成功延长聊天阻塞。已持有的 SQLite 视图/不可变文件持续有效至物化完成，之后释放；不得先释放再读取活动文件。
+迁移、restore/apply、版本升级、配置切换等跨组件变更与该捕获边界互斥；不能调用危险操作的恢复入口来取得备份。遇到正在迁移或恢复受阻，标记组件 unavailable，本次为 partial/failed，原运行/恢复规则不变。
+备份最多单工作进程、分批 I/O、可取消，忙时让步；不承诺固定耗时。若固定视图导致 WAL 或临时空间快速增长，取消普通备份并释放视图，不能拖垮业务磁盘。阻塞/异常的 provider 只能使备份失败/部分，不得通过杀伴侣或偷偷重启来解锁；违反插件契约的情况单独审计。
+
+这是在线备份要求下的新公共契约，须先同步 sdk-spec、清单 Schema 和 CHANGELOG，再实现。插件仍只 import clytie.sdk。
+清单新增可选 `backup`：`mode` 为 `stateless | snapshot | unsupported`；省略按 unsupported。snapshot 模式需在 `contributes` 声明唯一 `backup.snapshot` factory，按现有 factory 约定返回提供者；其他模式不允许声明。stateless 表示没有需恢复的业务持久状态，宿主发现 plugin-data 内非声明缓存数据时拒绝该结论并报缺项。缓存不能由插件临时声明来掩盖已有业务数据。
+已停止且无活跃执行者/恢复日志的插件，可在取得原生命周期及数据锁后做离线一致复制；无需为备份启动插件。运行中的 unsupported 插件有状态时为缺项。支持状态在列表、启用计划及 status 展示，旧插件仍能正常启用，不把新增字段变成隐式停用。
+
+公共协议（以下 ticket/handle 是进程内对象，不持久化或跨 IPC 序列化）：
+
+```
+async prepare(request: BackupRequest, cancel: CancelToken) -> BackupTicket
+async capture(ticket: BackupTicket, epoch: str, cancel: CancelToken) -> BackupView
+async materialize(view: BackupView, sink: BackupSink, cancel: CancelToken) -> None
+async release(ticket: BackupTicket) -> None
+```
+
+- `BackupRequest`：operation_id、companion_id、plugin_id、目标 data_version、准备 deadline；这些由宿主填充。提供者不自行选择其他实例/伴侣。
+- prepare 在捕获门闩外准备资源，可在私有临时区域工作，不停止插件、发送消息、调用模型或改变业务事实；默认 10 秒。capture 在组捕获窗口内固定该 epoch 的稳定视图，不能在这里做大文件复制。准备期间业务改变时须重新验证，不允许返回旧快照却标上新 epoch。
+- `BackupView`：epoch、data_version、revision（提供者的稳定版本标识）以及提供者私有只读句柄。提供者保证 materialize 对应 capture 版本；宿主验证 epoch/版本、完整成员和关联，无法证明则不能算完整。实现允许不可变版本、数据库读视图等方式，不要求所有插件采用同一种存储。
+- `BackupSink` 只允许 `async write(relative_path: str, chunks: AsyncIterator[bytes]) -> BackupEntry`。宿主计算字节数与哈希；返回相对路径、size、sha256。路径限定当前插件备份命名空间，拒绝重复/穿越/链接，不把任意宿主文件句柄交给插件。sink 拒绝写入声明为凭据的内容；内容完整性仍由插件契约和测试保证，不以扫描代替。
+- materialize 在门闩释放后运行，只读稳定视图；取消/超时后不再接受其迟到写入。release 在成功、失败、取消时均执行且应幂等，默认 2 秒；记录释放失败，不吞掉它导致的资源泄漏。迟到资源继续被跟踪，不能把失去跟踪的 provider 说成已结束。
+- 该接口提供备份快照，不授予通用恢复执行脚本权限。每个 sink 相对路径精确映射到恢复目标 companions/<cid>/plugin-data/<pid>/ 下的同一相对路径；成员必须是同一 data_version 可直接加载的完整持久布局。数据库须输出可直接打开的一致数据库文件，不接受需要执行 SQL 导入脚本、反序列化可执行对象或运行转换程序才能还原的逻辑导出。需要转换的 provider 本阶段视为 unsupported，结果 partial。宿主只做安全文件重建和格式校验，插件只在用户后来正常启动时按原生命周期加载。

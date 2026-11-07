@@ -309,3 +309,33 @@
 - 完整备份系统、保留策略、副本目录、日志轮转、导出密钥（A4.3）；本里程碑仅实现第 4.3a 节管理操作必需的中断核验与恢复。
 - WebUI 页面本身、托盘图标（阶段三）。
 - 局域网或手机访问（不在计划内）。
+
+## A4.3 备份管理与维护模式（待实现）
+
+以下为已批准的 A4.3 契约，尚未实现、未经验收；完整依据为 `backup-spec.md`，不代表历史里程碑已提供这些能力。
+
+所有路径位于 `/api/v1/backup`；CLI `clytie backup ...` 仅调用 API。
+
+| 路径 / CLI | 行为及保护 |
+|---|---|
+| GET /status、/list；status、list | 分类别时间、覆盖、占用、缺项、保护阻碍、副本与旧实例，默认不返回私密内容 |
+| POST /create；create --scope memory或instance [--companion] | 明确生成 manual 包；返回 operation_id，复用查询/取消，身份去重 |
+| GET /operations/<id>；operation <id> | 阶段、提交与校验结果；无密钥或私密内容 |
+| POST /operations/<id>/cancel；cancel <id> | 确认；协作取消，不覆盖已提交事实 |
+| POST /verify；verify <id> | 独立校验、结果版本和时间，不把模型联网启动当验证 |
+| POST /config/plan、/config/apply；config plan/apply | 版本绑定、确认、保留注释，复用 A4.2 配置写回与历史 |
+| POST /restore/plan、/restore/apply；restore plan/apply | 源、目标、空间与兼容性计划；apply 确认及管理口令 |
+| POST /restore/source-stopped；restore source-stopped <id> | 目标 maintenance API 登记启动前源停用确认，确认及管理口令；同机源活跃拒绝 |
+| POST /restore/acknowledge；restore acknowledge <id> | 正常启动后核验并登记切换完成；确认，不自动改环境变量或启动平台 |
+| POST /memory/plan；memory-plan <backup_id> | memory 备份源适配到原记忆计划；后续查询/预览/apply/undo 沿用原入口与保护 |
+| POST /cleanup/plan、/cleanup/apply；cleanup plan/apply | 分类明确的备份/旧实例清理；apply 确认及管理口令，重新核验保护 |
+| GET /key/fingerprint；show-key-fingerprint | 只显示指纹/保管确认状态 |
+| POST /key/export、/key/verify、/key/acknowledge；export-key、verify-key、acknowledge-key | 导出确认及管理口令；核验不回传密钥；保管声明不等于核验 |
+
+全部非 GET 审计，默认只用逻辑编号/原因码/数量，不把秘密、真实源内容或任意错误原文放入日志。需要展示本机路径时只给已认证管理用户，不传播到外发通知。管理 API 的 plan 根据服务器数据判断保护等级，不能信任客户端声称低风险。
+结果至少分开 creation（complete/partial/failed/cancelled）、verification、retention、mirror、restore_readiness；总体成功不能覆盖其中失败。常见原因码含 capture_busy、snapshot_unsupported、snapshot_inconsistent、space_insufficient、retention_protected、mirror_unavailable、mirror_identity_mismatch、restore_incompatible、restore_target_not_empty、restore_recovery_blocked、continuity_unverified。映射沿用 API 的鉴权/确认/冲突规则，ADR 给出完整映射表与 JSON Schema，不用解析自由文本驱动逻辑。
+
+### 维护模式
+
+正常管理继续走 API。旧实例不可启动时，新增显式 `supervisor start --maintenance`：使用用户单独指定的管理 home（通过原 CLYTIE_HOME 选择），只启动本机管理 API，不启动伴侣、平台、插件、自动备份或模型。允许空管理 home，建立最小管理元数据/通行证，不伪造伴侣配置或空记忆。执行 restore apply 的管理目录必须与尚未恢复完成的目标分开。目标已提交 ready_for_switch 后，可以按 §8.4 在目标自身以 maintenance 模式启动 API 完成切换前确认；不能在 incomplete 目标启动任何模式。
+这是本里程碑新增的恢复引导模式，不把 CLI 变成绕过 API 的离线业务实现。鉴权、Host/Origin、CSRF、管理口令及停止规则仍与 A4.2 相同；首次没有口令沿用原明确提醒/CLI 确认规则，不声称网页已可登录。恢复源密钥由用户显式提供本机文件路径，后端不记录原文、不通过 URL/CLI 参数接收密钥值，不自动扫描旧私有目录找密钥。

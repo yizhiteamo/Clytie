@@ -1,5 +1,11 @@
 # 变更记录
 
+## A4.3（规格同步，未实现、未验收）
+
+- 新增 backup-spec：在线一致备份、分类结果、滚动容量、副本、维护恢复与明确切换、旧实例登记、密钥和日志维护。
+- SDK 增加可选 backup.snapshot 协议及 backup.mode；旧清单缺省 unsupported 但继续正常启用，不自动停插件。ticket/handle 仅进程内使用；恢复不执行插件脚本。
+- complete instance 恢复保留经核验的回想进度；原记忆导出包与停用跳过规则不变。新能力尚未实现，不据此修改历史版本验收结论。
+
 ## 0.8.0（A4.1，待验收）
 
 - 新增可选 Channel.state、ChannelState、PluginUnavailable 结构化启动错误及 notifier.outward；原有平台无需实现 state。

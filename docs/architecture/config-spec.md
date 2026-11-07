@@ -273,3 +273,25 @@ Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 
 | `notify.cooldown_hours` | 整数 1–168（6） |
 
 插件清单的 `notifier` 新增可选字段 `outward: bool`（`false`）。
+
+## A4.3 实例备份配置（待实现）
+
+以下为已批准的 A4.3 契约，尚未实现、未经验收；完整依据为 `backup-spec.md`，不代表历史里程碑已提供这些能力。
+
+| 字段 | 默认及校验 |
+|---|---|
+| enabled | true；关闭不删除已有备份 |
+| memory.enabled / memory.debounce_seconds | true / 300，整数 1–3600 |
+| schedule.at / schedule.days | 03:00 / []；HH:MM，星期范围沿用 at，空为每日；实例 timezone |
+| schedule.catch_up | true |
+| retention.recent_memory | 12，整数且不小于最低保留数 |
+| retention.daily_days / weekly_weeks / monthly_months | 30 / 52 / null；正整数或相应层 0 禁用，monthly null 为不按月龄到期；容量仍可淘汰 |
+| retention.minimum_per_group | 3，不小于 3；降低保护底线不作为普通配置开放 |
+| retention.target_gib | 20，正数或 null；允许小于单包，显示不可满足而非截断 |
+| disk.reserve_gib | 1，正数 |
+| mirror.enabled / mirror.path | false / null；启用必须明确目录并通过仓库确认 |
+| mirror.recent / mirror.monthly_months / mirror.minimum | 7 / 12 / 3；minimum 至少 3，其余不得小于保护底线的有效含义 |
+| old_instances.warn_count / warn_gib | 3 / 20，正数，只影响提醒 |
+| logs.rotate_mib / archives | 10 / 10，正整数，普通日志，不覆盖审计 |
+
+配置计划显示下次执行时间、保留影响、预算范围与超额语义；调整预算不当场删文件，下一次成功自动备份按新版本计算。降低保留期限/关闭备份/修改副本目录需要确认，其他更改也审计；Schema 未知字段报错。A4.3 提供 API/CLI，WebUI 以后复用。

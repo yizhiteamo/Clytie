@@ -165,3 +165,27 @@ plugins/<id>/
 
 - 索引 `plugins/catalog.json` 由各插件清单生成（id、版本、简介、分类、依赖、权限、更新说明）。
 - 先只提供官方插件；格式按以后可以加入第三方来源设计（来源地址、签名字段预留）。
+
+## A4.3 在线备份支持（待实现）
+
+以下为已批准的 A4.3 契约，尚未实现、未经验收；完整依据为 `backup-spec.md`，不代表历史里程碑已提供这些能力。
+
+这是在线备份要求下的新公共契约，须先同步 sdk-spec、清单 Schema 和 CHANGELOG，再实现。插件仍只 import clytie.sdk。
+清单新增可选 `backup`：`mode` 为 `stateless | snapshot | unsupported`；省略按 unsupported。snapshot 模式需在 `contributes` 声明唯一 `backup.snapshot` factory，按现有 factory 约定返回提供者；其他模式不允许声明。stateless 表示没有需恢复的业务持久状态，宿主发现 plugin-data 内非声明缓存数据时拒绝该结论并报缺项。缓存不能由插件临时声明来掩盖已有业务数据。
+已停止且无活跃执行者/恢复日志的插件，可在取得原生命周期及数据锁后做离线一致复制；无需为备份启动插件。运行中的 unsupported 插件有状态时为缺项。支持状态在列表、启用计划及 status 展示，旧插件仍能正常启用，不把新增字段变成隐式停用。
+
+公共协议（以下 ticket/handle 是进程内对象，不持久化或跨 IPC 序列化）：
+
+```
+async prepare(request: BackupRequest, cancel: CancelToken) -> BackupTicket
+async capture(ticket: BackupTicket, epoch: str, cancel: CancelToken) -> BackupView
+async materialize(view: BackupView, sink: BackupSink, cancel: CancelToken) -> None
+async release(ticket: BackupTicket) -> None
+```
+
+- `BackupRequest`：operation_id、companion_id、plugin_id、目标 data_version、准备 deadline；这些由宿主填充。提供者不自行选择其他实例/伴侣。
+- prepare 在捕获门闩外准备资源，可在私有临时区域工作，不停止插件、发送消息、调用模型或改变业务事实；默认 10 秒。capture 在组捕获窗口内固定该 epoch 的稳定视图，不能在这里做大文件复制。准备期间业务改变时须重新验证，不允许返回旧快照却标上新 epoch。
+- `BackupView`：epoch、data_version、revision（提供者的稳定版本标识）以及提供者私有只读句柄。提供者保证 materialize 对应 capture 版本；宿主验证 epoch/版本、完整成员和关联，无法证明则不能算完整。实现允许不可变版本、数据库读视图等方式，不要求所有插件采用同一种存储。
+- `BackupSink` 只允许 `async write(relative_path: str, chunks: AsyncIterator[bytes]) -> BackupEntry`。宿主计算字节数与哈希；返回相对路径、size、sha256。路径限定当前插件备份命名空间，拒绝重复/穿越/链接，不把任意宿主文件句柄交给插件。sink 拒绝写入声明为凭据的内容；内容完整性仍由插件契约和测试保证，不以扫描代替。
+- materialize 在门闩释放后运行，只读稳定视图；取消/超时后不再接受其迟到写入。release 在成功、失败、取消时均执行且应幂等，默认 2 秒；记录释放失败，不吞掉它导致的资源泄漏。迟到资源继续被跟踪，不能把失去跟踪的 provider 说成已结束。
+- 该接口提供备份快照，不授予通用恢复执行脚本权限。每个 sink 相对路径精确映射到恢复目标 companions/<cid>/plugin-data/<pid>/ 下的同一相对路径；成员必须是同一 data_version 可直接加载的完整持久布局。数据库须输出可直接打开的一致数据库文件，不接受需要执行 SQL 导入脚本、反序列化可执行对象或运行转换程序才能还原的逻辑导出。需要转换的 provider 本阶段视为 unsupported，结果 partial。宿主只做安全文件重建和格式校验，插件只在用户后来正常启动时按原生命周期加载。
