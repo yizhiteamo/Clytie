@@ -45,6 +45,7 @@ jobs:
       - name: API and management subprocess smoke
         run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
+        id: offline_tests
         run: uv run --no-sync pytest
       - name: Fixed pre-owner baseline (text, database, asset)
         run: uv run --no-sync python scripts/benchmark_storage_reference.py --output .cache/backup-performance/reference-standard --scales small_text large_database large_asset --requests 800 --interval 0.025 --repeats 3 --conditions-note "Same CI runner; fixed old commit; sequential after tests; unrelated host load unknown"
@@ -58,6 +59,9 @@ jobs:
         run: uv run --no-sync python scripts/benchmark_storage_control.py --output .cache/backup-performance/control --repeats 3
       - name: Evaluate storage performance evidence
         run: uv run --no-sync python scripts/evaluate_storage_performance.py --candidate .cache/backup-performance/standard .cache/backup-performance/files --baseline .cache/backup-performance/reference-standard .cache/backup-performance/reference-files --control .cache/backup-performance/control --output .cache/backup-performance/evaluation
+      - name: Independent fictional storage lock diagnosis
+        if: always() && steps.offline_tests.outcome == 'success'
+        run: uv run --no-sync python scripts/diagnose_storage_lock.py --scale large_database --requests 800 --interval 0.025 --output .cache/backup-performance/lock-diagnosis
       - name: Scan performance summaries
         id: performance_scan
         if: always()

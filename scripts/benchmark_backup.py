@@ -91,6 +91,39 @@ def percentiles(values):
     }
 
 
+@contextmanager
+def observe_capture_lock(coordinator, waiting, holds, waits):
+    attempted, acquired = perf_counter(), False
+    try:
+        with coordinator._lock():
+            acquired = True
+            waits.append((perf_counter() - waiting) * 1000)
+            yield
+    finally:
+        # Production checks its deadline after release. Observe the same full
+        # interval, including a slow or failed underlying __exit__.
+        if acquired:
+            holds.append((perf_counter() - attempted) * 1000)
+
+
+async def measurement_thread(function, *args):
+    """测量器取消等待也必须等实际扫描/线程退出；不遗弃收尾执行者。"""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()
+        raise
+
+
 def rss_bytes():
     if os.name == "nt":
 
@@ -297,7 +330,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
                 )
             stop.wait(0.05)
 
-    sampler = threading.Thread(target=sample, daemon=True)
+    sampler = threading.Thread(target=sample, name="benchmark-resource-sampler", daemon=True)
     sampler.start()
     loop = asyncio.get_running_loop()
     clock_done = False
@@ -415,14 +448,8 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
 
                 @contextmanager
                 def _lock(self):
-                    attempted = perf_counter()
-                    with coordinator._lock():
-                        # 获取包括锁文件 fsync；持有预算按生产实现从尝试获取前计。
-                        capture_waits.append((perf_counter() - waiting) * 1000)
-                        try:
-                            yield
-                        finally:
-                            capture_holds.append((perf_counter() - attempted) * 1000)
+                    with observe_capture_lock(coordinator, waiting, capture_holds, capture_waits):
+                        yield
 
             waiting = perf_counter()
             view = await original_capture(paths, ObservedCoordinator(), **kwargs)
@@ -476,17 +503,21 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         if backup:
             jobs.append(do_backup())
         await asyncio.gather(*jobs)
-        peak["temporary"] = max(peak["temporary"], tree_bytes(work))
+        with phase("measurement_final_disk_scan"):
+            peak["temporary"] = max(peak["temporary"], await measurement_thread(tree_bytes, work))
         persisted_counter = await run_sync(store, store.meta, "benchmark_counter")
         owner_status_at_end = owner.storage_owner.status()
         resource_samples.append({"at_s": perf_counter() - origin, **owner_status_at_end})
     finally:
-        clock_done = True
         stop.set()
-        sampler.join()
-        await owner.host.close()
-        await owner.storage_owner.close()
-        owner.runtime.close()
+        try:
+            with phase("measurement_sampler_exit"):
+                await measurement_thread(sampler.join)
+        finally:
+            clock_done = True
+            await owner.host.close()
+            await owner.storage_owner.close()
+            owner.runtime.close()
     overlap = [
         s
         for s in samples
@@ -512,6 +543,8 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             ]
         )
     result = {
+        # Process-local monotonic reading, solely for diagnostic timeline alignment.
+        "measurement_origin_s": origin,
         "scale": name,
         "scale_parameters": scale_override or SCALES[name],
         "seed": SEED,
@@ -535,6 +568,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         "persisted_counter": persisted_counter,
         "owner_status_at_end": owner_status_at_end,
         "owner_thread_alive_after_close": owner.storage_owner._thread.is_alive(),
+        "sampler_thread_alive_after_close": sampler.is_alive(),
         "snapshot_threads_alive_after_close": sum(t.is_alive() for t in snapshot_threads),
         "resource_samples": resource_samples,
         "capture_gate_hold_ms": percentiles(capture_holds),
@@ -738,6 +772,7 @@ async def main(args):
             else None
         ),
         "method_id": "fixed-query-coordinated-meta-fake-model-v1",
+        "measurement_revision": "capture-release-and-async-measurement-teardown-v2",
         "commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
@@ -758,6 +793,9 @@ async def main(args):
             "Samples include scheduling delay (no coordinated omission); tails retain outliers.",
             "MockClock advanced by benchmark driver; timings use perf_counter only.",
             "Capture gate body/wait observed with wall clock; original policy/checkpoints unchanged.",
+            "Measurement v2 includes underlying capture-lock release, including failed exits; previous raw results retained.",
+            "Final disk scan and sampler join run off-loop and settle before return; their phases remain in raw evidence.",
+            "Source assembly shares the benchmark request loop; production source assembly runs in a separate backup process.",
             "Issue #72 thresholds apply; incomplete full-window load coverage blocks acceptance.",
             "Diagnostic timings and thread stack samples add observer overhead; no local variables are collected.",
             "Phase overlap is temporal association, not proof of causation; all repeats and adverse results retained.",

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,99 @@ def test_percentiles_preserve_tail_and_empty_is_explicit():
         "max": 100,
     }
     assert module.percentiles([]) is None
+
+
+@pytest.mark.parametrize("exit_fails", [False, True])
+def test_capture_hold_includes_real_exit_even_when_release_fails(monkeypatch, exit_fails):
+    module = benchmark()
+    now, holds, waits = [0.0], [], []
+    monkeypatch.setattr(module, "perf_counter", lambda: now[0])
+
+    @contextmanager
+    def lock():
+        now[0] = 0.01
+        try:
+            yield
+        finally:
+            now[0] = 0.30
+            if exit_fails:
+                raise OSError("fictional release failure")
+
+    coordinator = SimpleNamespace(_lock=lock)
+    try:
+        with module.observe_capture_lock(coordinator, 0.0, holds, waits):
+            now[0] = 0.02
+    except OSError:
+        assert exit_fails
+    assert holds == [300.0]
+    assert waits == [10.0]
+
+
+async def test_measurement_thread_cancellation_waits_for_real_completion():
+    import asyncio
+    import threading
+
+    module = benchmark()
+    loop = asyncio.get_running_loop()
+    entered = loop.create_future()
+    release, finished = threading.Event(), threading.Event()
+
+    def operation():
+        loop.call_soon_threadsafe(entered.set_result, None)
+        try:
+            release.wait(5)
+        finally:
+            finished.set()
+
+    task = asyncio.create_task(module.measurement_thread(operation))
+    await entered
+    task.cancel()
+    checkpoint = loop.create_future()
+    loop.call_soon(checkpoint.set_result, None)
+    await checkpoint
+    assert not task.done()
+    assert not finished.is_set()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+async def test_final_resource_scan_and_sampler_join_never_run_on_loop(tmp_path, monkeypatch):
+    import threading
+
+    module = benchmark()
+    main_thread = threading.get_ident()
+    scan_threads, join_threads = [], []
+    original_scan, original_join = module.tree_bytes, threading.Thread.join
+
+    def scan(path):
+        scan_threads.append(threading.get_ident())
+        return original_scan(path)
+
+    def join(thread, *args, **kwargs):
+        if thread.name == "benchmark-resource-sampler":
+            join_threads.append(threading.get_ident())
+        return original_join(thread, *args, **kwargs)
+
+    monkeypatch.setattr(module, "tree_bytes", scan)
+    monkeypatch.setattr(threading.Thread, "join", join)
+    result = await module.run_case(
+        tmp_path / "case",
+        "small_text",
+        backup=False,
+        requests=2,
+        interval=0.01,
+        scale_override=(2, 1, 16),
+    )
+    assert scan_threads and all(thread != main_thread for thread in scan_threads)
+    assert join_threads and all(thread != main_thread for thread in join_threads)
+    assert result["sampler_thread_alive_after_close"] is False
+    assert {row["name"] for row in result["phases"]} == {
+        "measurement_final_disk_scan",
+        "measurement_sampler_exit",
+    }
+    assert all(row["start_s"] >= result["samples"][-1]["end_s"] for row in result["phases"])
 
 
 def adverse_result():
@@ -168,6 +262,8 @@ async def test_benchmark_real_online_capture_and_fixed_load(tmp_path):
         "online_capture",
         "pack",
         "unpack_verify",
+        "measurement_final_disk_scan",
+        "measurement_sampler_exit",
     }
     assert all(row["end_s"] >= row["start_s"] for row in result["phases"])
 
