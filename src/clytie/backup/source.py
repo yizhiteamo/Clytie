@@ -412,6 +412,155 @@ async def _thread(function, check):
         raise
 
 
+def _prepare_source(home, staging, scope, cid, repo_root, check):
+    home, staging = Path(home).resolve(), Path(staging).absolute()
+    contained(Path(staging.anchor), staging)
+    if staging.exists() and any(staging.iterdir()):
+        raise SourceError("capture_target_not_empty")
+    staging.mkdir(parents=True, exist_ok=True)
+    root = Path(repo_root or repository_root())
+    instance, documents, exclusions = _configuration(home, root)
+    selected = [identifier(cid)] if scope == "memory" else instance["companions"]
+    if any(c not in instance["companions"] for c in selected):
+        raise SourceError("capture_companion_unknown")
+    manifests = discover(root / "plugins", home / "plugins", repo_root=root)
+    result = {
+        key: []
+        for key in ("files", "companions", "plugins", "assets", "consistency_groups", "missing")
+    }
+    versions = {name: _hash(raw) for name, raw in documents.items()}
+    check()
+    return home, staging, root, documents, exclusions, selected, manifests, result, versions
+
+
+def _work_directory(staging, temporaries):
+    work = staging.parent / (".capture-" + uuid4().hex)
+    work.mkdir()
+    temporaries.append(str(work))
+    return work
+
+
+def _deployment_source(home, work, selected, root, check):
+    from .deployment_capture import capture_deployment
+
+    return capture_deployment(home, work, selected, root, check)
+
+
+def _publish_source_documents(
+    home,
+    staging,
+    work,
+    deployment_entries,
+    documents,
+    exclusions,
+    result,
+    epoch,
+    audit_writers,
+    check,
+):
+    if deployment_entries is not None:
+        for entry in deployment_entries:
+            check()
+            destination = contained(staging, staging / entry["path"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            publish_no_replace(work / entry["path"], destination)
+        result["files"].extend(deployment_entries)
+        if deployment_entries:
+            result["consistency_groups"].append(_group(epoch, deployment_entries))
+    config_entries = []
+    for name, raw in documents.items():
+        check()
+        document = redact_document(yaml.safe_load(raw), name, exclusions)
+        config_entries.append(
+            _put(staging, name, yaml.safe_dump(document, allow_unicode=True).encode())
+        )
+        if name != "clytie.local.yaml":
+            companion_id = name.split("/")[1]
+            for relative in document.get("persona", {}).get("files", {}).values():
+                check()
+                path = contained(
+                    home / "companions" / companion_id / "persona",
+                    home / "companions" / companion_id / "persona" / relative,
+                )
+                target = path.relative_to(home).as_posix()
+                config_entries.append(_put(staging, target, _small(path)))
+    result["files"].extend(config_entries)
+    result["consistency_groups"].append(_group(epoch, config_entries))
+    state_entries = []
+    for name in (
+        "supervisor/silence.json",
+        "supervisor/notify-state.json",
+        "supervisor/old-instances.json",
+    ):
+        path = contained(home, home / name)
+        if path.exists():
+            state_entries.append(_put(staging, name, _small(path)))
+    if (home / "supervisor/audit.jsonl").exists() and not audit_writers:
+        result["missing"].append({"component": "audit", "reason": "audit_source_unavailable"})
+    for writer in audit_writers:
+        check()
+        rows = writer.seal()
+        audit_rows = []
+        for row in rows:
+            copied = _copy(home, home / row["path"], staging, row["path"], check)
+            state_entries.append(copied)
+            audit_rows.append(dict(path=row["path"], size=copied["size"], sha256=copied["sha256"]))
+        state_entries.append(
+            _put(
+                staging,
+                "supervisor/audit.jsonl.rotation.json",
+                json.dumps(
+                    dict(schema_version=1, audit=True, restore_index=True, archives=audit_rows)
+                ).encode(),
+            )
+        )
+    if state_entries:
+        result["files"].extend(state_entries)
+        result["consistency_groups"].append(_group(epoch, state_entries))
+    check()
+
+
+def _finish_source(
+    home,
+    staging,
+    scope,
+    source_instance_id,
+    epoch,
+    exclusions,
+    versions,
+    result,
+    temporaries,
+    check,
+):
+    with config_commit_lock(home):
+        if any(_hash(_small(home / name)) != hashed for name, hashed in versions.items()):
+            result["missing"].append(
+                {"component": "configuration", "reason": "snapshot_inconsistent"}
+            )
+    if scope == "instance":
+        from .assets import consolidate
+
+        consolidate(staging, result, epoch)
+    manifest = {
+        "schema_version": 2 if result["assets"] else 1,
+        "scope": scope,
+        "completeness": "partial" if result["missing"] else "complete",
+        "source_instance_id": source_instance_id,
+        "source_registration": source_registration(home),
+        "code_version": version("clytie"),
+        "credential_exclusions": exclusions if scope == "instance" else [],
+        "configuration_versions": versions,
+        **{k: result[k] for k in result if k != "files"},
+    }
+    check()
+    return {
+        "manifest": manifest,
+        "files": result["files"],
+        "missing": result["missing"],
+        "temporary_directories": temporaries,
+    }
+
+
 async def capture_instance(
     home,
     clock,
@@ -429,27 +578,22 @@ async def capture_instance(
 ):
     if scope not in {"instance", "memory"} or not source_instance_id or not epoch:
         raise SourceError("capture_request_invalid")
-    home, staging = Path(home).resolve(), Path(staging).absolute()
-    contained(Path(staging.anchor), staging)
-    if staging.exists() and any(staging.iterdir()):
-        raise SourceError("capture_target_not_empty")
-    staging.mkdir(parents=True, exist_ok=True)
-    root = Path(repo_root or repository_root())
-    instance, documents, exclusions = _configuration(home, root)
-    selected = [identifier(cid)] if scope == "memory" else instance["companions"]
-    if any(c not in instance["companions"] for c in selected):
-        raise SourceError("capture_companion_unknown")
-    manifests = discover(root / "plugins", home / "plugins", repo_root=root)
-    result = {
-        key: []
-        for key in ("files", "companions", "plugins", "assets", "consistency_groups", "missing")
-    }
-    versions = {name: _hash(raw) for name, raw in documents.items()}
+    (
+        home,
+        staging,
+        root,
+        documents,
+        exclusions,
+        selected,
+        manifests,
+        result,
+        versions,
+    ) = await _thread(
+        lambda tick: _prepare_source(home, staging, scope, cid, repo_root, tick), check
+    )
     temporaries = []
     for companion_id in selected:
-        work = staging.parent / (".capture-" + uuid4().hex)
-        work.mkdir()
-        temporaries.append(str(work))
+        work = await _thread(lambda _: _work_directory(staging, temporaries), check)
         try:
             if companion_id in online_ids:
                 if online is None:
@@ -487,14 +631,11 @@ async def capture_instance(
                 }
             )
     if scope == "instance":
-        from .deployment_capture import capture_deployment
-
-        work = staging.parent / (".capture-" + uuid4().hex)
-        work.mkdir()
-        temporaries.append(str(work))
+        work = await _thread(lambda _: _work_directory(staging, temporaries), check)
+        deployment_entries = None
         try:
             deployment_entries = await _thread(
-                lambda tick: capture_deployment(home, work, selected, root, tick), check
+                lambda tick: _deployment_source(home, work, selected, root, tick), check
             )
         except Exception as exc:
             result["missing"].append(
@@ -505,91 +646,33 @@ async def capture_instance(
                     else "deployment_unavailable",
                 }
             )
-        else:
-            for entry in deployment_entries:
-                destination = contained(staging, staging / entry["path"])
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                publish_no_replace(work / entry["path"], destination)
-            result["files"].extend(deployment_entries)
-            if deployment_entries:
-                result["consistency_groups"].append(_group(epoch, deployment_entries))
-        config_entries = []
-        for name, raw in documents.items():
-            document = redact_document(yaml.safe_load(raw), name, exclusions)
-            config_entries.append(
-                _put(staging, name, yaml.safe_dump(document, allow_unicode=True).encode())
-            )
-            if name != "clytie.local.yaml":
-                companion_id = name.split("/")[1]
-                for relative in document.get("persona", {}).get("files", {}).values():
-                    path = contained(
-                        home / "companions" / companion_id / "persona",
-                        home / "companions" / companion_id / "persona" / relative,
-                    )
-                    target = path.relative_to(home).as_posix()
-                    config_entries.append(_put(staging, target, _small(path)))
-        result["files"].extend(config_entries)
-        result["consistency_groups"].append(_group(epoch, config_entries))
-        state_entries = []
-        for name in (
-            "supervisor/silence.json",
-            "supervisor/notify-state.json",
-            "supervisor/old-instances.json",
-        ):
-            path = contained(home, home / name)
-            if path.exists():
-                state_entries.append(_put(staging, name, _small(path)))
-        if (home / "supervisor/audit.jsonl").exists() and not audit_writers:
-            result["missing"].append({"component": "audit", "reason": "audit_source_unavailable"})
-        for writer in audit_writers:
-            rows = await _thread(lambda tick: writer.seal(), check)
-            audit_rows = []
-            for row in rows:
-                copied = await _thread(
-                    lambda tick, row=row: _copy(
-                        home, home / row["path"], staging, row["path"], tick
-                    ),
-                    check,
-                )
-                state_entries.append(copied)
-                audit_rows.append(
-                    dict(path=row["path"], size=copied["size"], sha256=copied["sha256"])
-                )
-            state_entries.append(
-                _put(
-                    staging,
-                    "supervisor/audit.jsonl.rotation.json",
-                    json.dumps(
-                        dict(schema_version=1, audit=True, restore_index=True, archives=audit_rows)
-                    ).encode(),
-                )
-            )
-        if state_entries:
-            result["files"].extend(state_entries)
-            result["consistency_groups"].append(_group(epoch, state_entries))
-    with config_commit_lock(home):
-        if any(_hash(_small(home / name)) != hashed for name, hashed in versions.items()):
-            result["missing"].append(
-                {"component": "configuration", "reason": "snapshot_inconsistent"}
-            )
-    if scope == "instance":
-        from .assets import consolidate
-
-        consolidate(staging, result, epoch)
-    manifest = {
-        "schema_version": 2 if result["assets"] else 1,
-        "scope": scope,
-        "completeness": "partial" if result["missing"] else "complete",
-        "source_instance_id": source_instance_id,
-        "source_registration": source_registration(home),
-        "code_version": version("clytie"),
-        "credential_exclusions": exclusions if scope == "instance" else [],
-        "configuration_versions": versions,
-        **{k: result[k] for k in result if k != "files"},
-    }
-    return {
-        "manifest": manifest,
-        "files": result["files"],
-        "missing": result["missing"],
-        "temporary_directories": temporaries,
-    }
+        await _thread(
+            lambda tick: _publish_source_documents(
+                home,
+                staging,
+                work,
+                deployment_entries,
+                documents,
+                exclusions,
+                result,
+                epoch,
+                audit_writers,
+                tick,
+            ),
+            check,
+        )
+    return await _thread(
+        lambda tick: _finish_source(
+            home,
+            staging,
+            scope,
+            source_instance_id,
+            epoch,
+            exclusions,
+            versions,
+            result,
+            temporaries,
+            tick,
+        ),
+        check,
+    )
