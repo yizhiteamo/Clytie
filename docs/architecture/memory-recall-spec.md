@@ -299,3 +299,7 @@ complete instance 包中账本、记忆和 recollect_progress 属于同一可核
 新增本体备份源适配器，不以第三方 memory.importer 身份加载。`POST /backup/memory/plan`（CLI `backup memory-plan <backup_id> --companion <cid> --mode new或merge或restore`）验证 memory 包、实例密钥和 companion_uid，将允许导入的记忆材料交给已有 Transfers 计划引擎。排除本机回想进度、进程/管理记录等运行状态；保留原生记忆的修订指纹、basis、来源、淡化与撤销，不降为第三方提议。
 结果仍是原 `/memory/import/plans/<plan_id>` 可查询的计划，执行仍走原 `/memory/import/apply`，模式/UID/冲突/可信程度/前置快照/停止要求/撤销导入及口令保护不变。apply 与内容预览重新校验源包和解密密钥；计划只存 source_type=backup、包指纹、密钥指纹及绑定信息，不保存明文或密钥。不是从 instance/partial 包任意抽取一部分覆盖当前库。
 源包在计划有效期、apply 或核验期间被引用保护；过期/完成/取消后释放，崩溃后按操作证据核验引用，不能永远占住也不能提前删。明文临时材料只在受控本次工作区，结果不返回原文，预览仍使用原明确内容入口。普通 memory import 的包口令/恢复码路径保持不变；源适配器字段及解密选择由服务端已保存的计划决定，不信任 apply 客户端换格式以绕过保护。
+
+## Issue #72：回想存储边界（用户已确认）
+
+回想读取材料经 storage-spec.md 的 StorageOwner 返回固定数据快照；模型调用在存储线程和事务外。提交命令在协调/事务内重验依赖及修订，记录与进度仍同事务提交。停用、取消、撤销过滤、场景投影和不回溯规则均保持，不将读取后的外部计算误当作已提交。

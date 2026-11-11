@@ -155,6 +155,7 @@ Clytie 是一个可复用的 AI 伴侣框架：**本体 + 插件**。本体提�
 | `docs/design/memory.md` | 记忆模型、可见等级、检索、经历、档案、软遗忘 |
 | `docs/design/conversation.md` | 上下文预算、人设分层、群聊行为、多伴侣协作 |
 | `docs/design/boundary.md` | 权限、关系边界保护、保障模式、过滤与出站检查 |
+| `docs/architecture/storage-spec.md` | Issue #72：存储 I/O 所有者、事务、容量、捕获、取消及性能验收 |
 | `docs/architecture/backup-spec.md` | A4.3 备份与维护：在线快照、保留与容量、副本、恢复切换、旧实例与密钥 |
 | `docs/architecture/api-spec.md` | A4.2 本机 API、登录、审计、CLI、后台运行与插件路由 |
 | `docs/architecture/supervisor-spec.md` | A4.1 守护进程：健康、重启、通知、安全停止、全部静默 |
