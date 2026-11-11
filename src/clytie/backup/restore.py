@@ -674,12 +674,25 @@ class RestoreManager:
         except (OSError, ValueError):
             raise RestoreError("restore_plan_invalid") from None
 
-    def _empty(self, target, source):
+    def _target_relation(self, target, source, envelope=None):
         _safe(target)
         target = target.resolve()
-        for forbidden in [*self.managed_paths, source.parent.resolve()]:
+        forbidden_paths = [*self.managed_paths, source.parent.resolve()]
+        registration = (envelope or {}).get("manifest", {}).get("source_registration")
+        if isinstance(registration, dict) and registration.get("machine_id") == machine_id():
+            recorded = registration.get("home")
+            if not isinstance(recorded, str) or not Path(recorded).is_absolute():
+                raise RestoreError("restore_incompatible")
+            # The authenticated historical path is only a deny boundary. Do not
+            # resolve, stat or discover an instance there: it grants no access.
+            forbidden_paths.append(Path(os.path.normpath(recorded)))
+        for forbidden in forbidden_paths:
             if target.is_relative_to(forbidden) or forbidden.is_relative_to(target):
                 raise RestoreError("restore_target_invalid")
+        return target
+
+    def _empty(self, target, source, envelope=None):
+        target = self._target_relation(target, source, envelope)
         if not target.parent.is_dir():
             raise RestoreError("restore_target_invalid")
         if target.exists() and (not target.is_dir() or any(target.iterdir())):
@@ -723,6 +736,9 @@ class RestoreManager:
         ):
             if path.exists():
                 prior = self._load(plan_id)
+                self._target_relation(
+                    Path(prior["target"]), Path(prior["source"]), prior["envelope"]
+                )
                 for item in (source, key_path, target):
                     _safe(Path(item))
                 if any(
@@ -770,11 +786,12 @@ class RestoreManager:
 
     def admit(self, plan_id, operation_id):
         plan = self._load(plan_id)
+        self._target_relation(Path(plan["target"]), Path(plan["source"]), plan["envelope"])
 
         def validate():
             target, source = Path(plan["target"]), Path(plan["source"])
             if (
-                self._empty(target, source) != plan["target_identity"]
+                self._empty(target, source, plan["envelope"]) != plan["target_identity"]
                 or identity(target.parent) != plan["parent_identity"]
             ):
                 raise RestoreError("restore_target_changed")
@@ -807,6 +824,7 @@ class RestoreManager:
             raise RestoreError("restore_target_invalid")
         key, before = key_path.read_bytes(), digest(source)
         envelope = unpack(source, workspace, key, check=self._checkpoint(workspace, check))
+        target_identity = self._empty(target, source, envelope)
         validation = validate_contents(workspace, envelope, repo_root=self.repo_root)
         if before != digest(source):
             raise RestoreError("restore_source_changed")
@@ -887,7 +905,7 @@ class RestoreManager:
                     return state
                 raise RestoreError("restore_recovery_blocked")
             if (
-                self._empty(target, source) != plan["target_identity"]
+                self._empty(target, source, plan["envelope"]) != plan["target_identity"]
                 or identity(target.parent) != plan["parent_identity"]
             ):
                 raise RestoreError("restore_target_changed")
@@ -960,6 +978,7 @@ class RestoreManager:
     def recover(self, plan_id):
         plan = self._load(plan_id)
         target = Path(plan["target"])
+        self._target_relation(target, Path(plan["source"]), plan["envelope"])
         with _hold(target):
             state = read_state(target)
             if not state or state["restore_id"] != plan_id:
