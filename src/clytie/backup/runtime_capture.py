@@ -291,6 +291,7 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
         _entry,
         _group,
         _hash,
+        _put,
         _small,
         _thread,
     )
@@ -303,6 +304,7 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
 
     asset_store = AssetStore(home, companion.clock)
     fixed_assets = {}
+    boundary_raw = None
     work = Path(work)
     base = home / "companions" / cid
     resources = host.memory_resources.get(cid)
@@ -423,13 +425,16 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                     await monitored(run.prepare())
 
             async def capture_providers(checkpoint):
-                nonlocal fixed_assets
+                nonlocal fixed_assets, boundary_raw
                 for run in providers.values():
                     checkpoint()
                     await run.capture(epoch)
                     checkpoint()
                 if scope == "instance":
                     _, fixed_assets = boundary(asset_store, cid)
+                    state_path = contained(home, base / "boundary/state.json")
+                    if state_path.exists():
+                        boundary_raw = _small(state_path)
 
             view = await capture_group(
                 {"memory": store.path, "ledger": ledger.path},
@@ -440,6 +445,8 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
             # 元数据和插件生命周期锁仍持有，业务提交门闩已经释放。
             paths = await monitored(view.materialize(work / ".core", check=check))
             view = None
+            if boundary_raw is not None:
+                entries.append(_put(work, f"companions/{cid}/boundary/state.json", boundary_raw))
             for pid, run in providers.items():
                 await monitored(run.materialize())
                 await run.release()

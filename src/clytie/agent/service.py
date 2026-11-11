@@ -938,7 +938,7 @@ class Agent:
                 self.warnings.append("task_card.private_name: configure external name")
                 if "task_card_private_name" not in self.boundary.warnings:
                     self.boundary.warnings.append("task_card_private_name")
-                    self.boundary.save()
+                    await run_sync(self.ledger, self.boundary.save)
             elif groups:
                 index = len(groups) - 1
                 intents[index] = intents[index].model_copy(

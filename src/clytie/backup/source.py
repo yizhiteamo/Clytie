@@ -222,9 +222,14 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
         ):
             raise SourceError("snapshot_unavailable")
         readers = {}
+        boundary_raw = None
         try:
             with companion_coordinator(home, cid, clock).commit():
                 _, fixed_assets = boundary(asset_store, cid) if scope == "instance" else (None, {})
+                if scope == "instance":
+                    state_path = contained(home, base / "boundary/state.json")
+                    if state_path.exists():
+                        boundary_raw = _small(state_path)
                 for kind, path in sources.items():
                     contained(home, path)
                     db = sqlite3.connect(
@@ -236,6 +241,8 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                     readers[kind] = db
                     db.execute("BEGIN")
                     db.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+            if boundary_raw is not None:
+                entries.append(_put(staging, f"companions/{cid}/boundary/state.json", boundary_raw))
             for kind, db in readers.items():
                 check()
                 name = f"companions/{cid}/{kind}/{kind}.sqlite3"
@@ -315,13 +322,11 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                 data = contained(home, base / "plugin-data" / pid)
                 paths = []
                 files = sorted(data.rglob("*")) if data.exists() else []
-                if files and metadata.backup_mode in {"unsupported", "stateless"}:
+                if files and metadata.backup_mode == "stateless":
                     missing.append(
                         {
                             "component": f"plugin:{cid}:{pid}",
-                            "reason": "snapshot_unsupported"
-                            if metadata.backup_mode == "unsupported"
-                            else "stateless_has_data",
+                            "reason": "stateless_has_data",
                         }
                     )
                 elif files:
@@ -482,6 +487,32 @@ async def capture_instance(
                 }
             )
     if scope == "instance":
+        from .deployment_capture import capture_deployment
+
+        work = staging.parent / (".capture-" + uuid4().hex)
+        work.mkdir()
+        temporaries.append(str(work))
+        try:
+            deployment_entries = await _thread(
+                lambda tick: capture_deployment(home, work, selected, root, tick), check
+            )
+        except Exception as exc:
+            result["missing"].append(
+                {
+                    "component": "deployment_documents",
+                    "reason": str(exc)
+                    if isinstance(exc, SourceError)
+                    else "deployment_unavailable",
+                }
+            )
+        else:
+            for entry in deployment_entries:
+                destination = contained(staging, staging / entry["path"])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                publish_no_replace(work / entry["path"], destination)
+            result["files"].extend(deployment_entries)
+            if deployment_entries:
+                result["consistency_groups"].append(_group(epoch, deployment_entries))
         config_entries = []
         for name, raw in documents.items():
             document = redact_document(yaml.safe_load(raw), name, exclusions)

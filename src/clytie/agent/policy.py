@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unicodedata
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 
 from clytie.backup.coordination import run_sync
@@ -87,7 +88,9 @@ class Boundary:
         self.warnings = self.state.setdefault("warnings", [])
 
     def save(self):
-        atomic_write(self.path, canonical(self.state))
+        coordinator = self.ledger.coordination
+        with coordinator.commit() if coordinator else nullcontext():
+            atomic_write(self.path, canonical(self.state))
 
     def audit(self, kind, **data):
         with self.ledger.transaction():
@@ -132,6 +135,11 @@ class Boundary:
         )
 
     async def report(self, trace, actor, category, cancel):
+        # 同一次报告的账本证据与持久计数不能被捕获边界切开。
+        # 异步等待门闩后只做同步提交，通知安排在后台执行。
+        return await run_sync(self.ledger, self._report, trace, actor, category, cancel)
+
+    def _report(self, trace, actor, category, cancel):
         enabled = self.config.get("categories", {})
         if (
             actor.role in {"owner", "peer"}
@@ -139,9 +147,7 @@ class Boundary:
             or not enabled.get(category, True)
         ):
             raise ValueError("invalid boundary category or actor")
-        await run_sync(
-            self.ledger,
-            self.audit,
+        self.audit(
             "boundary.report",
             trace_id=trace,
             actor_id=actor.actor_id,
@@ -165,9 +171,7 @@ class Boundary:
             )
             if notify:
                 row["notified_at"] = now.isoformat()
-            await run_sync(
-                self.ledger,
-                self.audit,
+            self.audit(
                 "boundary.paused",
                 trace_id=trace,
                 actor_id=actor.actor_id,
@@ -202,7 +206,7 @@ class Boundary:
         except (Exception, asyncio.CancelledError):
             if "boundary_notification_failed" not in self.warnings:
                 self.warnings.append("boundary_notification_failed")
-            self.save()
+            await run_sync(self.ledger, self.save)
             self.log.warning("boundary.notification_failed")
         finally:
             token.cancel("notification_finished")
@@ -212,6 +216,11 @@ class Boundary:
             await asyncio.gather(*tuple(self.notifications))
 
     def release(self, companion_id, actor_id):
+        coordinator = self.ledger.coordination
+        with coordinator.commit() if coordinator else nullcontext():
+            self._release(companion_id, actor_id)
+
+    def _release(self, companion_id, actor_id):
         if companion_id != self.ledger.companion_id:
             raise ValueError("wrong companion")
         row = self.state["actors"].get(actor_id)
