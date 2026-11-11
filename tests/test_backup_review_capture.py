@@ -221,16 +221,22 @@ async def test_online_boundary_capture_freezes_state_and_matching_audit(
     expected = json.loads(json.dumps(boundary.state))
     original = capture_module.capture_group
     concurrent = []
+    trigger_change = asyncio.Event()
+
+    async def unrelated_change():
+        await trigger_change.wait()
+        if change == "report":
+            await boundary.report("trace_b", actor, "romance", CancelToken())
+        else:
+            await run_sync(runtime.ledger, boundary.release, "companion_a", actor.actor_id)
+
+    # 无关业务在捕获链之外创建；provider 的子任务应继承重入拒绝标记。
+    concurrent.append(asyncio.create_task(unrelated_change()))
 
     async def capture_group(paths, coordinator, *, epoch, capture):
         async def during_gate(checkpoint):
             await capture(checkpoint)
-            operation = (
-                boundary.report("trace_b", actor, "romance", CancelToken())
-                if change == "report"
-                else run_sync(runtime.ledger, boundary.release, "companion_a", actor.actor_id)
-            )
-            concurrent.append(asyncio.create_task(operation))
+            trigger_change.set()
             await clock.drain(2)
             assert not concurrent[0].done()
 

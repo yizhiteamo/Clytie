@@ -132,7 +132,7 @@ async def capture_companion(companion, directory, *, epoch, check=None):
             "requires_groups": ["configuration", "plugins", "assets", "management"],
         }
     finally:
-        view.close()
+        await view.close()
 
 
 class _LiveProvider:
@@ -570,7 +570,7 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
         raise SourceError("snapshot_inconsistent") from None
     finally:
         if view is not None:
-            view.close()
+            await view.close()
         for run in providers.values():
             await run.release()
             if not run.result()["resource_pending"]:

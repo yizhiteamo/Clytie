@@ -219,7 +219,7 @@ async def test_real_sqlite_wal_growth_aborts_snapshot_and_releases_read_view(tmp
         db.execute("INSERT INTO facts VALUES('still writing')")
         db.commit()
     finally:
-        view.close()
+        await view.close()
         db.close()
 
 
