@@ -254,7 +254,8 @@ def test_long_measurement_counts_keep_exact_values_and_pass_public_scan(tmp_path
     result = adverse_result()
     count = 16 * 1024 + 3
     result["loop_delay_ms"] = dict(result["response_ms"], count=count)
-    text = benchmark().render_summary({}, [result])
+    result["stalled_stacks"] = [dict(stack=[dict(file="fixture.py", line=12, function="waiting")])]
+    text = benchmark().render_summary({}, [result, result])
     line = next(row for row in text.splitlines() if row.startswith("| 事件循环调度延迟 |"))
     displayed = line.split("|")[2].strip()
     assert displayed == "16 387"

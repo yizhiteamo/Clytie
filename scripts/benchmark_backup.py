@@ -519,7 +519,7 @@ def render_summary(machine, results):
     def fixed(value, unit=""):
         return "未测量" if value is None else f"{value:.3f}{unit}"
 
-    def count(value):
+    def integer_count(value):
         return f"{value:,}".replace(",", " ")
 
     def flag(value):
@@ -599,7 +599,7 @@ def render_summary(machine, results):
             metric = result.get(key, result.get("component_ms", {}).get(key))
             columns = (
                 (
-                    [count(metric["count"])]
+                    [integer_count(metric["count"])]
                     + [fixed(metric[p]) for p in ("p50", "p95", "p99", "max")]
                 )
                 if metric
