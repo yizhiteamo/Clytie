@@ -20,7 +20,7 @@ json_extract 缺少 INNOCUOUS 时，进入兼容路径。连接始终以 mode=ro
 打开并保持 query_only；不修改源文件、库中 Schema 或全局设置。
 
 该路径安装只读 authorizer，拒绝未列出的操作和函数；仅准许所需读取、核验
-PRAGMA、json_extract 和 like。此连接使用 trusted_schema=ON 以解析受影响的
+PRAGMA、json_extract、like 及既有进度边界查询的 coalesce/max。此连接使用 trusted_schema=ON 以解析受影响的
 表达式索引，但在任何数据查询和 integrity_check 前，逐项比对整个 Schema：
 名称、对象类型及 SQL 必须与本体建库语句生成的 sqlite_master 完全一致。
 只允许历史账本缺少两个后加的健康索引。未知/修改对象立即拒绝，不执行包内

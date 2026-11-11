@@ -86,6 +86,18 @@ def test_legacy_json_flags_do_not_change_memory_schema_policy(tmp_path, monkeypa
         restored.close()
 
 
+def test_legacy_json_flags_full_restore_checks_progress_and_apply(tmp_path, monkeypatch):
+    from tests.test_backup_restore import fixture_package
+
+    manager, package, key, target, work = fixture_package(tmp_path, monkeypatch)
+    _, calls = legacy_json(monkeypatch, tmp_path)
+    plan = manager.plan(package, key, target, work)
+    state = manager.apply(plan["id"])
+    assert state["data_state"] == "ready_for_switch"
+    assert manager.apply(plan["id"]) == state
+    assert "dangerous" not in calls
+
+
 @pytest.mark.parametrize("mutation", ["index", "view", "trigger", "check", "extra_index"])
 def test_legacy_json_flags_do_not_trust_modified_schema(tmp_path, monkeypatch, mutation):
     path = ledger_file(tmp_path)

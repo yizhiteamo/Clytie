@@ -256,7 +256,12 @@ def _legacy_ledger_schema(db):
     def authorize(action, first, second, database, source):
         if action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ}:
             return sqlite3.SQLITE_OK
-        if action == sqlite3.SQLITE_FUNCTION and second in {"json_extract", "like"}:
+        if action == sqlite3.SQLITE_FUNCTION and second in {
+            "json_extract",
+            "like",
+            "coalesce",
+            "max",
+        }:
             return sqlite3.SQLITE_OK
         if action == sqlite3.SQLITE_PRAGMA and first in {
             "trusted_schema",
