@@ -9,6 +9,7 @@ from weakref import WeakValueDictionary
 
 from clytie.plugin_host.locking import OperationBusy, file_lock
 from clytie.plugin_host.snapshots import contained, identifier
+from clytie.storage.capture_scope import capture_key, reject_capture_reentry
 
 _locals = WeakValueDictionary()
 _locals_guard = threading.Lock()
@@ -28,6 +29,7 @@ async def admission(store):
     if coordinator is None:
         yield
     else:
+        reject_capture_reentry(capture_key(coordinator.path))
         async with coordinator.admit():
             yield
 
