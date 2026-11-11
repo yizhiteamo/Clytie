@@ -18,7 +18,7 @@ import shutil
 import sqlite3
 import sys
 import threading
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from time import perf_counter  # noqa: TID251 -- benchmark measurement, not product time
 from types import SimpleNamespace
@@ -132,6 +132,20 @@ def tree_bytes(path):
     return total
 
 
+def frame_locations(frame):
+    """Only code locations, never locals, credentials or absolute host paths."""
+    result = []
+    while frame is not None and len(result) < 12:
+        path = Path(frame.f_code.co_filename)
+        try:
+            name = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            name = path.name
+        result.append(dict(file=name, line=frame.f_lineno, function=frame.f_code.co_name))
+        frame = frame.f_back
+    return result
+
+
 async def setup(directory, scale, *, core_assets=False):
     home = directory / "home"
     shutil.copytree(ROOT / "examples/home", home)
@@ -241,6 +255,10 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
     work.mkdir()
     peak = {"rss": rss_bytes(), "temporary": 0, "wal": 0}
     stop = threading.Event()
+    origin = perf_counter()
+    last_clock = origin
+    main_thread = threading.get_ident()
+    loop_delays, stalled_stacks, phases = [], [], []
 
     def sample():
         while not stop.is_set():
@@ -249,18 +267,29 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             peak["wal"] = max(
                 peak["wal"], sum(p.stat().st_size for p in owner.home.rglob("*-wal") if p.exists())
             )
+            now = perf_counter()
+            if now - last_clock > 0.1:
+                frame = sys._current_frames().get(main_thread)
+                stalled_stacks.append(
+                    dict(
+                        at_s=now - origin,
+                        delay_ms=(now - last_clock) * 1000,
+                        stack=frame_locations(frame),
+                    )
+                )
             stop.wait(0.05)
 
     sampler = threading.Thread(target=sample, daemon=True)
     sampler.start()
     loop = asyncio.get_running_loop()
-    origin = perf_counter()
-    last_clock = origin
     clock_done = False
 
     def tick():
         nonlocal last_clock
         now = perf_counter()
+        loop_delays.append(
+            dict(at_s=now - origin, delay_ms=max(0, now - last_clock - 0.005) * 1000)
+        )
         owner.clock.advance(now - last_clock)
         last_clock = now
         if not clock_done:
@@ -271,6 +300,15 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
     backup_start = backup_end = None
     capture_holds, capture_waits = [], []
     model = FakeModel(FakeContext(clock=owner.clock))
+
+    @contextmanager
+    def phase(name):
+        row = dict(name=name, start_s=perf_counter() - origin)
+        phases.append(row)
+        try:
+            yield
+        finally:
+            row["end_s"] = perf_counter() - origin
 
     async def wait_until(deadline):
         # Windows event-loop clock resolution may dispatch timers early. Never
@@ -289,17 +327,23 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             await wait_until(scheduled)
             start = perf_counter()
             waited = None
+            query_ms = commit_ms = model_ms = None
             try:
                 store.db.execute(
                     "SELECT data FROM benchmark_payload WHERE id=?",
                     (index % (scale_override or SCALES[name])[0],),
                 ).fetchone()
+                query_ms = (perf_counter() - start) * 1000
                 write_start = perf_counter()
                 async with admission(store):
                     waited = (perf_counter() - write_start) * 1000
+                    commit_start = perf_counter()
                     with store.transaction():
                         store.set_meta("benchmark_counter", index)
+                    commit_ms = (perf_counter() - commit_start) * 1000
+                model_start = perf_counter()
                 await model.generate(None, CancelToken())
+                model_ms = (perf_counter() - model_start) * 1000
             except Exception as exc:
                 errors.append({"index": index, "type": type(exc).__name__})
             samples.append(
@@ -310,6 +354,10 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
                     "end_s": perf_counter() - origin,
                     "response_ms": (perf_counter() - scheduled) * 1000,
                     "write_wait_ms": waited,
+                    "queue_delay_ms": (start - scheduled) * 1000,
+                    "query_ms": query_ms,
+                    "commit_ms": commit_ms,
+                    "model_ms": model_ms,
                 }
             )
 
@@ -320,7 +368,8 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         stage = work / "stage"
 
         async def online(cid, target, epoch):
-            return await capture_online(owner, target, epoch)
+            with phase("online_capture"):
+                return await capture_online(owner, target, epoch)
 
         original_capture = runtime_capture.capture_group
 
@@ -342,7 +391,10 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             return await original_capture(paths, ObservedCoordinator(), **kwargs)
 
         # Observe the real context body without changing deadlines or lock policy.
-        with patch.object(runtime_capture, "capture_group", observed_capture):
+        with (
+            phase("instance_capture"),
+            patch.object(runtime_capture, "capture_group", observed_capture),
+        ):
             captured = await capture_instance(
                 owner.home,
                 owner.clock,
@@ -354,10 +406,12 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
                 repo_root=ROOT,
             )
         package = work / "package.clytie-backup"
-        await asyncio.to_thread(pack, stage, package, b"b" * 32, captured["manifest"])
+        with phase("pack"):
+            await asyncio.to_thread(pack, stage, package, b"b" * 32, captured["manifest"])
         verified = work / "verified"
         verified.mkdir()
-        unpacked = await asyncio.to_thread(unpack, package, verified, b"b" * 32)
+        with phase("unpack_verify"):
+            unpacked = await asyncio.to_thread(unpack, package, verified, b"b" * 32)
         if name == "large_asset":
             from clytie.assets import AssetStore
             from clytie.backup.assets import materialize
@@ -406,6 +460,14 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         if samples and backup_start is not None
         else None
     )
+    for row in phases:
+        row["response_ms"] = percentiles(
+            [
+                sample["response_ms"]
+                for sample in samples
+                if sample["end_s"] >= row["start_s"] and sample["scheduled_s"] <= row["end_s"]
+            ]
+        )
     result = {
         "scale": name,
         "scale_parameters": scale_override or SCALES[name],
@@ -435,6 +497,14 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             else None
         ),
         "samples": samples,
+        "phases": phases,
+        "loop_delay_ms": percentiles([row["delay_ms"] for row in loop_delays]),
+        "loop_delays": loop_delays,
+        "stalled_stacks": stalled_stacks,
+        "component_ms": {
+            key: percentiles([s[key] for s in samples if s[key] is not None])
+            for key in ("queue_delay_ms", "query_ms", "commit_ms", "model_ms")
+        },
     }
     (directory / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
@@ -475,6 +545,10 @@ def render_summary(machine, results):
     for result in results:
         condition = "有备份" if result["with_backup"] else "无备份"
         lines.extend(["", f"## {text(result['scale'])} / {condition}", ""])
+        if "repeat" in result:
+            lines.append(
+                f"重复序号：{result['repeat']}；组内执行顺序：{result['order']}。所有重复均保留。"
+            )
         scale = result.get("scale_parameters")
         if scale:
             rows = f"{scale[0] / 1000:.3f} 千行" if scale[0] >= 10**4 else f"{scale[0]} 行"
@@ -506,20 +580,51 @@ def render_summary(machine, results):
                 "|---|---:|---:|---:|---:|---:|",
             ]
         )
-        for label, key in (
+        metrics = [
             ("响应", "response_ms"),
             ("写入等待", "write_wait_ms"),
             ("备份重叠响应", "overlap_response_ms"),
             ("捕获门闩持有", "capture_gate_hold_ms"),
             ("捕获门闩获取等待", "capture_gate_wait_ms"),
-        ):
-            metric = result.get(key)
+            ("事件循环调度延迟", "loop_delay_ms"),
+            ("请求排队延迟", "queue_delay_ms"),
+            ("同步查询", "query_ms"),
+            ("事务写入与提交", "commit_ms"),
+            ("假模型调用", "model_ms"),
+        ]
+        for label, key in metrics:
+            metric = result.get(key, result.get("component_ms", {}).get(key))
             columns = (
                 ([str(metric["count"])] + [fixed(metric[p]) for p in ("p50", "p95", "p99", "max")])
                 if metric
                 else ["未测量"] * 5
             )
             lines.append(f"| {label} | " + " | ".join(columns) + " |")
+        if result.get("phases"):
+            lines.extend(
+                ["", "| 阶段 | 起点 (s) | 终点 (s) | 关联响应 P99 (ms) |", "|---|---:|---:|---:|"]
+            )
+            for row in result["phases"]:
+                metric = row.get("response_ms")
+                lines.append(
+                    f"| {text(row['name'])} | {fixed(row['start_s'])} | {fixed(row['end_s'])} | "
+                    f"{fixed(metric['p99'] if metric else None)} |"
+                )
+            lines.append(
+                "阶段关联包含计划到达至完成区间重叠的请求；只表示时间关联，不直接证明因果。"
+            )
+        stacks = result.get("stalled_stacks", [])
+        lines.append(
+            f"- 慢事件循环栈采样数：{len(stacks)}（只含代码位置，无局部变量；未采到不证明无停顿）"
+        )
+        frequencies = {}
+        for sample in stacks:
+            key = " → ".join(
+                f"{row['file']}:{row['line']} {row['function']}" for row in sample["stack"][:4]
+            )
+            frequencies[key] = frequencies.get(key, 0) + 1
+        for stack, count in sorted(frequencies.items(), key=lambda pair: (-pair[1], pair[0])):
+            lines.append(f"  - {count} 次：{text(stack)}")
         lines.extend(
             [
                 "",
@@ -581,23 +686,40 @@ async def main(args):
             "MockClock advanced by benchmark driver; timings use perf_counter only.",
             "Capture gate body/wait observed with wall clock; original policy/checkpoints unchanged.",
             "No performance pass threshold; full backup may outlast fixed request window.",
+            "Diagnostic timings and thread stack samples add observer overhead; no local variables are collected.",
+            "Phase overlap is temporal association, not proof of causation; all repeats and adverse results retained.",
         ],
     }
     (output / "conditions.json").write_text(json.dumps(machine, indent=2), encoding="utf-8")
     summary = []
     for name in args.scales:
-        for backup in (False, True):
-            result = await run_case(
-                output / f"{name}-{'backup' if backup else 'baseline'}",
-                name,
-                backup=backup,
-                requests=args.requests,
-                interval=args.interval,
-            )
-            summary.append({k: v for k, v in result.items() if k != "samples"})
-            print(f"case complete: {name} / {'backup' if backup else 'baseline'}", flush=True)
-            (output / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-            (output / "summary.md").write_text(render_summary(machine, summary), encoding="utf-8")
+        for repeat in range(getattr(args, "repeats", 1)):
+            order = (True, False) if repeat % 2 else (False, True)
+            for position, backup in enumerate(order):
+                label = f"{name}-{'backup' if backup else 'baseline'}"
+                if getattr(args, "repeats", 1) > 1:
+                    label += f"-repeat-{repeat + 1}"
+                result = await run_case(
+                    output / label,
+                    name,
+                    backup=backup,
+                    requests=args.requests,
+                    interval=args.interval,
+                )
+                result.update(repeat=repeat + 1, order=position + 1)
+                summary.append(
+                    {k: v for k, v in result.items() if k not in {"samples", "loop_delays"}}
+                )
+                print(
+                    f"case complete: {name} / {'backup' if backup else 'baseline'} / repeat {repeat + 1}",
+                    flush=True,
+                )
+                (output / "summary.json").write_text(
+                    json.dumps(summary, indent=2), encoding="utf-8"
+                )
+                (output / "summary.md").write_text(
+                    render_summary(machine, summary), encoding="utf-8"
+                )
 
 
 if __name__ == "__main__":
@@ -605,9 +727,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--requests", type=int, default=800)
     parser.add_argument("--interval", type=float, default=0.025)
+    parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--conditions-note", default="background load not controlled")
     parser.add_argument("--scales", nargs="+", choices=tuple(SCALES), default=list(SCALES))
     arguments = parser.parse_args()
-    if arguments.requests < 1 or arguments.interval <= 0:
-        sys.exit("requests and interval must be positive")
+    if arguments.requests < 1 or arguments.interval <= 0 or arguments.repeats < 1:
+        sys.exit("requests, repeats and interval must be positive")
     asyncio.run(main(arguments))

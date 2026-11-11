@@ -153,6 +153,15 @@ async def test_benchmark_real_online_capture_and_fixed_load(tmp_path):
     assert result["capture_gate_wait_ms"]["count"] == 1
     assert all(sample["response_ms"] >= 0 for sample in result["samples"])
     assert all(sample["start_s"] >= sample["scheduled_s"] for sample in result["samples"])
+    assert result["component_ms"]["commit_ms"]["count"] == 30
+    assert result["loop_delay_ms"]["count"] > 0
+    assert {row["name"] for row in result["phases"]} == {
+        "instance_capture",
+        "online_capture",
+        "pack",
+        "unpack_verify",
+    }
+    assert all(row["end_s"] >= row["start_s"] for row in result["phases"])
 
 
 @pytest.mark.asyncio
@@ -171,3 +180,65 @@ async def test_large_asset_benchmark_uses_production_registry_and_declaration(tm
     assert result["errors"] == []
     registry = tmp_path / "case/work/verified/shared/assets/registry.json"
     assert json.loads(registry.read_bytes())["registrations"][0]["companion_id"] == "companion_a"
+
+
+@pytest.mark.asyncio
+async def test_repeated_measurement_keeps_all_results_and_reverses_order(tmp_path, monkeypatch):
+    module = benchmark()
+    calls = []
+
+    async def fake_case(directory, name, *, backup, **kwargs):
+        calls.append((str(directory), backup))
+        result = adverse_result()
+        result["with_backup"] = backup
+        return result
+
+    monkeypatch.setattr(module, "run_case", fake_case)
+    output = tmp_path / "repeated"
+    await module.main(
+        SimpleNamespace(
+            output=output,
+            conditions_note="unit",
+            scales=["large_database"],
+            requests=800,
+            interval=0.025,
+            repeats=3,
+        )
+    )
+    assert [backup for _, backup in calls] == [False, True, True, False, False, True]
+    assert len({path for path, _ in calls}) == 6
+    results = json.loads((output / "summary.json").read_bytes())
+    assert [row["repeat"] for row in results] == [1, 1, 2, 2, 3, 3]
+    assert all(row["backup"]["completeness"] == "partial" for row in results)
+    assert (output / "summary.md").read_text(encoding="utf-8").count("provider_timeout") == 6
+
+
+def test_stack_diagnostics_never_include_locals_or_absolute_paths():
+    import sys
+
+    hidden_value = "fictional-sensitive-payload"
+    result = benchmark().frame_locations(sys._getframe())
+    encoded = json.dumps(result)
+    assert hidden_value not in encoded
+    assert all(set(row) == {"file", "line", "function"} for row in result)
+    assert all(not Path(row["file"]).is_absolute() for row in result)
+
+
+def test_diagnostic_summary_retains_adverse_stage_and_loop_evidence():
+    result = adverse_result()
+    result.update(
+        loop_delay_ms=result["response_ms"],
+        phases=[dict(name="pack", start_s=1, end_s=3, response_ms=result["response_ms"])],
+        stalled_stacks=[
+            dict(
+                at_s=2,
+                delay_ms=500,
+                stack=[dict(file="fixture.py", line=12, function="blocked_commit")],
+            )
+        ],
+    )
+    text = benchmark().render_summary({}, [result])
+    assert "事件循环调度延迟" in text
+    assert "| pack | 1.000 | 3.000 | 100.000 |" in text
+    assert "fixture.py:12 blocked_commit" in text
+    assert "只表示时间关联" in text
