@@ -53,6 +53,7 @@ def test_config_save_coordinates_with_real_capture_process(
 ):
     import multiprocessing
     from contextlib import contextmanager
+    from pathlib import Path
 
     from clytie.backup import coordination
     from clytie.plugin_host.locking import OperationBusy
@@ -62,6 +63,8 @@ def test_config_save_coordinates_with_real_capture_process(
     path.write_text("plugins:\n  echo-tool:\n    enabled: false\n", encoding="utf-8")
     before = path.read_bytes()
     clock = MockClock()
+    # importlib 模式不添加仓库路径；spawn 需要独立导入目标测试模块。
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
     ctx = multiprocessing.get_context("spawn")
     ready, release = ctx.Event(), ctx.Event()
     process = ctx.Process(target=_capture_config_lock, args=(tmp_path, ready, release))
