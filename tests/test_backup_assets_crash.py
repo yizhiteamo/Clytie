@@ -1,6 +1,8 @@
 """真实加密资产恢复在物化中及提交前强杀后的核验。"""
 
+import errno
 import json
+import os
 import queue
 import shutil
 import subprocess
@@ -16,6 +18,7 @@ from clytie.backup.container import pack
 from clytie.backup.repository import SourceRepository
 from clytie.backup.source import capture_instance
 from clytie.memory.store import MemoryStore
+from clytie.plugin_host import locking
 
 from .host_helpers import plugin
 from .test_backup_assets_layout import private
@@ -130,6 +133,32 @@ manager.apply(plan_id)
 """
 
 
+def wait_for_restore_lock_release(target, *, attempts=500):
+    """测试前提：进程结束不保证 Windows 已完成 OS 字节锁回收。
+
+    只探测既存锁，不写诊断元数据、不重复执行恢复。产品仍即时报告 busy。
+    https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfile
+    """
+    observed = []
+    descriptor = os.open(restore._target_lock(target), os.O_RDWR | getattr(os, "O_BINARY", 0))
+    os.set_inheritable(descriptor, False)
+    try:
+        for _ in range(attempts):
+            try:
+                locking._os_lock(descriptor, True)
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                observed.append(exc.errno)
+                threading.Event().wait(0.005)
+            else:
+                locking._os_lock(descriptor, False)
+                return observed
+        pytest.fail(f"killed restore lock not released; observed error codes: {observed}")
+    finally:
+        os.close(descriptor)
+
+
 def kill_at_materialization(manager, plan, point, extra):
     child = subprocess.Popen(
         [sys.executable, "-c", SCRIPT, str(manager.home), plan["id"], point, extra],
@@ -147,6 +176,7 @@ def kill_at_materialization(manager, plan, point, extra):
         child.kill()
         child.wait(timeout=10)
         assert child.returncode != 0
+        wait_for_restore_lock_release(plan["target"])
     finally:
         if child.poll() is None:
             child.kill()
