@@ -197,6 +197,7 @@ def test_gate_prevents_commit_and_unsafe_yaml_refused(tmp_path):
 
 
 def test_legacy_writer_and_backup_writer_share_capture_commit_gate(tmp_path):
+    from clytie.api.auth import APIError
     from clytie.api.config_write import ConfigWriter
     from clytie.backup.configuration import config_commit_lock
     from clytie.plugin_host.locking import OperationBusy
@@ -207,7 +208,7 @@ def test_legacy_writer_and_backup_writer_share_capture_commit_gate(tmp_path):
     before = companion.read_bytes()
     plan = w.plan({"logs": {"archives": 8}})
     with config_commit_lock(home):
-        with pytest.raises(OperationBusy):
+        with pytest.raises(APIError, match="config_not_writable"):
             legacy.save("companion_a", {"plugins": {"fake-model": {"enabled": True}}})
         with pytest.raises(OperationBusy):
             w.apply(plan["plan_id"])
@@ -222,12 +223,13 @@ def test_legacy_validation_is_outside_gate_and_rollback_reacquires_it(tmp_path, 
 
     w, home, _ = writer(tmp_path)
     original = configuration.config_commit_lock
+    original_commit = ConfigWriter._commit
     entries = []
     active = []
 
     @contextmanager
-    def observed(directory):
-        with original(directory):
+    def observed(self):
+        with original_commit(self):
             entries.append("commit")
             active.append(True)
             try:
@@ -235,7 +237,7 @@ def test_legacy_validation_is_outside_gate_and_rollback_reacquires_it(tmp_path, 
             finally:
                 active.pop()
 
-    monkeypatch.setattr(configuration, "config_commit_lock", observed)
+    monkeypatch.setattr(ConfigWriter, "_commit", observed)
 
     def invalid():
         assert not active

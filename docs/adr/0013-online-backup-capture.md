@@ -37,3 +37,7 @@ ProviderCapture 按 prepare（最多 10 秒）、capture（最多 250 毫秒）�
 超时和取消立即使 sink 失效并取消子 token，同时保留未退出任务的引用。task.cancel 不代表退出；迟到 prepare 产生的 ticket 仍安排一次释放。release 幂等，失败和迟到任务分别保留 errors 与 resource_pending；不能因为输出存在就算成功。提供者自行取消、错误返回和异常只使该插件 partial。上层仍须保留执行器直到 resource_pending 消失，不能因请求返回丢失跟踪。
 
 NamespaceSink 仅写本次专属插件目录，拒绝链接/重解析点、穿越、绝对路径、Windows 特殊路径、重复成员、跨平台大小写与父目录冲突，以及显式凭据路径。单 chunk 默认不超过 1 MiB，后台有界写入并计量 SHA-256；只有完整写入才登记 entry。任意写入失败永久使 sink 无效，即使插件吞掉异常也不能宣称完整。已开始的后台写须收尾后关闭句柄；失效后新写入与迟到 chunk 一律拒绝。该约束是宿主协议边界，不宣称剥夺插件进程的任意文件系统能力；完整持久布局和直接恢复格式仍由 provider 契约、宿主关联核验与离线测试保证。
+
+## 配置写回与捕获竞争
+
+API 的插件配置写回与配置捕获使用同一 config-commit.lock。写回复用 CaptureCoordinator 的既有有界提交等待和注入时钟，短捕获释放后继续保存；超时映射 config_not_writable，由已生效的插件操作路径报告 applied_not_saved，不把内部锁竞争报为请求格式错误。回滚写回同样协调，读写失败不吞掉。真实跨进程回归核对短占用成功与持续占用不改原配置；本地 HTTP 故障注入记录与 CI 观察分开保存。

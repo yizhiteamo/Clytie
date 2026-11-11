@@ -23,7 +23,8 @@ def management(tmp_path):
 
 
 @pytest.mark.parametrize("clear_by", ["save", "restart"])
-async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path, clear_by):
+@pytest.mark.parametrize("cause", ["io", "capture_busy"])
+async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path, clear_by, cause):
     api = management(tmp_path)
     api.svc.notifications = SimpleNamespace(undelivered=0)
     api.svc.rows["companion_a"].update(state="running", restart_count=0)
@@ -41,6 +42,8 @@ async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path,
         return {"patch": patch}
 
     def fail(*args):
+        if cause == "capture_busy":
+            raise APIError("config_not_writable")
         raise OSError("fictional write failure")
 
     api.transfer = transfer
