@@ -519,6 +519,9 @@ def render_summary(machine, results):
     def fixed(value, unit=""):
         return "未测量" if value is None else f"{value:.3f}{unit}"
 
+    def count(value):
+        return f"{value:,}".replace(",", " ")
+
     def flag(value):
         return "未测量" if value is None else str(value).lower()
 
@@ -529,7 +532,7 @@ def render_summary(machine, results):
         "# 离线备份性能摘要",
         "",
         "显示精度：秒、毫秒、百分比及 MiB 保留三位小数（四舍五入）；"
-        "1 MiB = 2^20 bytes。舍入仅用于显示，超界标记根据未舍入值计算。",
+        "1 MiB = 2^20 bytes。整数计数按空格分隔千位，数值不舍入；超界标记根据未舍入值计算。",
         "原始 JSON 保留在本地；本摘要仍须通过通用与私有扫描才可发布。"
         "数据不是性能通过结论，未测量不代表通过。",
         "",
@@ -595,7 +598,10 @@ def render_summary(machine, results):
         for label, key in metrics:
             metric = result.get(key, result.get("component_ms", {}).get(key))
             columns = (
-                ([str(metric["count"])] + [fixed(metric[p]) for p in ("p50", "p95", "p99", "max")])
+                (
+                    [count(metric["count"])]
+                    + [fixed(metric[p]) for p in ("p50", "p95", "p99", "max")]
+                )
                 if metric
                 else ["未测量"] * 5
             )

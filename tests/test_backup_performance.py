@@ -242,3 +242,33 @@ def test_diagnostic_summary_retains_adverse_stage_and_loop_evidence():
     assert "| pack | 1.000 | 3.000 | 100.000 |" in text
     assert "fixture.py:12 blocked_commit" in text
     assert "只表示时间关联" in text
+
+
+def test_long_measurement_counts_keep_exact_values_and_pass_public_scan(tmp_path):
+    import shlex
+    import subprocess
+    import sys
+
+    import yaml
+
+    result = adverse_result()
+    count = 16 * 1024 + 3
+    result["loop_delay_ms"] = dict(result["response_ms"], count=count)
+    text = benchmark().render_summary({}, [result])
+    line = next(row for row in text.splitlines() if row.startswith("| 事件循环调度延迟 |"))
+    displayed = line.split("|")[2].strip()
+    assert displayed == "16 387"
+    assert int(displayed.replace(" ", "")) == count
+    assert result["loop_delay_ms"]["count"] == count
+    output = tmp_path / "summary.md"
+    output.write_text(text, encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    program = shlex.split(config["repos"][0]["hooks"][0]["entry"])[2]
+    checked = subprocess.run(
+        [sys.executable, "-c", program, "--message", str(output)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
