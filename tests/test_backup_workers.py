@@ -10,6 +10,7 @@ from clytie.backup.journal import BackupJournal
 from clytie.backup.restore import read_state
 from clytie.backup.workers import BackupWorkers, WorkerError
 from clytie.clock import SystemClock
+from clytie.plugin_host.support import timed
 from clytie.sdk.testing import MockClock
 
 
@@ -208,12 +209,16 @@ else:
     worker.Controls.check = pause
 result = worker.execute(home, op, stream=sys.stdin.buffer.raw, emit=emit, clock=MockClock())
 emit({"type":"result", "result":result})
+if len(sys.argv) > 5:
+    while not Path(sys.argv[5]).exists():
+        threading.Event().wait(0.01)
 """
 
 
-def started_worker(home, op, hook, target):
+def started_worker(home, op, hook, target, *, exit_gate=None):
     process = subprocess.Popen(
-        [sys.executable, "-c", HOOK_WORKER, str(home), op, hook, str(target)],
+        [sys.executable, "-c", HOOK_WORKER, str(home), op, hook, str(target)]
+        + ([str(exit_gate)] if exit_gate is not None else []),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -474,20 +479,24 @@ async def test_startup_handshake_wait_is_bounded_and_queryable(tmp_path, monkeyp
 
 
 async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypatch):
+    from clytie.backup.workers import executor_alive, worker_locked
+
     manager, package, key, target, workspace = configured_package(
         tmp_path, monkeypatch, missing_credentials=False
     )
     plan = manager.plan(package, key, target, workspace)
     op = "7" * 32
     BackupJournal.accept(manager.home, MockClock(), op, "restore_apply", {"plan_id": plan["id"]})
-    process = started_worker(manager.home, op, "cancel_published", target)
+    exit_gate = tmp_path / "allow-fictional-worker-exit"
+    process = started_worker(manager.home, op, "cancel_published", target, exit_gate=exit_gate)
     clock = MockClock()
     workers = BackupWorkers(manager.home, clock)
+    stopping = None
     try:
         await workers.recover_pending()
         stopping = asyncio.create_task(workers.stop("cancel"))
-        while workers.cancel_since is None:
-            await SystemClock().sleep(0.01)
+        await clock.drain()
+        assert workers.cancel_since is not None
         initial = workers.cancel_since
         clock.advance(119)
         assert not workers.still_finishing
@@ -499,19 +508,40 @@ async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypat
         assert not stopping.done()
         process.stdin.write(b"cancel\n")
         process.stdin.flush()
-        for _ in range(500):
-            clock.advance(1)
-            if stopping.done():
-                break
-            await SystemClock().sleep(0.01)
+        response = json.loads(
+            await timed(asyncio.to_thread(process.stdout.readline), SystemClock(), 15)
+        )
+        assert response["type"] == "result"
+        assert response["result"]["phase"] == "committed"
+        # 固定最后一次轮询先于真实退出；机器快慢不能改变此顺序。
+        await clock.advance_and_drain(1)
+        assert process.poll() is None
+        assert not stopping.done()
+        assert clock.pending_sleep_count == 1
+        exit_gate.write_text("release", encoding="utf-8")
+        assert await asyncio.to_thread(process.wait, timeout=15) == 0
+        value = BackupJournal.load(BackupJournal.path_for(manager.home, op), clock).value
+        assert executor_alive(value["executor"]) is False
+        assert not worker_locked(manager.home)
+        await clock.drain()
+        assert not stopping.done()
+        assert clock.pending_sleep_count == 1
+        # 外部执行者已退出，显式唤醒注入时钟上的观察者；不能停在裸 await。
+        await clock.advance_and_drain(0.05)
+        assert stopping.done()
         await stopping
         assert workers.query(op)["phase"] == "committed", process.stderr.read().decode(
             errors="replace"
         )
-        finish_child(process, kill=False)
+        assert not workers.tasks
     finally:
-        if process.poll() is None:
-            finish_child(process)
+        finish_child(process)
+        for task in tuple(workers.tasks.values()):
+            task.cancel()
+        await asyncio.gather(*tuple(workers.tasks.values()), return_exceptions=True)
+        if stopping is not None:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
 
 
 def test_worker_evidence_waits_for_concurrent_cancel_writer(tmp_path):
