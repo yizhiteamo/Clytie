@@ -1,10 +1,12 @@
 """Management operations shared by the daemon and the owning companion process."""
 
 import json
+import re
 from dataclasses import asdict
 
 from clytie.api.auth import APIError
 from clytie.api.memory import MemoryAPI
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.snapshots import contained, identifier
 from clytie.plugin_host.support import timed
 
@@ -26,28 +28,30 @@ def load_plan(home, plan_id):
 async def memory_operation(home, clock, cid, op, args, hosted=None):
     api = MemoryAPI(home, clock=clock, hosted=hosted)
     if op == "export":
-        return api.export(cid, **args)
+        return await api.export_online(cid, **args)
     if op == "thaw":
-        return api.thaw_record(cid, args["record_id"])
+        return await api.command(cid, api.thaw_record, args["record_id"])
     if op == "recovery-code":
-        return {"recovery_code": api.new_recovery_code(cid, confirmed=True)}
+        return {"recovery_code": await api.command(cid, api.new_recovery_code, confirmed=True)}
     if op == "import/plan":
         return await api.plan(cid, **args)
     if op == "backup/plan":
         return await api.backup_plan(cid, **args)
     if op == "import/undo":
-        return api.undo(cid, **args)
+        return await api.command(cid, api.undo, **args)
     if op == "import/apply":
-        plan = load_plan(home, args["plan_id"])
+        plan = await api.file_command(cid, load_plan, home, args["plan_id"])
         if plan["companion_id"] != cid:
             raise APIError("plan_stale", 409)
         return {"import_id": await api.apply(**args)}
     if op == "import/content":
-        plan = load_plan(home, args["plan_id"])
+        plan = await api.file_command(cid, load_plan, home, args["plan_id"])
         if plan["companion_id"] != cid:
             raise APIError("plan_stale", 409)
         if plan["kind"] == "undo":
-            return api.undo(cid, plan["undo"], choices=plan.get("choices"), show_content=True)
+            return await api.command(
+                cid, api.undo, plan["undo"], choices=plan.get("choices"), show_content=True
+            )
         if plan.get("source_type") == "backup":
             return await api.backup_content(plan)
         return await api.plan(
@@ -62,6 +66,20 @@ async def memory_operation(home, clock, cid, op, args, hosted=None):
             **{k: v for k, v in args.items() if k in {"passphrase", "recovery_code"}},
         )
     raise APIError("not_found", 404)
+
+
+def owned_task(ledger, task_id, *, full=False):
+    from clytie.kernel.query import task_view
+
+    def error(code, message):
+        return dict(ok=False, error=dict(code=code, message=message, companions=[]), warnings=[])
+
+    if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{8}", task_id):
+        return error("invalid_request", "task_id must be eight lowercase hexadecimal characters")
+    records = [row for row in ledger.rows("record") if row["task_id"] == task_id]
+    if not records:
+        return error("not_found", "task not found")
+    return dict(ok=True, task=task_view(ledger, records[0], full=full), warnings=[])
 
 
 async def companion_operation(runtime, op, args):
@@ -79,10 +97,9 @@ async def companion_operation(runtime, op, args):
     if op.startswith("memory/"):
         return await memory_operation(home, clock, cid, op.removeprefix("memory/"), args, runtime)
     if op == "tasks":
-        from clytie.kernel.query import local_task
-
-        return local_task(
-            args["task_id"], home=home, companion_id=cid, full=args.get("full", False)
+        return await run_sync(
+            runtime.agent.ledger,
+            lambda: owned_task(runtime.agent.ledger, args["task_id"], full=args.get("full", False)),
         )
     if op == "boundary":
         from datetime import datetime
@@ -98,9 +115,7 @@ async def companion_operation(runtime, op, args):
         ]
     if op == "boundary/release":
         identifier(args["actor_id"])
-        from clytie.backup.coordination import run_sync
-
-        await run_sync(runtime.agent.ledger, runtime.agent.boundary.release, cid, args["actor_id"])
+        await runtime.agent.boundary.release(cid, args["actor_id"])
         return {"released": args["actor_id"]}
     if op == "plugins":
         host.refresh()

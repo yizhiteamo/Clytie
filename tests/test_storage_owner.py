@@ -356,3 +356,24 @@ async def test_worker_cannot_enqueue_behind_itself(tmp_path):
         assert await owner.execute(lambda *_: "still_available") == "still_available"
     finally:
         await owner.close()
+
+
+async def test_frozen_sdk_mapping_keeps_mapping_shape_across_owner_boundary(tmp_path):
+    from clytie.sdk.immutable import FrozenDict
+    from clytie.sdk.types import ToolResult
+
+    owner, _ = await create(tmp_path)
+    original = ToolResult(
+        call_id="fictional_call",
+        status="ok",
+        content="fictional",
+        data={"nested": {"items": ["fictional"]}},
+    )
+    try:
+        result = await owner.execute(lambda *_: original)
+        assert result == original and result is not original
+        assert isinstance(result.data, FrozenDict)
+        assert result.data["nested"]["items"] == ("fictional",)
+        assert result.data is not original.data
+    finally:
+        await owner.close()

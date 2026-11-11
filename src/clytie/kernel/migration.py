@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -236,6 +237,7 @@ class LedgerRuntime:
         )
         self.guard, self.ledger = None, None
         self.maintenance = None
+        self.owner_managed = False
 
     async def _maintain(self):
         while True:
@@ -243,8 +245,7 @@ class LedgerRuntime:
             if self.journal.exists():
                 continue
             try:
-                self.snapshots.cleanup(self.retention_days)
-                await run_sync(self.ledger, self.ledger.expire_content, self.retention_days)
+                await run_sync(self.ledger, self._cleanup)
             except Exception as exc:
                 self.log.warning("ledger.retention_failed", error=type(exc).__name__)
 
@@ -306,7 +307,7 @@ class LedgerRuntime:
                         current = None
                     if current == record["to_version"]:
                         self.journal.unlink()
-                        with sqlite3.connect(self.path) as db:
+                        with closing(sqlite3.connect(self.path)) as db, db:
                             db.execute(
                                 "INSERT INTO audit(data) VALUES (?)",
                                 (
@@ -381,6 +382,10 @@ class LedgerRuntime:
                     ) from exc
                 self.journal.unlink()
                 migrated = True
+            if self.owner_managed:
+                # 保留运行锁；运行连接稍后由 StorageOwner 在所属线程创建。
+                self.snapshots.cleanup(self.retention_days, migrated=migrated)
+                return None
             if self.ledger is None:
                 from clytie.backup.coordination import companion_coordinator
 
@@ -404,11 +409,24 @@ class LedgerRuntime:
             self.maintenance.cancel()
             self.maintenance = None
         if self.ledger:
-            self.ledger.close()
+            if not self.owner_managed:
+                self.ledger.close()
             self.ledger = None
         if self.guard:
             self.guard.__exit__(None, None, None)
             self.guard = None
+
+    def _cleanup(self):
+        self.snapshots.cleanup(self.retention_days)
+        self.ledger.expire_content(self.retention_days)
+
+    async def attach_owned(self, ledger):
+        if not self.owner_managed or self.guard is None or self.ledger is not None:
+            raise RuntimeError("ledger_owner_lifecycle")
+        self.ledger = ledger
+        await run_sync(ledger, ledger.expire_content, self.retention_days)
+        if self.retention_days is not None:
+            self.maintenance = background(self._maintain())
 
 
 def migration_status(home):

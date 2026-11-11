@@ -104,7 +104,7 @@ async def new_record(kernel, *, role="owner", name="request", conversation="test
         conversation=conv,
         trace_id=uuid4().hex,
     )
-    r = kernel.open_record(event_id=event.event_id, invocation=inv)
+    r = await kernel.open_record(event_id=event.event_id, invocation=inv)
     return r, inv, event
 
 
@@ -159,8 +159,10 @@ async def test_ordinary_chat_reaction_requires_declared_exception(tmp_path):
     )
     with pytest.raises(ValueError, match="declared exception"):
         await kernel.seal(r["trace_id"], "ok", [intent])
-    assert not kernel.allow_reaction_exception(r["trace_id"], intent)
-    assert kernel.allow_reaction_exception(r["trace_id"], intent, permissions=["message.react"])
+    assert not await kernel.allow_reaction_exception(r["trace_id"], intent)
+    assert await kernel.allow_reaction_exception(
+        r["trace_id"], intent, permissions=["message.react"]
+    )
     await kernel.seal(r["trace_id"], "ok", [intent])
     await kernel.delivery.deliver(r["trace_id"])
     await kernel.bus.drain()

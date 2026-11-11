@@ -128,6 +128,8 @@ class PluginHost(MigrationMixin):
 
         self.backends = resolve_backends
         self.memory_resources = {}
+        self.storage_owners = {}
+        self.stop_finalizations = {}
         self.memory_jobs = {}
         self.memory_config = {}
         self.manifests = discover(
@@ -777,7 +779,11 @@ class PluginHost(MigrationMixin):
             for unit in reversed(runtime.units or [runtime]):
                 try:
                     with bind_scene():
-                        await timed(unit.plugin.stop(), self.clock, 10)
+                        lifecycle = self.stop_finalizations.get(companion_id)
+                        operation = unit.plugin.stop()
+                        if lifecycle is not None:
+                            operation = lifecycle.callback(operation)
+                        await timed(operation, self.clock, 10)
                 except Exception as exc:
                     runtime.stop_errors.append(type(exc).__name__)
                     self._failure(runtime, "stop", exc)
@@ -1246,6 +1252,7 @@ class PluginHost(MigrationMixin):
                     job.cancel()
                 await asyncio.gather(*jobs, return_exceptions=True)
                 store, lock = self.memory_resources.pop(cid)
-                store.close()
-                lock.__exit__(None, None, None)
+                if cid not in self.storage_owners:
+                    store.close()
+                    lock.__exit__(None, None, None)
         return result

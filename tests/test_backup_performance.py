@@ -154,6 +154,14 @@ async def test_benchmark_real_online_capture_and_fixed_load(tmp_path):
     assert all(sample["response_ms"] >= 0 for sample in result["samples"])
     assert all(sample["start_s"] >= sample["scheduled_s"] for sample in result["samples"])
     assert result["component_ms"]["commit_ms"]["count"] == 30
+    assert result["component_ms"]["storage_queue_ms"]["count"] == 30
+    assert result["committed_request_indices"] == list(range(30))
+    assert result["persisted_counter"] == 29
+    assert not result["owner_thread_alive_after_close"]
+    assert result["snapshot_threads_alive_after_close"] == 0
+    assert result["owner_status_at_end"]["ordinary"] == 0
+    assert not result["owner_status_at_end"]["capture_pending"]
+    assert result["resource_samples"][-1]["queued"] == 0
     assert result["loop_delay_ms"]["count"] > 0
     assert {row["name"] for row in result["phases"]} == {
         "instance_capture",

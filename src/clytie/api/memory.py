@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from clytie.api.management_io import management_command as run_sync
 from clytie.api.management_journal import owns_runtime
 from clytie.clock import SystemClock
 from clytie.config import load_home, resolve_home, thaw
@@ -51,6 +52,21 @@ class MemoryAPI:
         self.repo_root, self.clock = repo_root, clock or SystemClock()
         self.importers = importers or {}
         self.hosted = hosted
+
+    async def command(self, companion_id, function, *args, **kwargs):
+        """在线调用复用所有者；独立管理进程保留当前线程同步实现。"""
+        if self.hosted is None:
+            return function(companion_id, *args, **kwargs)
+        with self.open(companion_id) as store:
+            return await run_sync(store, function, companion_id, *args, **kwargs)
+
+    async def file_command(self, companion_id, function, *args, **kwargs):
+        from clytie.api.management_io import file_call
+
+        if self.hosted is None:
+            return function(*args, **kwargs)
+        with self.open(companion_id) as store:
+            return await file_call(store, function, *args, **kwargs)
 
     @asynccontextmanager
     async def importer_scope(self, companion_id, selected):
@@ -175,6 +191,15 @@ class MemoryAPI:
                 finish_commit(result)
                 return result
 
+    async def export_online(self, companion_id, out, **options):
+        from clytie.storage.handle import StoreHandle
+
+        with self.open(companion_id) as store:
+            exports = Exports(store, self.home, companion_id)
+            if isinstance(store, StoreHandle):
+                return await exports.export_owned(out, **options)
+            return exports.export(out, **options)
+
     def export(self, companion_id, out, *, passphrase=None, format="encrypted"):
         with self.open(companion_id) as store:
             return Exports(store, self.home, companion_id).export(
@@ -212,6 +237,24 @@ class MemoryAPI:
         **options,
     ):
         from clytie.backup.memory_source import BackupMemorySource
+
+        source, binding = await self.file_command(
+            companion_id,
+            self._backup_source,
+            backup_id,
+            source_repository,
+            key_path,
+            _source_repository_confirmed,
+        )
+        if set(options) - {"mode", "choices", "confirm_identity"}:
+            raise ValueError("invalid_request")
+        adapter = BackupMemorySource(self.home, self.clock, companion_id, binding)
+        with self.open(companion_id, readonly=True) as store:
+            return await Transfers(store, self.home, companion_id, source_adapter=adapter).plan(
+                source, **options
+            )
+
+    def _backup_source(self, backup_id, source_repository, key_path, _source_repository_confirmed):
         from clytie.backup.storage import BackupStorage
 
         if source_repository is not None:
@@ -243,13 +286,7 @@ class MemoryAPI:
         binding = {"backup_id": backup_id, "key_fingerprint": hashlib.sha256(material).hexdigest()}
         if source_repository is not None:
             binding.update(source_repository=source_repository, key_path=str(key_file))
-        if set(options) - {"mode", "choices", "confirm_identity"}:
-            raise ValueError("invalid_request")
-        adapter = BackupMemorySource(self.home, self.clock, companion_id, binding)
-        with self.open(companion_id, readonly=True) as store:
-            return await Transfers(store, self.home, companion_id, source_adapter=adapter).plan(
-                source, **options
-            )
+        return source, binding
 
     @staticmethod
     def _backup_validate(store, transfers, plan, home):
@@ -289,28 +326,41 @@ class MemoryAPI:
                     self.home, self.clock, cid, plan["backup_binding"]
                 ),
             )
-            with PreviewCatalog(self.home, self.clock).reading(
+            reader = PreviewCatalog(self.home, self.clock).reading(
                 "memory",
                 plan["id"],
                 validate=lambda: self._backup_validate(store, transfers, plan, self.home),
-            ):
+            )
+            await run_sync(store, reader.__enter__)
+            try:
                 loaded = await transfers._load(plan["source"])
-                return {
-                    "id": plan["id"],
-                    "content": {
-                        key: {
-                            "package": record.content,
-                            "current": store.get_raw(key).content if store.get_raw(key) else None,
-                        }
-                        for key, record in loaded["records"].items()
-                    },
-                }
+
+                def content():
+                    self._backup_validate(store, transfers, plan, self.home)
+                    return {
+                        "id": plan["id"],
+                        "content": {
+                            key: {
+                                "package": record.content,
+                                "current": store.get_raw(key).content
+                                if store.get_raw(key)
+                                else None,
+                            }
+                            for key, record in loaded["records"].items()
+                        },
+                    }
+
+                return await run_sync(store, content)
+            finally:
+                await run_sync(store, reader.__exit__, None, None, None)
 
     async def apply(self, plan_id, **options):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
             raise ValueError("invalid plan id")
         path = contained(self.home, self.home / "run" / "memory-plans" / f"{plan_id}.json")
-        plan = json.loads(path.read_bytes())
+        plan = await self.file_command(
+            self.hosted.cid if self.hosted else None, lambda: json.loads(path.read_bytes())
+        )
         async with self.importer_scope(plan["companion_id"], plan.get("importer")) as importers:
             with self.open(plan["companion_id"]) as store:
                 adapter = None
@@ -335,22 +385,29 @@ class MemoryAPI:
                 )
                 if adapter is not None:
                     catalog = PreviewCatalog(self.home, self.clock)
-                    accepted, _ = catalog.accept(
-                        "memory",
-                        plan_id,
-                        journal.value["id"],
-                        validate=lambda: self._backup_validate(store, transfers, plan, self.home),
-                    )
-                    if accepted != journal.value["id"]:
-                        raise PreviewError("plan_in_use", operation_id=accepted)
-                    journal.value["backup_execution"] = {
-                        "plan_id": plan_id,
-                        "operation_id": accepted,
-                    }
-                    journal.save()
+
+                    def accept():
+                        accepted, _ = catalog.accept(
+                            "memory",
+                            plan_id,
+                            journal.value["id"],
+                            validate=lambda: self._backup_validate(
+                                store, transfers, plan, self.home
+                            ),
+                        )
+                        if accepted != journal.value["id"]:
+                            raise PreviewError("plan_in_use", operation_id=accepted)
+                        journal.value["backup_execution"] = {
+                            "plan_id": plan_id,
+                            "operation_id": accepted,
+                        }
+                        journal.save()
+                        return accepted
+
+                    accepted = await run_sync(store, accept)
                 result = await transfers.apply(plan_id, **options)
                 if adapter is not None:
-                    catalog.release(accepted)
+                    await self.file_command(plan["companion_id"], catalog.release, accepted)
                 return result
 
     def plan_kind(self, plan_id):

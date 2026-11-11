@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from pydantic import TypeAdapter
 
-from clytie.backup.coordination import transaction
+from clytie.backup.coordination import run_sync
 from clytie.kernel.projection import visible
 from clytie.sdk.types import Actor, ChatMessage, ContextRequest, MessagePart, TextPart
 
@@ -16,6 +16,18 @@ PART = TypeAdapter(MessagePart)
 
 def message(role, text):
     return ChatMessage(role=role, parts=[TextPart(text=text)])
+
+
+class LedgerSnapshot:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def rows(self, table):
+        return self.tables[table]
+
+    def get(self, table, key):
+        field = {"record": "trace_id", "intent": "intent_id"}[table]
+        return next((row for row in self.tables[table] if row[field] == key), None)
 
 
 class Context:
@@ -32,8 +44,10 @@ class Context:
             ),
         )
 
-    def quote(self, ref, conversation, authors=None):
-        ledger = self.agent.ledger
+    async def quote(self, ref, conversation, authors=None, *, ledger=None):
+        if ledger is None:
+            tables = await run_sync(self.agent.ledger, self._read_tables)
+            ledger = LedgerSnapshot(tables)
         for row in ledger.rows("inbound"):
             if row.get("message") and row["message"]["ref"] == ref.model_dump(mode="json"):
                 if row.get("reason") != "boundary_paused" and self.visible(row, conversation):
@@ -57,6 +71,38 @@ class Context:
                 return text_parts([PART.validate_python(p) for p in row.get("parts") or []])
         return "引用了一条看不到的消息"
 
+    def _read_tables(self):
+        return {
+            table: self.agent.ledger.rows(table)
+            for table in ("record", "invocation", "intent", "audit", "inbound", "attempt")
+        }
+
+    def _snapshot(self, conversation):
+        ledger = self.agent.ledger
+        with ledger.transaction():
+            tables = self._read_tables()
+            snapshot = LedgerSnapshot(tables)
+            groups = {}
+            for row in snapshot.rows("intent"):
+                if row.get("split") and row["conversation_id"] == conversation.conversation_id:
+                    record = snapshot.get("record", row["trace_id"])
+                    if self.visible(record, conversation):
+                        groups.setdefault(row["split"]["group_id"], []).append(row)
+            announced = {
+                a.get("group_id")
+                for a in snapshot.rows("audit")
+                if a["kind"] == "partial_group_context"
+            }
+            for group, rows in groups.items():
+                if (
+                    group not in announced
+                    and any(r["status"] in {"sent", "unknown"} for r in rows)
+                    and not all(r["status"] == "sent" for r in rows)
+                    and not any(r["status"] in {"pending", "sending", "retry_wait"} for r in rows)
+                ):
+                    ledger.audit("partial_group_context", group_id=group)
+            return tables
+
     async def build(
         self,
         conversation,
@@ -69,7 +115,8 @@ class Context:
         proactive=False,
         memory_trace=None,
     ):
-        agent, ledger = self.agent, self.agent.ledger
+        agent = self.agent
+        ledger = LedgerSnapshot(await run_sync(agent.ledger, self._snapshot, conversation))
         result = [
             message("system", agent.persona.render(conversation.scene)),
             message("system", "能力状态：\n" + capabilities),
@@ -133,8 +180,6 @@ class Context:
                 for r in sorted(rows, key=lambda x: x["split"]["index"])
             ]
             result.append(message("system", "上次拆分消息：" + "；".join(parts)))
-            async with transaction(ledger):
-                ledger.audit("partial_group_context", group_id=group)
         memory_position = len(result)
         budget = agent.config.get("context", {}).get("material_budget_chars", 6000)
         sections = await agent.host.context_sections(
@@ -214,7 +259,9 @@ class Context:
             msg = event.message
             text = f"{msg.sender.role} {actor_label(msg.sender)}：" + text_parts(msg.parts)
             if msg.reply_to:
-                text += "\n引用：" + self.quote(msg.reply_to, conversation, authors)
+                text += "\n引用：" + await self.quote(
+                    msg.reply_to, conversation, authors, ledger=ledger
+                )
             authors.append(msg.sender)
             result.append(message("user", text))
         reminder = agent.boundary.reminder(authors)

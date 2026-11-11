@@ -377,24 +377,38 @@ class Exports:
             return self._export(out, passphrase=passphrase, format=format)
 
     def _export(self, out, *, passphrase, format):
-        from clytie.api.management_journal import current, publish_file
-
-        journal = current.get()
-        out = Path(out)
         if format == "jsonl":
-            exports = self.home / "exports"
-            contained(exports, out)
-            data = "".join(
-                canonical(r.model_dump(mode="json")) + "\n" for r in self.store.all_records()
-            )
-            publish_file(out, data.encode())
-            return {"path": str(out), "recovery_code": None}
+            return self._export_jsonl(out, self.store)
+        material = self._export_material(
+            out, passphrase=passphrase, format=format, source=self.store
+        )
+        try:
+            self._verify_export(material, passphrase)
+            self._prepare_export_audit()
+            self._publish_export(material)
+            self._audit_export()
+        except BaseException:
+            self._rollback_public(material)
+            raise
+        finally:
+            self._cleanup_export(material)
+        return {"path": str(material["out"]), "recovery_code": material["code"]}
+
+    def _export_jsonl(self, out, source):
+        from clytie.api.management_journal import publish_file
+
+        out = Path(out)
+        contained(self.home / "exports", out)
+        data = "".join(canonical(r.model_dump(mode="json")) + "\n" for r in source.all_records())
+        publish_file(out, data.encode())
+        return {"path": str(out), "recovery_code": None}
+
+    def _export_material(self, out, *, passphrase, format, source):
         if format != "encrypted":
             raise ValueError("unsupported export format")
         if passphrase is None or len(passphrase) < 12:
             raise ValueError("passphrase must contain at least 12 characters")
-        # 先建立并校验一致快照，失败不生成恢复凭据或目标文件。
-        raw = payload(self.store, self.companion_id, self.home)
+        raw = payload(source, self.companion_id, self.home)
         path = self.recovery_path()
         code = None
         if path.exists():
@@ -405,39 +419,136 @@ class Exports:
         encrypted = encrypt(raw, passphrase, recipient)
         _, checked = unpack(decrypt(encrypted, passphrase=passphrase), self.home, self.companion_id)
         checked.close()
-        pending = out.with_name(out.name + "." + uuid4().hex + ".pending")
-        created_public = False
-        try:
-            write_temporary(pending, encrypted)
-            _, checked = unpack(
-                decrypt(pending.read_bytes(), passphrase=passphrase), self.home, self.companion_id
+        out = Path(out)
+        return dict(
+            out=out,
+            path=path,
+            code=code,
+            recipient=recipient,
+            encrypted=encrypted,
+            pending=out.with_name(out.name + "." + uuid4().hex + ".pending"),
+            created_public=False,
+        )
+
+    def _verify_export(self, material, passphrase):
+        write_temporary(material["pending"], material["encrypted"])
+        _, checked = unpack(
+            decrypt(material["pending"].read_bytes(), passphrase=passphrase),
+            self.home,
+            self.companion_id,
+        )
+        checked.close()
+
+    def _prepare_export_audit(self, record_count=None):
+        from clytie.api.management_journal import current
+
+        journal = current.get()
+        if journal is not None:
+            journal.prepare_file_audit(
+                self.store,
+                "memory_export",
+                records=len(self.store.all_records()) if record_count is None else record_count,
             )
-            checked.close()
-            if journal is not None:
-                journal.prepare_file_audit(
-                    self.store, "memory_export", records=len(self.store.all_records())
+
+    def _publish_export(self, material):
+        from clytie.api.management_journal import current
+
+        journal = current.get()
+        if journal is not None:
+            journal.prepare_file(material["out"], material["encrypted"])
+            if material["code"] is not None:
+                journal.prepare_public(material["path"], material["recipient"])
+        if material["code"] is not None:
+            atomic_write(material["path"], material["recipient"])
+            material["created_public"] = True
+        material["pending"].replace(material["out"])
+
+    def _audit_export(self, record_count=None):
+        from clytie.api.management_journal import current
+
+        journal = current.get()
+        with self.store.transaction():
+            self.store.audit(
+                "memory_export",
+                records=len(self.store.all_records()) if record_count is None else record_count,
+                **({"operation_id": journal.value["id"]} if journal else {}),
+            )
+        if journal is not None:
+            journal.committed()
+
+    def _rollback_public(self, material):
+        from clytie.api.management_journal import current
+
+        if material["created_public"] and current.get() is None:
+            material["path"].unlink()
+
+    def _cleanup_export(self, material):
+        if material["pending"].exists():
+            material["pending"].unlink()
+
+    async def export_owned(self, out, *, passphrase=None, format="encrypted"):
+        from clytie.api.management_io import FileCommands, owned_snapshot
+        from clytie.api.management_io import management_command as run_sync
+        from clytie.memory.store import MemoryStore
+
+        if not await run_sync(self.store, lambda: self.store.uid):
+            raise ValueError("还没有记忆，不需要导出")
+        work = {}
+        metadata = dict(
+            clock=self.store.clock,
+            config=self.store.config,
+            instance=self.store.instance,
+            readonly=True,
+        )
+
+        def acquire():
+            manager = self.recovery_lock()
+            manager.__enter__()
+            work["lock"] = manager
+
+        def prepare(path):
+            source = MemoryStore(path, **metadata)
+            try:
+                if format == "jsonl":
+                    return self._export_jsonl(out, source)
+                work["material"] = self._export_material(
+                    out, passphrase=passphrase, format=format, source=source
                 )
-                journal.prepare_file(out, encrypted)
-                if code is not None:
-                    journal.prepare_public(path, recipient)
-            if code is not None:
-                atomic_write(path, recipient)
-                created_public = True
-            pending.replace(out)
-            with self.store.transaction():
-                self.store.audit(
-                    "memory_export",
-                    records=len(self.store.all_records()),
-                    **({"operation_id": journal.value["id"]} if journal else {}),
+                self._verify_export(work["material"], passphrase)
+                return len(source.all_records())
+            finally:
+                source.close()
+
+        def publish():
+            self._publish_export(work["material"])
+
+        def cleanup():
+            try:
+                material = work.get("material")
+                if material is not None:
+                    self._cleanup_export(material)
+            finally:
+                work["lock"].__exit__(None, None, None)
+
+        async with FileCommands(self.store.clock) as files:
+            await files.run(acquire)
+            try:
+                async with owned_snapshot(self.store, self.home, self.companion_id) as path:
+                    result = await files.run(prepare, path)
+                if format == "jsonl":
+                    return result
+                await run_sync(self.store, self._prepare_export_audit, result)
+                await files.run(publish)
+                await run_sync(self.store, self._audit_export, result)
+                return await files.run(
+                    lambda: {
+                        "path": str(work["material"]["out"]),
+                        "recovery_code": work["material"]["code"],
+                    }
                 )
-            if journal is not None:
-                journal.committed()
-        except BaseException:
-            # 首次导出失败不能留下没有交给用户恢复码的公钥。
-            if created_public and journal is None:
-                path.unlink()
-            raise
-        finally:
-            if pending.exists():
-                pending.unlink()
-        return {"path": str(out), "recovery_code": code}
+            except BaseException:
+                if "material" in work:
+                    await files.run(lambda: self._rollback_public(work["material"]))
+                raise
+            finally:
+                await files.run(cleanup)

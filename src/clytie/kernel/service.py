@@ -6,12 +6,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 
-from clytie.backup.coordination import run_sync, transaction
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.support import HostLog
 from clytie.sdk import CancelToken
 from clytie.sdk.types import BusEvent, Denial, Invocation, TaskSummary, ToolResult
 
-from .delivery import Delivery
+from .delivery import Delivery, OwnedFinalization
 from .events import EventBus, background
 from .ledger import EXEC_TERMINAL, dump
 from .projection import visible
@@ -59,6 +59,7 @@ class Kernel:
             clock, maximum=self.config.get("tasks", {}).get("max_concurrent", 2)
         )
         self.queued = {}
+        self.finalizations = {}
         self.grace = self.config.get("tasks", {}).get("cancel_grace_seconds", 5)
         self.delivery = Delivery(
             ledger,
@@ -71,6 +72,7 @@ class Kernel:
             log=self.log,
         )
         self.reactions = Reactions(ledger, self.delivery, clock, self.config.get("task_reactions"))
+        self.reactions.finalizations = self.finalizations
         self._reaction_exceptions = set()
         self.duplicates = 0
         self.conversation_scenes = {}
@@ -80,16 +82,30 @@ class Kernel:
         interrupted = await run_sync(self.ledger, self.ledger.restart)
         await self.reactions.restart(interrupted)
 
-    def submit(self, trace, actor, operation):
-        record = self.ledger.get("record", trace)
+    async def persist(self, trace, function, *args, **kwargs):
+        finalization = self.finalizations.get(trace)
+        if finalization is not None:
+            return await finalization.persist(function, *args, **kwargs)
+        return await run_sync(self.ledger, function, *args, **kwargs)
 
-        async def run():
-            async with transaction(self.ledger):
+    async def submit(self, trace, actor, operation):
+        record = await self.persist(trace, self.ledger.get, "record", trace)
+        finalization = self.finalizations.get(trace)
+
+        def begin():
+            with self.ledger.transaction():
                 record = self.ledger.get("record", trace)
                 if record["exec_status"] in EXEC_TERMINAL or record["cancelled"]:
-                    return None
+                    return False
                 record.update(exec_status="running", execution_started_at=self.ledger.now())
                 self.ledger.put("record", trace, record)
+                return True
+
+        async def run():
+            if finalization is not None:
+                finalization.track(asyncio.current_task())
+            if not await self.persist(trace, begin):
+                return None
             with record_scope(trace):
                 return await operation()
 
@@ -98,8 +114,8 @@ class Kernel:
         future.add_done_callback(lambda value: self.queued.pop(trace, None))
         return future
 
-    def allow_reaction_exception(self, trace, intent, *, permissions=(), owner_ignore=False):
-        record = self.ledger.get("record", trace)
+    async def allow_reaction_exception(self, trace, intent, *, permissions=(), owner_ignore=False):
+        record = await self.persist(trace, self.ledger.get, "record", trace)
         owner_exception = (
             owner_ignore
             and record["scene"] == "owner_private"
@@ -116,7 +132,7 @@ class Kernel:
         self.events.append(event)
         self.bus.publish(self.ledger.companion_id, event)
 
-    async def receive(self, event, *, filter_event):
+    async def receive(self, event, *, filter_event, finalization=None):
         event = await filter_event(event)
         if event is None:
             return None
@@ -126,7 +142,11 @@ class Kernel:
             if self.observe:
                 await self.observe(event)
             return None
-        event_id, new = await run_sync(self.ledger, self.ledger.claim_inbound, event)
+        event_id, new = (
+            await finalization.persist(self.ledger.claim_inbound, event)
+            if finalization is not None
+            else await run_sync(self.ledger, self.ledger.claim_inbound, event)
+        )
         if not new:
             self.duplicates += 1
             self.log.debug("inbound.duplicate", event_id=event_id)
@@ -135,8 +155,14 @@ class Kernel:
             await self.observe(event)
         return event_id
 
-    def open_record(self, **kwargs):
-        r = self.ledger.open_record(**kwargs)
+    async def open_record(self, *, finalization=None, **kwargs):
+        r = (
+            await finalization.persist(self.ledger.open_record, **kwargs)
+            if finalization is not None
+            else await run_sync(self.ledger, self.ledger.open_record, **kwargs)
+        )
+        if finalization is not None:
+            self.finalizations[r["trace_id"]] = finalization
         if r["source_event_id"]:
             self.emit(
                 "message.received",
@@ -151,13 +177,62 @@ class Kernel:
         return r
 
     async def execute(
-        self, trace, plugin_id, call, capability, invocation, *, schema=None, timeout_s=None
+        self,
+        trace,
+        plugin_id,
+        call,
+        capability,
+        invocation,
+        *,
+        schema=None,
+        timeout_s=None,
+        finalization=None,
     ):
         if not self.permissions(invocation.actor, call.tool):
             return Denial(reason_code="permission", message_for_model="Permission denied")
         if not self.quota(invocation.actor, call.tool):
             return Denial(reason_code="quota", message_for_model="Quota insufficient")
-        r = self.ledger.get("record", trace)
+        finalization = finalization or self.finalizations.get(trace)
+        operation = finalization or OwnedFinalization(self.delivery)
+        state = {"cancelled": False, "executing": False, "task": None}
+
+        def cancel():
+            state["cancelled"] = True
+            if state["executing"]:
+                state["task"].cancel()
+                return True
+            return False
+
+        follow = operation.follow if finalization is not None else operation.run
+        return await follow(
+            self._execute(
+                trace,
+                plugin_id,
+                call,
+                capability,
+                invocation,
+                finalization=operation,
+                state=state,
+                schema=schema,
+                timeout_s=timeout_s,
+            ),
+            cancel=cancel,
+        )
+
+    async def _execute(
+        self,
+        trace,
+        plugin_id,
+        call,
+        capability,
+        invocation,
+        *,
+        finalization,
+        state,
+        schema=None,
+        timeout_s=None,
+    ):
+        r = await finalization.persist(self.ledger.get, "record", trace)
         key = capability.idempotency_key(call, invocation)
         complete_key = [
             self.ledger.companion_id,
@@ -166,17 +241,24 @@ class Kernel:
             r["source_event_id"] or trace,
             key,
         ]
-        existing = self.ledger.find_invocation(complete_key)
+        existing = await finalization.persist(self.ledger.find_invocation, complete_key)
         if existing:
-            return self._existing(existing)
+            return await finalization.persist(self._existing, existing)
         plan = await capability.prepare(call, invocation)
         if isinstance(plan, Denial):
             return plan
+        if state["cancelled"]:
+            return ToolResult(
+                call_id=call.call_id,
+                status="cancelled",
+                content="",
+                data={},
+                error={"code": "cancelled", "message": ""},
+            )
         seconds = timeout_s or self.config.get("tasks", {}).get("default_deadline_seconds", 600)
         if seconds > self.max_task_seconds:
             self.log.warning("task.timeout_capped", tool=call.tool)
-        inv, first = await run_sync(
-            self.ledger,
+        inv, first = await finalization.persist(
             self.ledger.claim_invocation,
             trace,
             plugin_id,
@@ -185,12 +267,17 @@ class Kernel:
             timeout=min(seconds, self.max_task_seconds),
             schema=schema or {},
         )
-        async with transaction(self.ledger):
-            inv["plan"] = {"summary": plan.summary}
-            self.ledger.put("invocation", inv["invocation_id"], inv)
-        if not await run_sync(self.ledger, self.ledger.start_invocation, inv["invocation_id"]):
-            return self._existing(inv)
-        r = self.ledger.get("record", trace)
+
+        def store_plan():
+            with self.ledger.transaction():
+                current = self.ledger.get("invocation", inv["invocation_id"])
+                current["plan"] = {"summary": plan.summary}
+                self.ledger.put("invocation", inv["invocation_id"], current)
+
+        await finalization.persist(store_plan)
+        if not await finalization.persist(self.ledger.start_invocation, inv["invocation_id"]):
+            return await finalization.persist(self._existing, inv)
+        r = await finalization.persist(self.ledger.get, "record", trace)
         if first:
             self.emit(
                 "task.started",
@@ -202,11 +289,24 @@ class Kernel:
                     conversation_id=r["conversation_id"],
                 ),
             )
-            self.reactions.request(trace, "accepted")
+            await self.reactions.request(trace, "accepted", finalization=finalization)
         token = self.tokens.setdefault(trace, CancelToken())
         invocation = Invocation.model_validate({**dump(invocation), "task_id": r["task_id"]})
-        if len([i for i in self.ledger.rows("invocation") if i["trace_id"] == trace]) == 1:
-            self.reactions.request(trace, "running")
+        invocations = await finalization.persist(self.ledger.rows, "invocation")
+        if len([i for i in invocations if i["trace_id"] == trace]) == 1:
+            await self.reactions.request(trace, "running", finalization=finalization)
+        if state["cancelled"]:
+            result = ToolResult(
+                call_id=call.call_id,
+                status="cancelled",
+                content="",
+                data={},
+                error={"code": "cancelled", "message": ""},
+            )
+            await finalization.persist(self.ledger.finish_invocation, inv["invocation_id"], result)
+            return result
+        state["task"] = asyncio.current_task()
+        state["executing"] = True
         with record_scope(trace):
             task = asyncio.create_task(capability.execute(plan, invocation, token.child()))
         self.tasks[trace] = task
@@ -233,8 +333,8 @@ class Kernel:
             )
 
             async def finalize():
-                await run_sync(
-                    self.ledger, self.ledger.finish_invocation, inv["invocation_id"], result
+                await finalization.persist(
+                    self.ledger.finish_invocation, inv["invocation_id"], result
                 )
 
                 async def late():
@@ -242,17 +342,13 @@ class Kernel:
                         value = await task
                     except (Exception, asyncio.CancelledError):
                         return
-                    await self.delivery.persist(
+                    await finalization.persist(
                         self.ledger.finish_invocation, inv["invocation_id"], value
                     )
 
-                watcher = background(late())
-                self.delivery.background.add(watcher)
-                watcher.add_done_callback(self.delivery.background.discard)
+                finalization.track(background(late()))
 
-            finalizer = background(finalize())
-            self.delivery.background.add(finalizer)
-            finalizer.add_done_callback(self.delivery.background.discard)
+            finalizer = finalization.track(background(finalize()))
             await asyncio.shield(finalizer)
             return result
 
@@ -276,6 +372,7 @@ class Kernel:
             except asyncio.CancelledError:
                 if not token.cancelled:
                     task_cancelled = True
+                    await cancel_invocation()
                     raise
                 result = ToolResult(
                     call_id=call.call_id,
@@ -292,8 +389,8 @@ class Kernel:
                     data={},
                     error={"code": type(exc).__name__, "message": ""},
                 )
-            await self.delivery.persist(self.ledger.finish_invocation, inv["invocation_id"], result)
             settled = True
+            await finalization.persist(self.ledger.finish_invocation, inv["invocation_id"], result)
             return result
         except asyncio.CancelledError:
             # task.result() 的取消仍由原有分支处理；这里只收尾外部取消。
@@ -321,7 +418,7 @@ class Kernel:
     async def seal(self, trace, status, intents=(), error=None):
         if any(i.kind == "react" and i.intent_id not in self._reaction_exceptions for i in intents):
             raise ValueError("record cannot react without a declared exception")
-        await run_sync(self.ledger, self.ledger.seal, trace, status, intents, error)
+        await self.persist(trace, self.ledger.seal, trace, status, intents, error)
         await self.complete(trace)
 
     async def _sent(self, intent, receipt):
@@ -335,18 +432,24 @@ class Kernel:
             ),
         )
 
-    async def complete(self, trace):
-        async with transaction(self.ledger):
+    def _complete_record(self, trace):
+        with self.ledger.transaction():
             r = self.ledger.get("record", trace)
             if (
                 r["exec_status"] not in EXEC_TERMINAL
                 or r["delivery_status"] == "pending"
                 or r["notified"]
             ):
-                return
+                return None
             r["notified"] = True
             r["delivery_finished_at"] = self.ledger.now()
             self.ledger.put("record", trace, r)
+            return r
+
+    async def complete(self, trace):
+        r = await self.persist(trace, self._complete_record, trace)
+        if r is None:
+            return
         self.log.info(
             "record.completed",
             trace_id=trace,
@@ -361,7 +464,11 @@ class Kernel:
         )
         if r["kind"] != "task":
             return
-        invocations = [i for i in self.ledger.rows("invocation") if i["trace_id"] == trace]
+        invocations = [
+            i
+            for i in await self.persist(trace, self.ledger.rows, "invocation")
+            if i["trace_id"] == trace
+        ]
         summary = TaskSummary(
             task_id=r["task_id"],
             trace_id=trace,
@@ -377,7 +484,7 @@ class Kernel:
         )
         success = r["exec_status"] == "ok"
         self.emit("task.completed" if success else "task.failed", dump(summary))
-        self.reactions.request(trace, "done" if success else "failed")
+        await self.reactions.request(trace, "done" if success else "failed")
         if self.task_completed:
             await self.task_completed(summary)
 
@@ -390,7 +497,67 @@ class Kernel:
             and (not isinstance(task_id, str) or re.fullmatch(r"[0-9a-f]{8}", task_id) is None)
         ):
             return "invalid_request"
-        records = [r for r in self.ledger.rows("record") if r["trace_id"] != _current_trace.get()]
+        target = await run_sync(
+            self.ledger,
+            self._cancel_target,
+            actor,
+            conversation_id,
+            task_id,
+            reply_to,
+            _current_trace.get(),
+            self.conversation_scenes.get(conversation_id, "public_group"),
+        )
+        if isinstance(target, str):
+            return target
+        trace = target["trace_id"]
+        token = self.tokens.setdefault(trace, CancelToken())
+        token.cancel("cancelled")
+        for intent in await self.persist(trace, self.ledger.intents, trace):
+            if not intent["status_reaction"] and not self.delivery.group_started(intent):
+                code = (
+                    intent["error"]["code"]
+                    if intent["status"] == "retry_wait" and intent["error"]
+                    else "cancelled_before_send"
+                )
+                await self.persist(trace, self.ledger.fail_intent, intent["intent_id"], code)
+                active = self.delivery.active_tokens.get(intent["intent_id"])
+                if active:
+                    active.cancel("cancelled")
+        active_task = self.record_tasks.get(trace) or self.tasks.get(trace)
+        if active_task is not None:
+            timer = asyncio.create_task(self.clock.sleep(self.grace))
+            try:
+                done, _ = await asyncio.wait(
+                    {active_task, timer}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if active_task not in done:
+                    active_task.cancel()
+            finally:
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
+        if target["exec_status"] not in EXEC_TERMINAL:
+            await self.persist(
+                trace,
+                self.ledger.seal,
+                trace,
+                "cancelled",
+                error={"code": "cancelled", "message": ""},
+            )
+        if target["exec_status"] == "pending" and trace in self.queued:
+            self.queued[trace].cancel()
+        await self.complete(trace)
+        return "cancelled"
+
+    def _cancel_target(self, actor, conversation_id, task_id, reply_to, current_trace, scene):
+        with self.ledger.transaction():
+            return self._cancel_target_in_transaction(
+                actor, conversation_id, task_id, reply_to, current_trace, scene
+            )
+
+    def _cancel_target_in_transaction(
+        self, actor, conversation_id, task_id, reply_to, current_trace, scene
+    ):
+        records = [r for r in self.ledger.rows("record") if r["trace_id"] != current_trace]
         target = None
         if reply_to is not None:
             ref = dump(reply_to)
@@ -434,11 +601,9 @@ class Kernel:
             target = (tasks or queued or [None])[-1]
         if target is None:
             return "not_found"
-        current = self.ledger.get("record", _current_trace.get()) if _current_trace.get() else None
+        current = self.ledger.get("record", current_trace) if current_trace else None
         scene = (
-            current["scene"]
-            if current and current["conversation_id"] == conversation_id
-            else self.conversation_scenes.get(conversation_id, "public_group")
+            current["scene"] if current and current["conversation_id"] == conversation_id else scene
         )
         if not visible(
             target,
@@ -453,51 +618,14 @@ class Kernel:
             or target["requester"]
             and target["requester"]["actor_id"] == actor.actor_id
         )
-        async with transaction(self.ledger):
-            target = self.ledger.get("record", trace)
-            self.ledger.audit(
-                "cancel_requested", trace_id=trace, actor_id=actor.actor_id, allowed=bool(allowed)
-            )
-            if not allowed:
-                return "denied"
-            if target["exec_status"] in EXEC_TERMINAL and target["delivery_status"] != "pending":
-                return "already_finished"
-            target["cancelled"] = True
-            self.ledger.put("record", trace, target)
-        token = self.tokens.setdefault(trace, CancelToken())
-        token.cancel("cancelled")
-        for intent in self.ledger.intents(trace):
-            if not intent["status_reaction"] and not self.delivery.group_started(intent):
-                code = (
-                    intent["error"]["code"]
-                    if intent["status"] == "retry_wait" and intent["error"]
-                    else "cancelled_before_send"
-                )
-                await run_sync(self.ledger, self.ledger.fail_intent, intent["intent_id"], code)
-                active = self.delivery.active_tokens.get(intent["intent_id"])
-                if active:
-                    active.cancel("cancelled")
-        active_task = self.record_tasks.get(trace) or self.tasks.get(trace)
-        if active_task is not None:
-            timer = asyncio.create_task(self.clock.sleep(self.grace))
-            try:
-                done, _ = await asyncio.wait(
-                    {active_task, timer}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if active_task not in done:
-                    active_task.cancel()
-            finally:
-                timer.cancel()
-                await asyncio.gather(timer, return_exceptions=True)
-        if target["exec_status"] not in EXEC_TERMINAL:
-            await run_sync(
-                self.ledger,
-                self.ledger.seal,
-                trace,
-                "cancelled",
-                error={"code": "cancelled", "message": ""},
-            )
-        if target["exec_status"] == "pending" and trace in self.queued:
-            self.queued[trace].cancel()
-        await self.complete(trace)
-        return "cancelled"
+        target = self.ledger.get("record", trace)
+        self.ledger.audit(
+            "cancel_requested", trace_id=trace, actor_id=actor.actor_id, allowed=bool(allowed)
+        )
+        if not allowed:
+            return "denied"
+        if target["exec_status"] in EXEC_TERMINAL and target["delivery_status"] != "pending":
+            return "already_finished"
+        target["cancelled"] = True
+        self.ledger.put("record", trace, target)
+        return target

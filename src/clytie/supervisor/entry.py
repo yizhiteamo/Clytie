@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import deque
 from pathlib import Path
 
 from clytie.clock import SystemClock
@@ -55,6 +56,49 @@ async def orphan_exit(runtime, clock, protocol):
     os._exit(0)
 
 
+class _SilenceApplications:
+    """静默按收到顺序应用；控制元数据有界，确认只在真实应用之后发送。"""
+
+    def __init__(self, runtime, acknowledge, stopping):
+        self.runtime, self.acknowledge, self.stopping = runtime, acknowledge, stopping
+        self.pending = deque()
+        self.task = None
+        self.applying = self.closed = False
+
+    def submit(self, message):
+        if self.closed or self.stopping() or len(self.pending) + int(self.applying) >= 64:
+            self.runtime.log.warning("companion.silence_busy")
+            return
+        self.pending.append((message["seq"], message["on"]))
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._apply())
+            self.runtime.management_tasks.add(self.task)
+            self.task.add_done_callback(self.runtime.management_tasks.discard)
+
+    def close(self):
+        self.closed = True
+        self.pending.clear()
+
+    async def _apply(self):
+        while self.pending and not self.closed and not self.stopping():
+            seq, on = self.pending.popleft()
+            self.applying = True
+            try:
+                await self.runtime.silence(on)
+            except Exception as exc:
+                self.runtime.log.warning("companion.silence_failed", exc_type=type(exc).__name__)
+            else:
+                self.acknowledge(seq)
+            finally:
+                self.applying = False
+        self.pending.clear()
+
+    async def finish(self):
+        self.close()
+        if self.task is not None:
+            await asyncio.shield(self.task)
+
+
 async def companion_main(home, cid):
     from .heartbeat import Heartbeat
 
@@ -94,6 +138,7 @@ async def companion_main(home, cid):
 
     async def refresh():
         while True:
+            await runtime.refresh_health()
             heartbeat.update(
                 runtime.health(),
                 interval=runtime.config.get("heartbeat_seconds", 5),
@@ -139,6 +184,14 @@ async def companion_main(home, cid):
     stopping = None
     requests = runtime.management_requests
 
+    def silence_ack(seq):
+        with output_lock:
+            frame(protocol, dict(type="silence_ack", seq=seq))
+
+    silence = _SilenceApplications(
+        runtime, silence_ack, lambda: stopping is not None or stop_requested.is_set()
+    )
+
     async def handle_request(msg):
         from clytie.api.auth import APIError
         from clytie.api.operations import companion_operation
@@ -179,6 +232,7 @@ async def companion_main(home, cid):
                 requests.add(task)
                 task.add_done_callback(requests.discard)
             elif kind == "stop" and stopping is None:
+                silence.close()
                 heartbeat.update(phase="stopping")
                 stopping = asyncio.create_task(runtime.stop(msg.get("task_mode", "cancel")))
             elif kind == "management_cancel":
@@ -189,15 +243,15 @@ async def companion_main(home, cid):
                 runtime.escalated.set()
                 runtime.cancel_management()
             elif kind == "session_ending":
+                silence.close()
                 runtime.session_ending()
                 runtime.escalated.set()
             elif kind == "silence":
-                runtime.silence(msg["on"])
-                with output_lock:
-                    frame(protocol, dict(type="silence_ack", seq=msg["seq"]))
+                silence.submit(msg)
             else:
                 runtime.log.warning("companion.unknown_type")
     finally:
+        await silence.finish()
         for task in requests:
             task.cancel()
         await asyncio.gather(*requests, return_exceptions=True)

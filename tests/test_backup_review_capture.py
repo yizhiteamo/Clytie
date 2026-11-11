@@ -10,7 +10,6 @@ import yaml
 
 from clytie.agent.policy import Boundary
 from clytie.backup.container import pack
-from clytie.backup.coordination import run_sync
 from clytie.backup.repository import SourceRepository
 from clytie.backup.restore import RestoreManager
 from clytie.backup.source import capture_instance
@@ -228,19 +227,19 @@ async def test_online_boundary_capture_freezes_state_and_matching_audit(
         if change == "report":
             await boundary.report("trace_b", actor, "romance", CancelToken())
         else:
-            await run_sync(runtime.ledger, boundary.release, "companion_a", actor.actor_id)
+            await boundary.release("companion_a", actor.actor_id)
 
     # 无关业务在捕获链之外创建；provider 的子任务应继承重入拒绝标记。
     concurrent.append(asyncio.create_task(unrelated_change()))
 
-    async def capture_group(paths, coordinator, *, epoch, capture):
+    async def capture_group(paths, coordinator, *, epoch, capture, owner=None):
         async def during_gate(checkpoint):
             await capture(checkpoint)
             trigger_change.set()
             await clock.drain(2)
             assert not concurrent[0].done()
 
-        view = await original(paths, coordinator, epoch=epoch, capture=during_gate)
+        view = await original(paths, coordinator, epoch=epoch, capture=during_gate, owner=owner)
         clock.advance(0.02)
         await concurrent[0]
         assert boundary.state != expected

@@ -4,11 +4,13 @@ import asyncio
 import sqlite3
 import threading
 from concurrent.futures import Future
+from contextlib import nullcontext
 from pathlib import Path
 from queue import Queue
 
 from clytie.plugin_host.locking import OperationBusy
 from clytie.storage.capture_scope import capture_scope
+from clytie.storage.owner import StorageBusy
 
 from .coordination import CaptureError
 
@@ -167,11 +169,12 @@ class _SnapshotWorker:
 
 
 class CapturedGroup:
-    def __init__(self, epoch, worker, captured_at=None):
+    def __init__(self, epoch, worker, captured_at=None, ticket=None):
         self.epoch, self._worker, self.captured_at = epoch, worker, captured_at
         self.closed = False
         self._materializing = False
         self._closing = None
+        self._ticket = ticket
 
     @property
     def resource_pending(self):
@@ -185,6 +188,8 @@ class CapturedGroup:
             while self._worker.thread.is_alive():
                 await self._worker.coordinator.clock.sleep(0)
         self.closed = True
+        if self._ticket is not None:
+            self._ticket.release()
 
     async def close(self):
         if self._materializing:
@@ -211,7 +216,7 @@ class CapturedGroup:
             await self.close()
 
 
-async def capture_group(paths, coordinator, *, epoch, capture=None):
+async def capture_group(paths, coordinator, *, epoch, capture=None, owner=None):
     """调用方持有生命周期锁；数据库和文件门闩仅由快照线程访问。"""
     if (
         not paths
@@ -222,24 +227,48 @@ async def capture_group(paths, coordinator, *, epoch, capture=None):
         )
     ):
         raise CaptureError("snapshot_inconsistent")
-    worker = _SnapshotWorker(paths, coordinator)
-    group = CapturedGroup(epoch, worker)
+    try:
+        ticket = owner.reserve_capture() if owner is not None else None
+    except StorageBusy:
+        raise CaptureError("capture_busy") from None
+    try:
+        worker = _SnapshotWorker(paths, coordinator)
+    except BaseException:
+        if ticket is not None:
+            ticket.release()
+        raise
+    group = CapturedGroup(epoch, worker, ticket=ticket)
     try:
         await worker.call("open")
-        while not await worker.call("capture"):
-            remaining = coordinator.wait_seconds - (coordinator.clock.monotonic() - worker.started)
-            if remaining <= 0:
-                raise CaptureError("capture_busy")
-            await coordinator.clock.sleep(min(0.01, remaining))
-        if capture is not None:
-            with capture_scope(coordinator.path):
-                await capture(worker.checkpoint)
-        worker.checkpoint()
-        group.captured_at = coordinator.clock.now().isoformat()
-        await worker.call("release")
-        # 释放若阻塞跨过持有期限，也不能把迟到视图当作成功。
-        worker.checkpoint()
+        barrier = (
+            ticket.barrier(worker.started + coordinator.wait_seconds) if ticket else nullcontext()
+        )
+        async with barrier:
+            try:
+                while not await worker.call("capture"):
+                    remaining = coordinator.wait_seconds - (
+                        coordinator.clock.monotonic() - worker.started
+                    )
+                    if remaining <= 0:
+                        raise CaptureError("capture_busy")
+                    await coordinator.clock.sleep(min(0.01, remaining))
+                if capture is not None:
+                    with capture_scope(coordinator.path):
+                        await capture(worker.checkpoint)
+                worker.checkpoint()
+                group.captured_at = coordinator.clock.now().isoformat()
+                await worker.call("release")
+                # 释放若阻塞跨过持有期限，也不能把迟到视图当作成功。
+                worker.checkpoint()
+            except BaseException:
+                worker.cancelled.set()
+                await group.close()
+                raise
         return group
+    except StorageBusy:
+        worker.cancelled.set()
+        await group.close()
+        raise CaptureError("capture_busy") from None
     except BaseException:
         worker.cancelled.set()
         await group.close()

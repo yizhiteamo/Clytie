@@ -6,6 +6,8 @@ from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from uuid import uuid4
 
+from clytie.storage.owner import before_storage_commit
+
 from .projection import redact, visible
 
 SCHEMA_VERSION = 2
@@ -96,6 +98,7 @@ class Ledger:
         with self.coordination.commit() if self.coordination else nullcontext(), self.db:
             self.db.execute("BEGIN IMMEDIATE")
             yield
+            before_storage_commit()
 
     def get(self, table, key):
         assert table in TABLES

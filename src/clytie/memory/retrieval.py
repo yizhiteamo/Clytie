@@ -2,8 +2,9 @@
 
 import math
 
-from clytie.backup.coordination import run_sync, transaction
+from clytie.backup.coordination import run_sync
 from clytie.sdk import CancelToken
+from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
 from .store import BASIS, canonical, fingerprint, query_tokens
 
@@ -54,19 +55,30 @@ class CandidateReader:
         self.store, self.scene, self.conversation_id = store, scene, conversation_id
         self.allowed = set(allowed_visibility or ["private", "public", "relationship"])
 
-    def records(self):
+    def records(self, *, scene=None, conversation_id=None):
         return [
             r
-            for r in self.store.project(self.scene, self.conversation_id)
+            for r in self.store.project(
+                self.scene if scene is None else scene,
+                self.conversation_id if conversation_id is None else conversation_id,
+            )
             if r.visibility in self.allowed and not r.decay.frozen
         ]
+
+    async def _snapshot(self):
+        return await run_sync(
+            self.store,
+            self.records,
+            scene=self.scene,
+            conversation_id=self.conversation_id,
+        )
 
     async def iter(self, *, kinds=None, scope=None, updated_after=None, batch=200):
         if batch < 1:
             raise ValueError("batch must be positive")
         rows = [
             r
-            for r in self.records()
+            for r in await self._snapshot()
             if (kinds is None or r.kind in kinds)
             and (scope is None or r.scope == scope)
             and (updated_after is None or r.updated_at > updated_after)
@@ -76,13 +88,13 @@ class CandidateReader:
 
     async def get(self, record_ids):
         ids = set(record_ids)
-        return [r for r in self.records() if r.record_id in ids]
+        return [r for r in await self._snapshot() if r.record_id in ids]
 
     async def count(self):
-        return len(self.records())
+        return len(await self._snapshot())
 
     async def filter_hits(self, hits):
-        ids = {r.record_id for r in self.records()}
+        ids = {r.record_id for r in await self._snapshot()}
         return [hit for hit in hits if hit.record_id in ids]
 
 
@@ -132,12 +144,67 @@ class Retrieval:
             if self.log:
                 self.log.warning("memory.embedder_unavailable")
 
+    def _set_meta(self, key, value):
+        with self.store.transaction():
+            self.store.set_meta(key, value)
+
+    def _rebuild_records(self):
+        with self.store.transaction():
+            records = [r for r in self.store.all_records() if not r.retracted]
+            self.store.set_meta("embedding_progress", {"complete": 0, "total": len(records)})
+        return records
+
+    def _has_vector(self, record, identifier):
+        return (
+            self.store.db.execute(
+                "SELECT 1 FROM vectors WHERE record_id=? AND revision=? AND embedder_id=?",
+                (record.record_id, record.revision, identifier),
+            ).fetchone()
+            is not None
+        )
+
+    def _save_vector(self, record, identifier, values):
+        with self.store.transaction():
+            current = self.store.get_raw(record.record_id)
+            if current and current.revision == record.revision:
+                self.store.db.execute(
+                    "INSERT OR REPLACE INTO vectors VALUES(?,?,?,?)",
+                    (record.record_id, record.revision, identifier, canonical(values)),
+                )
+
+    def _lexical_snapshot(self, query, *, scene, conversation_id):
+        records = self.store.project(scene, conversation_id)
+        ids = {r.record_id for r in records}
+        ordered_words = sorted(query_tokens(query))
+        lexical_scores = {}
+        for start in range(0, len(ordered_words), 400):
+            batch = ordered_words[start : start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            for row in self.store.db.execute(
+                f"SELECT record_id,count(*) FROM keywords WHERE token IN ({placeholders}) GROUP BY record_id",
+                batch,
+            ):
+                if row[0] in ids:
+                    lexical_scores[row[0]] = lexical_scores.get(row[0], 0) + row[1]
+        return records, lexical_scores
+
+    def _vector_rows(self, identifier):
+        return [
+            dict(row)
+            for row in self.store.db.execute(
+                "SELECT * FROM vectors WHERE embedder_id=?", (identifier,)
+            )
+        ]
+
+    def _embedding_ready(self):
+        if self.store.meta("embedder_unavailable", False):
+            with self.store.transaction():
+                self.store.set_meta("embedder_unavailable", False)
+
     async def rebuild(self, cancel=None):
         cancel = cancel or CancelToken()
-        records = [r for r in self.store.all_records() if not r.retracted]
+        records = await run_sync(self.store, self._rebuild_records)
         self.progress = {"complete": 0, "total": len(records)}
-        async with transaction(self.store):
-            self.store.set_meta("embedding_progress", self.progress)
         if self.embedder is None:
             await run_sync(self.store, self.warn)
             return
@@ -145,10 +212,7 @@ class Retrieval:
 
         for record in records:
             cancel.raise_if_cancelled()
-            old = self.store.db.execute(
-                "SELECT 1 FROM vectors WHERE record_id=? AND revision=? AND embedder_id=?",
-                (record.record_id, record.revision, self.embedder_id),
-            ).fetchone()
+            old = await run_sync(self.store, self._has_vector, record, self.embedder_id)
             if not old:
                 identifier = self.embedder_id
                 try:
@@ -158,26 +222,18 @@ class Retrieval:
                     if len(result) != 1:
                         raise ValueError("invalid embedding result")
                     values = vector(result[0])
-                    async with transaction(self.store):
-                        current = self.store.get_raw(record.record_id)
-                        if (
-                            current
-                            and current.revision == record.revision
-                            and identifier == self.embedder_id
-                        ):
-                            self.store.db.execute(
-                                "INSERT OR REPLACE INTO vectors VALUES(?,?,?,?)",
-                                (record.record_id, record.revision, identifier, canonical(values)),
-                            )
+                    # 插件身份在事件循环读取；事务内只核对持久修订，不调用插件属性。
+                    if identifier == self.embedder_id:
+                        await run_sync(self.store, self._save_vector, record, identifier, values)
+                except (StorageBusy, StorageCancelled, StorageFailed):
+                    raise
                 except Exception:
                     await run_sync(self.store, self.warn)
                     continue
             self.progress["complete"] += 1
-            async with transaction(self.store):
-                self.store.set_meta("embedding_progress", self.progress)
+            await run_sync(self.store, self._set_meta, "embedding_progress", self.progress)
         if self.progress["complete"] == self.progress["total"]:
-            async with transaction(self.store):
-                self.store.set_meta("embedder_unavailable", False)
+            await run_sync(self.store, self._set_meta, "embedder_unavailable", False)
 
     async def search(
         self, query, scene, conversation_id, *, limit=None, cancel=None, include_frozen=False
@@ -189,20 +245,14 @@ class Retrieval:
         cancel = cancel or CancelToken()
         cancel.raise_if_cancelled()
         config = self.store.config.get("memory", {})
-        records = self.store.project(scene, conversation_id)
+        records, lexical_scores = await run_sync(
+            self.store,
+            self._lexical_snapshot,
+            query,
+            scene=scene,
+            conversation_id=conversation_id,
+        )
         by_id = {r.record_id: r for r in records}
-        words = query_tokens(query)
-        ordered_words = sorted(words)
-        lexical_scores = {}
-        for start in range(0, len(ordered_words), 400):
-            batch = ordered_words[start : start + 400]
-            placeholders = ",".join("?" for _ in batch)
-            for row in self.store.db.execute(
-                f"SELECT record_id,count(*) FROM keywords WHERE token IN ({placeholders}) GROUP BY record_id",
-                batch,
-            ):
-                if row[0] in by_id:
-                    lexical_scores[row[0]] = lexical_scores.get(row[0], 0) + row[1]
         routes = [sorted(lexical_scores.items(), key=lambda pair: (-pair[1], pair[0]))]
         semantic_ids = set()
         if self.embedder is None:
@@ -214,9 +264,7 @@ class Retrieval:
                     raise ValueError("invalid embedding result")
                 q = vector(response[0])
                 scores = []
-                for row in self.store.db.execute(
-                    "SELECT * FROM vectors WHERE embedder_id=?", (self.embedder_id,)
-                ):
+                for row in await run_sync(self.store, self._vector_rows, self.embedder_id):
                     record = by_id.get(row["record_id"])
                     if record and record.revision == row["revision"]:
                         score = cosine(q, vector(json.loads(row["vector"])))
@@ -225,9 +273,9 @@ class Retrieval:
                 semantic_ids = {key for key, _ in scores}
                 routes.append(sorted(scores, key=lambda p: (-p[1], p[0])))
                 self.warnings = []
-                if self.store.meta("embedder_unavailable", False):
-                    async with transaction(self.store):
-                        self.store.set_meta("embedder_unavailable", False)
+                await run_sync(self.store, self._embedding_ready)
+            except (StorageBusy, StorageCancelled, StorageFailed):
+                raise
             except Exception:
                 await run_sync(self.store, self.warn)
         fused = {}

@@ -28,6 +28,17 @@ async def execute(
     hosted=None,
 ):
     clock = clock or SystemClock()
+    if hosted is not None:
+        tasks = getattr(hosted, "management_tasks", None)
+        if tasks is None:
+            tasks = hosted.management_tasks = set()
+        task = asyncio.create_task(
+            _execute_hosted(home, cid, operation_id, args, clock, operation, hosted)
+        )
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+        return await asyncio.shield(task)
     path = contained(
         home, home / "companions" / cid / "management/operations" / (operation_id + ".json")
     )
@@ -81,6 +92,91 @@ async def execute(
                 if hosted is not None:
                     hosted.management_journals.pop(operation_id, None)
                 current.reset(token)
+
+
+async def _execute_hosted(home, cid, operation_id, args, clock, operation, hosted):
+    from clytie.api.management_io import FileCommands, management_command
+    from clytie.storage.finalization import release_finalizer, reserve_finalizer
+    from clytie.storage.owner import StorageBusy, StorageFailed
+
+    store = hosted.host.memory_store(cid)
+    finalizer = None
+    work = {}
+    loop = asyncio.get_running_loop()
+    complete = False
+
+    def prepare():
+        nonlocal finalizer
+
+        path = contained(
+            home, home / "companions" / cid / "management/operations" / (operation_id + ".json")
+        )
+        journal = Journal.load(path, clock)
+        manager = gate(home, cid)
+        manager.__enter__()
+        work.update(journal=journal, gate=manager)
+        if journal.value["state"] != "accepted":
+            return None
+        finalizer = reserve_finalizer(store)
+        journal.loop = loop
+        journal.runtime_owned = True
+        journal.storage_finalizer = finalizer
+        journal.value["executor"] = process_identity()
+        journal.phase("preparing")
+        journal.checkpoint()
+        return journal.value["operation"]
+
+    def recover(cancelled=False):
+        journal = work["journal"]
+        journal.recover(store)
+        if cancelled and journal.value["state"] == "interrupted":
+            journal.phase("cancelled")
+        return {
+            "ok": journal.value["committed"],
+            "code": journal.value["state"],
+            "operation_id": operation_id,
+        }
+
+    async with FileCommands(clock) as files:
+        try:
+            try:
+                selected = await files.run(prepare)
+            except ManagementCancelled:
+                await files.run(work["journal"].phase, "cancelled")
+                complete = True
+                return {"ok": False, "code": "cancelled", "operation_id": operation_id}
+            if selected is None:
+                complete = True
+                return {"ok": False, "code": "operation_already_started"}
+            journal = work["journal"]
+            binding = current.set(journal)
+            hosted.management_journals[operation_id] = journal
+            try:
+                result = await operation(home, clock, cid, selected, args, hosted)
+                await management_command(store, journal.committed, result)
+                complete = True
+                return {"ok": True, "result": result, "operation_id": operation_id}
+            except (StorageBusy, StorageFailed):
+                # 控制错误不能伪装成普通成功；真实执行责任尚未核实时保留凭证。
+                raise
+            except (ManagementCancelled, asyncio.CancelledError):
+                result = await management_command(store, recover, True)
+                complete = result["code"] != "recovery_blocked"
+                if result["ok"]:
+                    result["result"] = await management_command(store, journal.public)
+                return result
+            except Exception:
+                result = await management_command(store, recover)
+                complete = result["code"] != "recovery_blocked"
+                return result
+            finally:
+                hosted.management_journals.pop(operation_id, None)
+                current.reset(binding)
+        finally:
+            if "gate" in work:
+                await files.run(work["gate"].__exit__, None, None, None)
+            if complete:
+                release_finalizer(finalizer, executor_finished=True, obligations_complete=True)
 
 
 def main():

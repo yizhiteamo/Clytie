@@ -35,6 +35,10 @@ async def admission(store):
 
 
 async def run_sync(store, function, *args, **kwargs):
+    from clytie.storage.handle import StoreHandle
+
+    if isinstance(store, StoreHandle):
+        return await store.invoke(function, *args, **kwargs)
     async with admission(store):
         return function(*args, **kwargs)
 

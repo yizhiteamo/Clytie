@@ -692,8 +692,12 @@ class Management:
                 return await self.transfer(
                     cid, "tasks", {"task_id": params["task_id"], "full": query.get("full") == "1"}
                 )
-            return local_task(
-                params["task_id"], home=self.home, companion_id=cid, full=query.get("full") == "1"
+            return await asyncio.to_thread(
+                local_task,
+                params["task_id"],
+                home=self.home,
+                companion_id=cid,
+                full=query.get("full") == "1",
             )
         backup_apply = None
         if route == "/backup/memory/plan":

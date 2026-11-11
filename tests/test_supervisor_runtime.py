@@ -314,6 +314,7 @@ async def test_health_counts_without_loading_ledger_bodies(tmp_path, monkeypatch
             a.ledger.put("intent", f"fake_{n}", {"status": state})
     with monkeypatch.context() as patch:
         patch.setattr(a.ledger, "rows", lambda _: pytest.fail("health loaded record bodies"))
+        await runtime.refresh_health()
         health = runtime.health()
     assert health["inflight_tasks"] == 2 and health["sending"] == 1
     # Both predicates have reusable indexes; routine heartbeats do no JSON decoding.

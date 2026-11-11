@@ -120,7 +120,7 @@ async def test_cross_group_boundary_pause_skips_all_behavior_and_model(tmp_path)
     )
     assert not phases and len(model.requests) == count
     # 解除只清零暂停和类别计数，通知窗口保留。
-    agent.boundary.release(agent.cid, paused.message.sender.actor_id)
+    await agent.boundary.release(agent.cid, paused.message.sender.actor_id)
     assert not agent.boundary.paused(paused.message.sender)
     for _ in range(2):
         await agent.boundary.report(uuid4().hex, paused.message.sender, "romance", CancelToken())
@@ -135,7 +135,7 @@ async def test_natural_language_core_cancel_checks_requester(tmp_path, same_acto
     agent, _, model = await make_agent(tmp_path)
     source = event(agent, role="member", actor="member_a", scene="public_group")
     agent.ledger.claim_inbound(source)
-    target = agent.kernel.open_record(event_id=source.event_id)
+    target = await agent.kernel.open_record(event_id=source.event_id)
     agent.ledger.claim_invocation(
         target["trace_id"],
         "echo-tool",
@@ -176,7 +176,7 @@ async def test_natural_language_core_cancel_checks_requester(tmp_path, same_acto
         agent.ledger.get("record", target["trace_id"])["exec_status"] == "cancelled"
     ) == same_actor
     if same_actor:
-        specs, _ = agent.tools(incoming.conversation, incoming.message.sender)
+        specs, _ = await agent.tools(incoming.conversation, incoming.message.sender)
         assert "core_cancel_task" not in [tool.name for tool in specs]
     await finish(agent)
 

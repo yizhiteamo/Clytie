@@ -203,7 +203,14 @@ class Journal:
         }
         self.save()
 
-    def finish_file_audit(self):
+    def _database(self, path, store, mode):
+        if store is not None:
+            if store.path.resolve() != path.resolve():
+                raise ValueError("management_database_mismatch")
+            return store.db
+        return sqlite3.connect(path.resolve().as_uri() + "?mode=" + mode, uri=True)
+
+    def finish_file_audit(self, store=None):
         """Complete only a recorded file-publication audit, never replay the operation."""
         from pathlib import Path
 
@@ -216,10 +223,10 @@ class Journal:
         expected = self.path.parents[2] / "memory/memory.sqlite3"
         if path != expected.resolve() or path.is_symlink() or path.resolve() != path:
             raise ValueError("invalid file audit database")
-        db = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+        db = self._database(path, store, "rw")
         try:
             db.execute("BEGIN IMMEDIATE")
-            if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            if [tuple(row) for row in db.execute("PRAGMA quick_check")] != [("ok",)]:
                 raise ValueError("invalid file audit database")
             entries = [json.loads(row[0]) for row in db.execute("SELECT data FROM audit")]
             if not any(
@@ -240,11 +247,18 @@ class Journal:
                     "INSERT OR REPLACE INTO metadata VALUES('generation',?)",
                     (json.dumps((json.loads(generation[0]) if generation else 0) + 1),),
                 )
+            if store is not None:
+                from clytie.storage.owner import before_storage_commit
+
+                before_storage_commit()
             db.commit()
         finally:
-            db.close()
+            if store is None:
+                db.close()
+            elif db.in_transaction:
+                db.rollback()
 
-    def file_audit_exists(self):
+    def file_audit_exists(self, store=None):
         from pathlib import Path
 
         evidence = self.value.get("file_audit")
@@ -254,7 +268,7 @@ class Journal:
         expected = self.path.parents[2] / "memory/memory.sqlite3"
         if path != expected.resolve() or path.is_symlink() or path.resolve() != path:
             raise ValueError("invalid file audit database")
-        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        db = self._database(path, store, "ro")
         try:
             return any(
                 entry.get("operation_id") == self.value["id"]
@@ -263,16 +277,17 @@ class Journal:
                 for entry in (json.loads(row[0]) for row in db.execute("SELECT data FROM audit"))
             )
         finally:
-            db.close()
+            if store is None:
+                db.close()
 
-    def recover_file(self, artifact):
+    def recover_file(self, artifact, store=None):
         from clytie.plugin_host.locking import file_lock
 
         home = self.path.parents[4]
         with file_lock(home / "run/memory-recovery.lock", process_identity()):
-            return self._recover_file(artifact)
+            return self._recover_file(artifact, store)
 
-    def _recover_file(self, artifact):
+    def _recover_file(self, artifact, store=None):
         from pathlib import Path
 
         path = Path(artifact["path"])
@@ -284,7 +299,7 @@ class Journal:
             self.value["committed"] = True
             self.save()
         try:
-            audited = self.file_audit_exists()
+            audited = self.file_audit_exists(store)
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return self.blocked("file_audit_unverified")
         if audited and not published:
@@ -294,7 +309,7 @@ class Journal:
             return self.blocked("public_key_unverified")
         if published:
             try:
-                self.finish_file_audit()
+                self.finish_file_audit(store)
                 if self.value.get("backup_preview") is not None:
                     from clytie.backup.memory_source import publish_preview
 
@@ -406,9 +421,9 @@ class Journal:
             )
         } | {"reason": self.value.get("reason")}
 
-    def recover(self):
+    def recover(self, store=None):
         """Called only while holding the companion's OS management/runtime locks."""
-        result = self._recover()
+        result = self._recover(store)
         # Execution references survive response loss and the admission/journal gap.
         # Only verified terminal operations may release their own source protection.
         if self.value["state"] in TERMINAL and self.value["state"] != "recovery_blocked":
@@ -426,7 +441,7 @@ class Journal:
                 self.save()
         return result
 
-    def _recover(self):
+    def _recover(self, store=None):
         if not self.cleanup_temporaries():
             return self.blocked("temporary_unverified")
         if self.value["state"] in TERMINAL:
@@ -435,16 +450,16 @@ class Journal:
 
         artifact = self.value.get("file")
         if artifact:
-            return self.recover_file(artifact)
+            return self.recover_file(artifact, store)
         database = self.value.get("database")
         if database:
             path = Path(database)
             if not path.is_file() or path.is_symlink() or path.resolve() != path:
                 return self.blocked("database_missing")
             try:
-                db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                db = self._database(path, store, "ro")
                 try:
-                    if db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+                    if [tuple(row) for row in db.execute("PRAGMA quick_check")] != [("ok",)]:
                         return self.blocked("database_invalid")
                     rows = db.execute("SELECT data FROM audit").fetchall()
                     for row in rows:
@@ -460,7 +475,8 @@ class Journal:
                             self.save()
                             break
                 finally:
-                    db.close()
+                    if store is None:
+                        db.close()
             except (OSError, ValueError, sqlite3.Error):
                 return self.blocked("database_unverified")
         if not self.snapshot_verified():

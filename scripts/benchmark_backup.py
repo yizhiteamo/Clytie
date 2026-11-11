@@ -16,9 +16,10 @@ import platform
 import random
 import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter  # noqa: TID251 -- benchmark measurement, not product time
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ import yaml
 
 from clytie.backup import runtime_capture
 from clytie.backup.container import pack, unpack
-from clytie.backup.coordination import admission
+from clytie.backup.coordination import companion_coordinator, run_sync
 from clytie.backup.runtime_capture import capture_online
 from clytie.backup.source import capture_instance
 from clytie.config import load_home
@@ -37,6 +38,8 @@ from clytie.plugin_host import PluginHost
 from clytie.sdk import CancelToken
 from clytie.sdk.testing import FakeContext, FakeModel, MockClock
 from clytie.sdk.types import AssetRef
+from clytie.storage.owner import StorageOwner
+from clytie.storage.runtime import CompanionResources, bind_handles
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = 0x11DA9
@@ -186,22 +189,34 @@ async def setup(directory, scale, *, core_assets=False):
     host = PluginHost(ROOT, home, clock=clock)
     host.configure_report(report)
     runtime = LedgerRuntime(home, "companion_a", clock)
+    runtime.owner_managed = True
     await runtime.open()
-    store = host.memory_store("companion_a", {}, {})
+    storage_owner = await StorageOwner.start(
+        lambda: CompanionResources(host, runtime, {}),
+        companion_id="companion_a",
+        clock=clock,
+        coordination_path=companion_coordinator(home, "companion_a", clock).path,
+    )
+    await runtime.attach_owned(bind_handles(storage_owner, host, runtime))
+    store = host.memory_resources["companion_a"][0]
     plan = host.plan_enable("companion_a", "benchmark-snapshot")
     applied = await host.apply(plan.plan_id)
     if applied["failed"]:
         raise RuntimeError("fictional_provider_enable_failed")
     rows, files, size = scale
     rng = random.Random(SEED)
-    with store.transaction():
-        store.set_meta("companion_uid", "a" * 32)
-        store.db.execute("CREATE TABLE benchmark_payload (id INTEGER PRIMARY KEY, data BLOB)")
-        store.db.executemany(
-            "INSERT INTO benchmark_payload VALUES (?, ?)",
-            ((index, rng.randbytes(4096)) for index in range(rows)),
-        )
-    store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def seed_database():
+        with store.transaction():
+            store.set_meta("companion_uid", "a" * 32)
+            store.db.execute("CREATE TABLE benchmark_payload (id INTEGER PRIMARY KEY, data BLOB)")
+            store.db.executemany(
+                "INSERT INTO benchmark_payload VALUES (?, ?)",
+                ((index, rng.randbytes(4096)) for index in range(rows)),
+            )
+        store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    await run_sync(store, seed_database)
     data = home / (
         "companions/companion_a/assets"
         if core_assets
@@ -242,6 +257,7 @@ async def setup(directory, scale, *, core_assets=False):
         runtime=runtime,
         report=report,
         management_requests=set(),
+        storage_owner=storage_owner,
     ), store
 
 
@@ -259,6 +275,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
     last_clock = origin
     main_thread = threading.get_ident()
     loop_delays, stalled_stacks, phases = [], [], []
+    resource_samples, committed_request_indices, snapshot_threads = [], [], []
 
     def sample():
         while not stop.is_set():
@@ -268,6 +285,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
                 peak["wal"], sum(p.stat().st_size for p in owner.home.rglob("*-wal") if p.exists())
             )
             now = perf_counter()
+            resource_samples.append({"at_s": now - origin, **owner.storage_owner.status()})
             if now - last_clock > 0.1:
                 frame = sys._current_frames().get(main_thread)
                 stalled_stacks.append(
@@ -327,20 +345,36 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             await wait_until(scheduled)
             start = perf_counter()
             waited = None
-            query_ms = commit_ms = model_ms = None
+            query_ms = commit_ms = model_ms = storage_wait = None
             try:
-                store.db.execute(
-                    "SELECT data FROM benchmark_payload WHERE id=?",
-                    (index % (scale_override or SCALES[name])[0],),
-                ).fetchone()
-                query_ms = (perf_counter() - start) * 1000
-                write_start = perf_counter()
-                async with admission(store):
-                    waited = (perf_counter() - write_start) * 1000
-                    commit_start = perf_counter()
-                    with store.transaction():
-                        store.set_meta("benchmark_counter", index)
-                    commit_ms = (perf_counter() - commit_start) * 1000
+                enqueued = perf_counter()
+
+                def command(resources, receipt):
+                    executing = perf_counter()
+                    store = resources.memory
+                    query_started = perf_counter()
+                    store.db.execute(
+                        "SELECT data FROM benchmark_payload WHERE id=?",
+                        (index % (scale_override or SCALES[name])[0],),
+                    ).fetchone()
+                    query = (perf_counter() - query_started) * 1000
+                    write_started = perf_counter()
+                    with store.coordination.commit():
+                        acquired = perf_counter()
+                        with store.transaction():
+                            store.set_meta("benchmark_counter", index)
+                        committed = perf_counter()
+                        committed_request_indices.append(index)
+                    return (
+                        (executing - enqueued) * 1000,
+                        query,
+                        (acquired - write_started) * 1000,
+                        (committed - acquired) * 1000,
+                    )
+
+                storage_wait, query_ms, waited, commit_ms = await owner.storage_owner.execute(
+                    command
+                )
                 model_start = perf_counter()
                 await model.generate(None, CancelToken())
                 model_ms = (perf_counter() - model_start) * 1000
@@ -355,6 +389,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
                     "response_ms": (perf_counter() - scheduled) * 1000,
                     "write_wait_ms": waited,
                     "queue_delay_ms": (start - scheduled) * 1000,
+                    "storage_queue_ms": storage_wait,
                     "query_ms": query_ms,
                     "commit_ms": commit_ms,
                     "model_ms": model_ms,
@@ -375,20 +410,24 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
 
         async def observed_capture(paths, coordinator, **kwargs):
             class ObservedCoordinator:
-                clock = coordinator.clock
+                def __getattr__(self, name):
+                    return getattr(coordinator, name)
 
-                @asynccontextmanager
-                async def capture(self):
-                    waiting = perf_counter()
-                    async with coordinator.capture() as checkpoint:
-                        acquired = perf_counter()
-                        capture_waits.append((acquired - waiting) * 1000)
+                @contextmanager
+                def _lock(self):
+                    attempted = perf_counter()
+                    with coordinator._lock():
+                        # 获取包括锁文件 fsync；持有预算按生产实现从尝试获取前计。
+                        capture_waits.append((perf_counter() - waiting) * 1000)
                         try:
-                            yield checkpoint
+                            yield
                         finally:
-                            capture_holds.append((perf_counter() - acquired) * 1000)
+                            capture_holds.append((perf_counter() - attempted) * 1000)
 
-            return await original_capture(paths, ObservedCoordinator(), **kwargs)
+            waiting = perf_counter()
+            view = await original_capture(paths, ObservedCoordinator(), **kwargs)
+            snapshot_threads.append(view._worker.thread)
+            return view
 
         # Observe the real context body without changing deadlines or lock policy.
         with (
@@ -438,11 +477,15 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
             jobs.append(do_backup())
         await asyncio.gather(*jobs)
         peak["temporary"] = max(peak["temporary"], tree_bytes(work))
+        persisted_counter = await run_sync(store, store.meta, "benchmark_counter")
+        owner_status_at_end = owner.storage_owner.status()
+        resource_samples.append({"at_s": perf_counter() - origin, **owner_status_at_end})
     finally:
         clock_done = True
         stop.set()
         sampler.join()
         await owner.host.close()
+        await owner.storage_owner.close()
         owner.runtime.close()
     overlap = [
         s
@@ -482,12 +525,22 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         "samples_during_backup": len(overlap),
         "overlap_response_ms": percentiles([s["response_ms"] for s in overlap]),
         "backup": backup_result,
+        "backup_start_s": backup_start - origin if backup_start is not None else None,
+        "backup_end_s": backup_end - origin if backup_end is not None else None,
         "peak_rss_bytes": peak["rss"],
         "peak_temporary_bytes": peak["temporary"],
         "peak_wal_bytes": peak["wal"],
         "errors": errors,
+        "committed_request_indices": committed_request_indices,
+        "persisted_counter": persisted_counter,
+        "owner_status_at_end": owner_status_at_end,
+        "owner_thread_alive_after_close": owner.storage_owner._thread.is_alive(),
+        "snapshot_threads_alive_after_close": sum(t.is_alive() for t in snapshot_threads),
+        "resource_samples": resource_samples,
         "capture_gate_hold_ms": percentiles(capture_holds),
         "capture_gate_wait_ms": percentiles(capture_waits),
+        "capture_gate_hold_samples_ms": capture_holds,
+        "capture_gate_wait_samples_ms": capture_waits,
         "capture_hold_exceeded_250ms": any(value > 250 for value in capture_holds),
         "capture_wait_exceeded_2000ms": any(value > 2000 for value in capture_waits),
         "backup_load_coverage_seconds": coverage_seconds,
@@ -503,7 +556,7 @@ async def run_case(directory, name, *, backup, requests=800, interval=0.025, sca
         "stalled_stacks": stalled_stacks,
         "component_ms": {
             key: percentiles([s[key] for s in samples if s[key] is not None])
-            for key in ("queue_delay_ms", "query_ms", "commit_ms", "model_ms")
+            for key in ("queue_delay_ms", "storage_queue_ms", "query_ms", "commit_ms", "model_ms")
         },
     }
     (directory / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -591,7 +644,8 @@ def render_summary(machine, results):
             ("捕获门闩获取等待", "capture_gate_wait_ms"),
             ("事件循环调度延迟", "loop_delay_ms"),
             ("请求排队延迟", "queue_delay_ms"),
-            ("同步查询", "query_ms"),
+            ("存储所有者排队", "storage_queue_ms"),
+            ("所属线程查询", "query_ms"),
             ("事务写入与提交", "commit_ms"),
             ("假模型调用", "model_ms"),
         ]
@@ -678,11 +732,24 @@ async def main(args):
         "logical_cpus": os.cpu_count(),
         "processor": platform.processor(),
         "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "runner_id": (
+            hashlib.sha256(os.environ["CLYTIE_BENCHMARK_RUNNER_ID"].encode()).hexdigest()
+            if os.environ.get("CLYTIE_BENCHMARK_RUNNER_ID")
+            else None
+        ),
+        "method_id": "fixed-query-coordinated-meta-fake-model-v1",
+        "commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "working_tree_modified": subprocess.run(
+            ["git", "diff", "--quiet"], cwd=ROOT, check=False
+        ).returncode
+        != 0,
         "seed": SEED,
         "conditions": "same process; sequential baseline/backup; warm OS cache; no cache flush",
         "background_load": args.conditions_note,
         "limits": [
-            "Component latency: fixed-rate query + coordinated metadata commit + zero-delay FakeModel.",
+            "Component latency: fixed-rate owner command (query + coordinated metadata commit) + zero-delay FakeModel.",
             "Real capture_online/capture_group/source/container pack+unpack; no API/network/model.",
             "Large asset uses production core ownership registry, BackupView dependency and streaming verification.",
             "RSS current working set sampled every >=50ms; short peaks may be missed.",
@@ -691,7 +758,7 @@ async def main(args):
             "Samples include scheduling delay (no coordinated omission); tails retain outliers.",
             "MockClock advanced by benchmark driver; timings use perf_counter only.",
             "Capture gate body/wait observed with wall clock; original policy/checkpoints unchanged.",
-            "No performance pass threshold; full backup may outlast fixed request window.",
+            "Issue #72 thresholds apply; incomplete full-window load coverage blocks acceptance.",
             "Diagnostic timings and thread stack samples add observer overhead; no local variables are collected.",
             "Phase overlap is temporal association, not proof of causation; all repeats and adverse results retained.",
         ],
@@ -714,7 +781,11 @@ async def main(args):
                 )
                 result.update(repeat=repeat + 1, order=position + 1)
                 summary.append(
-                    {k: v for k, v in result.items() if k not in {"samples", "loop_delays"}}
+                    {
+                        k: v
+                        for k, v in result.items()
+                        if k not in {"samples", "loop_delays", "resource_samples"}
+                    }
                 )
                 print(
                     f"case complete: {name} / {'backup' if backup else 'baseline'} / repeat {repeat + 1}",

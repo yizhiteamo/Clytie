@@ -12,6 +12,8 @@ jobs:
   offline:
     name: offline (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    env:
+      CLYTIE_BENCHMARK_RUNNER_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +21,8 @@ jobs:
         python: ["3.10"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
@@ -42,27 +46,35 @@ jobs:
         run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
         run: uv run --no-sync pytest
+      - name: Fixed pre-owner baseline (text, database, asset)
+        run: uv run --no-sync python scripts/benchmark_storage_reference.py --output .cache/backup-performance/reference-standard --scales small_text large_database large_asset --requests 800 --interval 0.025 --repeats 3 --conditions-note "Same CI runner; fixed old commit; sequential after tests; unrelated host load unknown"
+      - name: Fixed pre-owner baseline (small files)
+        run: uv run --no-sync python scripts/benchmark_storage_reference.py --output .cache/backup-performance/reference-files --scales many_small_files --requests 4800 --interval 0.025 --repeats 3 --conditions-note "Same CI runner; fixed old commit; sequential reference; unrelated host load unknown"
       - name: Fictional backup performance (text, database, asset)
-        run: uv run --no-sync python scripts/benchmark_backup.py --output .cache/backup-performance/standard --scales small_text large_database large_asset --requests 800 --interval 0.025 --conditions-note "CI runner; sequential after offline tests; unrelated host load unknown"
+        run: uv run --no-sync python scripts/benchmark_backup.py --output .cache/backup-performance/standard --scales small_text large_database large_asset --requests 800 --interval 0.025 --repeats 3 --conditions-note "Same CI runner; three alternating pairs; sequential; unrelated host load unknown"
       - name: Fictional backup performance (small files)
-        run: uv run --no-sync python scripts/benchmark_backup.py --output .cache/backup-performance/files --scales many_small_files --requests 4800 --interval 0.025 --conditions-note "CI runner; sequential after other performance cases; unrelated host load unknown"
-      - name: Repeated large-database latency diagnostics
-        run: uv run --no-sync python scripts/benchmark_backup.py --output .cache/backup-performance/repeated --scales large_database --requests 800 --interval 0.025 --repeats 3 --conditions-note "CI runner; sequential after four scales; alternating baseline/backup order; no other task in this job; unrelated host load unknown"
+        run: uv run --no-sync python scripts/benchmark_backup.py --output .cache/backup-performance/files --scales many_small_files --requests 4800 --interval 0.025 --repeats 3 --conditions-note "Same CI runner; three alternating pairs; sequential; unrelated host load unknown"
+      - name: Controlled storage I/O response
+        run: uv run --no-sync python scripts/benchmark_storage_control.py --output .cache/backup-performance/control --repeats 3
+      - name: Evaluate storage performance evidence
+        run: uv run --no-sync python scripts/evaluate_storage_performance.py --candidate .cache/backup-performance/standard .cache/backup-performance/files --baseline .cache/backup-performance/reference-standard .cache/backup-performance/reference-files --control .cache/backup-performance/control --output .cache/backup-performance/evaluation
       - name: Scan performance summaries
-        run: |
-          uv run --no-sync pre-commit run check-public-commit-message --hook-stage commit-msg --commit-msg-filename .cache/backup-performance/standard/summary.md
-          uv run --no-sync pre-commit run check-public-commit-message --hook-stage commit-msg --commit-msg-filename .cache/backup-performance/files/summary.md
-          uv run --no-sync pre-commit run check-public-commit-message --hook-stage commit-msg --commit-msg-filename .cache/backup-performance/repeated/summary.md
+        id: performance_scan
+        if: always()
+        run: >-
+          uv run --no-sync python -c "from pathlib import Path; import subprocess, sys;
+          paths=list(Path('.cache/backup-performance').glob('*/summary.md'))+list(Path('.cache/backup-performance').glob('*/evaluation.md'));
+          [subprocess.run([sys.executable,'-m','pre_commit','run','check-public-commit-message','--hook-stage','commit-msg','--commit-msg-filename',str(p)],check=True) for p in paths]"
       - name: Preserve fictional performance summaries
+        if: always() && steps.performance_scan.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backup-performance-${{ matrix.os }}
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
           path: |
-            .cache/backup-performance/standard/summary.md
-            .cache/backup-performance/files/summary.md
-            .cache/backup-performance/repeated/summary.md
+            .cache/backup-performance/*/summary.md
+            .cache/backup-performance/*/evaluation.md
       - name: Validate fictional home
         run: uv run --no-sync python -m clytie status --home examples/home --json
       - name: Build wheel and source distribution
