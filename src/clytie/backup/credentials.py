@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from clytie.config import _Reader, load_home, repository_root, thaw
+from clytie.config.credentials import credential_pointers
 from clytie.plugin_host.snapshots import contained, identifier
 
 
@@ -20,43 +21,38 @@ def pointer(parts):
 
 
 def declared(schema, value, parts=()):
-    """Only explicit properties/items: no inferred secret names or branch waiver."""
-    if not isinstance(schema, dict):
-        return
-    if schema.get("x-clytie-secret") is True:
-        yield pointer(parts)
-        return
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict):
-        return
-    for key, child in properties.items():
-        yield from declared(
-            child, value.get(key, {}) if isinstance(value, dict) else {}, (*parts, key)
-        )
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for i, item in enumerate(value):
-            yield from declared(schema["items"], item, (*parts, i))
+    """Only proven schema declarations; unsupported positions fail closed."""
+    for relative in credential_pointers(schema, value):
+        yield pointer((*parts, *relative))
 
 
-def credential_exclusions(home, *, repo_root=None):
-    """Schema declarations only. Caller authenticates this list as part of the package."""
+def document_exclusions(
+    home, file, document, *, document_kind, repo_root=None, validate_partial_configs=True
+):
+    """Resolve declarations for one current or historical configuration document.
+
+    The file identifies the in-memory copy, not a path to read. Historical callers
+    apply redaction to that copy without treating its proof as current credentials.
+    """
     home = Path(home).resolve()
     root = Path(repo_root or repository_root())
     reader = _Reader(root)
-    instance = reader.read(contained(home, home / "clytie.local.yaml"))
-    if not isinstance(instance, dict):
-        return []
-    instance_schema = json.loads((root / "schemas/instance.schema.json").read_bytes())
+    if document_kind not in {"instance", "companion"} or not isinstance(document, dict):
+        raise ValueError("opaque_credential_config")
+    schema = json.loads((root / f"schemas/{document_kind}.schema.json").read_bytes())
+    reader.validate(document, schema, home / file)
+    if reader.errors:
+        raise ValueError("opaque_credential_config")
     result = []
-    accounts = instance.get("accounts", {})
+    accounts = document.get("accounts", {}) if document_kind == "instance" else {}
     for name, account in accounts.items() if isinstance(accounts, dict) else ():
         if isinstance(account, dict) and "secret" in account:
             result.append(
                 dict(
-                    file="clytie.local.yaml",
+                    file=file,
                     pointer=pointer(("accounts", name, "secret")),
                     kind="file_reference",
-                    schema_sha256=schema_hash(instance_schema),
+                    schema_sha256=schema_hash(schema),
                 )
             )
 
@@ -64,19 +60,27 @@ def credential_exclusions(home, *, repo_root=None):
         try:
             identifier(pid)
         except (ValueError, TypeError):
-            return
+            raise ValueError("opaque_credential_config") from None
         candidates = [
             root / "plugins" / pid / "plugin.json",
             home / "plugins" / pid / "plugin.json",
         ]
         available = [p for p in candidates if p.is_file()]
         if len(available) != 1:
-            return
+            raise ValueError("opaque_credential_config")
         manifest = reader.read(contained(available[0].parent, available[0]))
         if not isinstance(manifest, dict) or not isinstance(manifest.get("config"), dict):
-            return
+            raise ValueError("opaque_credential_config")
         schema = manifest["config"]
-        for relative in declared(schema, value):
+        declarations = list(declared(schema, value))
+        if validate_partial_configs:
+            start = len(reader.errors)
+            reader.validate(value, schema, home / file)
+            # A raw layer can depend on required fields supplied by another
+            # layer. Unknown fields and every other validation error are opaque.
+            if any(error.code != "schema_required" for error in reader.errors[start:]):
+                raise ValueError("opaque_credential_config")
+        for relative in declarations:
             result.append(
                 dict(
                     file=file,
@@ -94,23 +98,13 @@ def credential_exclusions(home, *, repo_root=None):
             if isinstance(settings, dict):
                 plugin_config(file, ("plugins", pid, "config"), pid, settings.get("config", {}))
 
-    plugin_settings("clytie.local.yaml", instance)
-    companions = instance.get("companions", [])
-    for cid in companions if isinstance(companions, list) else []:
-        try:
-            identifier(cid)
-        except (ValueError, TypeError):
-            continue
-        file = f"companions/{cid}/companion.yaml"
-        document = reader.read(contained(home, home / file))
-        if not isinstance(document, dict):
-            continue
-        plugin_settings(file, document)
+    plugin_settings(file, document)
+    if document_kind == "companion":
         for keys in (("model",), ("memory", "recollect", "model")):
             value = document
             for key in keys:
                 value = value.get(key, {}) if isinstance(value, dict) else {}
-            if isinstance(value, dict):
+            if isinstance(value, dict) and value:
                 plugin_config(file, (*keys, "config"), value.get("plugin"), value.get("config", {}))
         channels = document.get("channels", [])
         for i, value in enumerate(channels if isinstance(channels, list) else []):
@@ -118,6 +112,37 @@ def credential_exclusions(home, *, repo_root=None):
                 plugin_config(
                     file, ("channels", i, "config"), value.get("plugin"), value.get("config", {})
                 )
+    return result
+
+
+def credential_exclusions(home, *, repo_root=None):
+    """Schema declarations only. Caller authenticates this list as part of the package."""
+    home = Path(home).resolve()
+    root = Path(repo_root or repository_root())
+    reader = _Reader(root)
+    instance = reader.read(contained(home, home / "clytie.local.yaml"))
+    result = document_exclusions(
+        home,
+        "clytie.local.yaml",
+        instance,
+        document_kind="instance",
+        repo_root=root,
+        validate_partial_configs=False,
+    )
+    for cid in instance.get("companions", []):
+        identifier(cid)
+        file = f"companions/{cid}/companion.yaml"
+        document = reader.read(contained(home, home / file))
+        result.extend(
+            document_exclusions(
+                home,
+                file,
+                document,
+                document_kind="companion",
+                repo_root=root,
+                validate_partial_configs=False,
+            )
+        )
     return result
 
 
@@ -155,11 +180,16 @@ def validate_restored(home, authenticated_exclusions, *, repo_root=None):
     """Called only after package authentication; never a business startup bypass."""
     home = Path(home).resolve()
     report = load_home(home, repo_root=repo_root)
-    declarations = credential_exclusions(home, repo_root=repo_root)
+    declaration_invalid = False
+    try:
+        declarations = credential_exclusions(home, repo_root=repo_root)
+    except (ValueError, OSError, TypeError):
+        declarations = []
+        declaration_invalid = True
     known = {(d["file"], d["pointer"], d["kind"], d["schema_sha256"]) for d in declarations}
     permitted = set()
-    proof_invalid = not isinstance(authenticated_exclusions, list)
-    if proof_invalid:
+    proof_invalid = declaration_invalid or not isinstance(authenticated_exclusions, list)
+    if not isinstance(authenticated_exclusions, list):
         authenticated_exclusions = []
     for d in authenticated_exclusions:
         if (
