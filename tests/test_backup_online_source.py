@@ -47,7 +47,7 @@ class Plugin:
 
 
 @pytest.fixture
-async def online(tmp_path):
+async def online(tmp_path, request):
     home, _ = fictional(tmp_path)
     plugin(
         home,
@@ -66,8 +66,24 @@ async def online(tmp_path):
     host = PluginHost(ROOT, home, clock=clock)
     host.configure_report(report)
     runtime = LedgerRuntime(home, "companion_a", clock)
+    owned = getattr(request, "param", False)
+    runtime.owner_managed = owned
     await runtime.open()
-    host.memory_store("companion_a", {}, {})
+    storage_owner = None
+    if owned:
+        from clytie.backup.coordination import companion_coordinator
+        from clytie.storage.owner import StorageOwner
+        from clytie.storage.runtime import CompanionResources, bind_handles
+
+        storage_owner = await StorageOwner.start(
+            lambda: CompanionResources(host, runtime, {}),
+            companion_id="companion_a",
+            clock=clock,
+            coordination_path=companion_coordinator(home, "companion_a", clock).path,
+        )
+        await runtime.attach_owned(bind_handles(storage_owner, host, runtime))
+    else:
+        host.memory_store("companion_a", {}, {})
     holder = await enable(host, "snapshot-test")
     owner = SimpleNamespace(
         home=home,
@@ -77,12 +93,19 @@ async def online(tmp_path):
         runtime=runtime,
         report=report,
         management_requests=set(),
+        storage_owner=storage_owner,
     )
     try:
         yield owner, holder
     finally:
-        await host.close()
-        runtime.close()
+        try:
+            await host.close()
+        finally:
+            try:
+                if storage_owner is not None:
+                    await storage_owner.close()
+            finally:
+                runtime.close()
 
 
 async def test_online_full_provider_uses_live_object_and_fixed_db_view(online, tmp_path):

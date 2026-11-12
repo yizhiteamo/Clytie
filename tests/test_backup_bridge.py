@@ -249,6 +249,7 @@ async def test_controller_shutdown_creates_once_after_worker_cancel_drain(tmp_pa
     assert len(state["shutdowns"]) == 1
 
 
+@pytest.mark.parametrize("online", [True], indirect=True)
 async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(online):  # noqa: F811
     import asyncio
 
@@ -279,13 +280,20 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
     sessions = attach_test_capture_channel(supervisor, owner)
     workers = BackupWorkers(owner.home, owner.clock, capture_handler=CaptureBridge(supervisor))
     store = owner.host.memory_resources[owner.cid][0]
+    from clytie.storage.handle import StoreHandle
+
+    assert isinstance(store, StoreHandle)
     finished = asyncio.Event()
     writes = []
+    write_threads = []
 
     async def write():
         from clytie.backup.coordination import run_sync
 
         def commit():
+            import threading
+
+            write_threads.append(threading.get_ident())
             with store.transaction():
                 store.set_meta("parallel_counter", len(writes))
             writes.append(1)
@@ -307,6 +315,7 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
     assert calls == ["backup_capture"]
     assert holder.plugin.phases == ["prepare", "capture", "materialize", "release"]
     assert len(writes) > 2
+    assert set(write_threads) == {owner.storage_owner._thread.ident}
     assert sessions
     assert not supervisor.backup_io.sessions[sessions[owner.cid]].endpoints
     assert supervisor.backup_io.budget.status()["charged"]["read"] > 0

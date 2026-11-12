@@ -23,7 +23,18 @@ async def completed(workers, operation_id):
         await SystemClock().sleep(0.02)
         if isinstance(workers.clock, MockClock):
             workers.clock.advance(0.02)
-    pytest.fail("backup worker did not finish")
+    pytest.fail(
+        "backup worker did not finish: "
+        + repr(
+            {
+                "phase": result.get("phase"),
+                "reason": result.get("reason"),
+                "tracked": len(workers.tasks),
+                "process_returncodes": [p.returncode for p in workers.processes.values()],
+                "io": workers.io_control.budget.status(),
+            }
+        )
+    )
 
 
 async def test_real_worker_plan_apply_and_duplicate_id(tmp_path, monkeypatch):
