@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import sqlite3
+from contextlib import ExitStack, contextmanager
 from importlib.metadata import version
 from pathlib import Path
 from uuid import getnode, uuid4
@@ -24,7 +25,8 @@ from clytie.sdk.types import MemoryRecord
 
 from .container import _name, _safe, owned_marker, unpack
 from .credentials import validate_restored
-from .io_client import heavy_io, io_read, io_scope
+from .io_client import checkpoint, heavy_io, io_read, io_scope
+from .native_sqlite import native_checks, validation_stage
 from .previews import PreviewCatalog, PreviewError
 
 MARKER = "supervisor/restore.json"
@@ -308,34 +310,36 @@ def _legacy_ledger_schema(db):
         raise RestoreError("restore_database_invalid")
 
 
+@contextmanager
 def _database(path, required):
-    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
-    try:
-        db.execute("PRAGMA trusted_schema=OFF")
-        db.execute("PRAGMA query_only=ON")
-        if required is LEDGER_TABLES and any(
-            row[0] == "json_extract" and not row[5] & (1 << 21)
-            for row in db.execute("PRAGMA function_list")
-        ):
-            _legacy_ledger_schema(db)
-        objects = db.execute(
-            "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-        tables = {name for name, kind in objects if kind == "table"}
-        if (
-            tables != set(required)
-            or any(kind not in {"table", "index"} for _, kind in objects)
-            or db.execute("PRAGMA user_version").fetchone()[0] != 2
-            or db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
-        ):
-            raise RestoreError("restore_database_invalid")
-        for table, columns in required.items():
-            if [r[1] for r in db.execute(f'PRAGMA table_info("{table}")')] != columns:
-                raise RestoreError("restore_database_invalid")
-        return db
-    except BaseException:
-        db.close()
-        raise
+    with validation_stage():
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            with native_checks(db):
+                db.execute("PRAGMA trusted_schema=OFF")
+                db.execute("PRAGMA query_only=ON")
+                if required is LEDGER_TABLES and any(
+                    row[0] == "json_extract" and not row[5] & (1 << 21)
+                    for row in db.execute("PRAGMA function_list")
+                ):
+                    _legacy_ledger_schema(db)
+                objects = db.execute(
+                    "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+                tables = {name for name, kind in objects if kind == "table"}
+                if (
+                    tables != set(required)
+                    or any(kind not in {"table", "index"} for _, kind in objects)
+                    or db.execute("PRAGMA user_version").fetchone()[0] != 2
+                    or db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
+                ):
+                    raise RestoreError("restore_database_invalid")
+                for table, columns in required.items():
+                    if [r[1] for r in db.execute(f'PRAGMA table_info("{table}")')] != columns:
+                        raise RestoreError("restore_database_invalid")
+                yield db
+        finally:
+            db.close()
 
 
 MEMORY_TABLES = {
@@ -390,11 +394,11 @@ def _asset_references(value, assets):
 def _companion(root, entry, assets):
     from .asset_references import ledger_references
 
-    memory = _database(_member(root, entry["memory"]), MEMORY_TABLES)
-    ledger = None
+    resources = ExitStack()
     warnings = []
     try:
-        ledger = _database(_member(root, entry["ledger"]), LEDGER_TABLES)
+        memory = resources.enter_context(_database(_member(root, entry["memory"]), MEMORY_TABLES))
+        ledger = resources.enter_context(_database(_member(root, entry["ledger"]), LEDGER_TABLES))
         uid = memory.execute("SELECT value FROM metadata WHERE key='companion_uid'").fetchone()
         if entry["uid"] is None:
             if (
@@ -410,6 +414,7 @@ def _companion(root, entry, assets):
         ):
             raise RestoreError("restore_uid_mismatch")
         for key, raw in memory.execute("SELECT id,data FROM records"):
+            checkpoint()
             record = MemoryRecord.model_validate_json(raw)
             if record.record_id != key:
                 raise RestoreError("restore_memory_invalid")
@@ -514,11 +519,10 @@ def _companion(root, entry, assets):
                     raise RestoreError("restore_progress_invalid")
         return warnings
     finally:
-        memory.close()
-        if ledger is not None:
-            ledger.close()
+        resources.close()
 
 
+@heavy_io
 def validate_contents(root, envelope, *, repo_root=None, budgeted=False, check=None):
     """Read-only component/version/reference checks after container authentication."""
     try:
@@ -952,7 +956,7 @@ class RestoreManager:
     def _finish(self, plan, state):
         # Existing publishing/recovery boundary: necessary completion must not
         # acquire an artificial token, even when invoked by a budgeted worker.
-        with io_scope(None):
+        with validation_stage(), io_scope(None):
             return self._finish_committed(plan, state)
 
     def _finish_committed(self, plan, state):

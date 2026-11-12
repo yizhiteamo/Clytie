@@ -3,7 +3,7 @@
 import hashlib
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,6 +12,8 @@ from clytie.memory.package import _validate_database, export_tables
 from clytie.plugin_host.snapshots import contained, identifier
 
 from .container import unpack
+from .io_client import io_checks
+from .native_sqlite import native_checks, validation_stage
 from .previews import PreviewCatalog
 from .restore import MEMORY_TABLES, _database, _member
 from .temporary import TemporaryArtifacts
@@ -80,8 +82,11 @@ class BackupMemorySource:
             _member(root, row["path"])
         temporaries.register([root])
         projected = root.parent / (root.name + ".sqlite3")
+        resources = ExitStack()
         db = original = None
         try:
+            resources.enter_context(io_checks(checkpoint))
+            resources.enter_context(validation_stage())
             manifest = envelope["manifest"]
             entries = manifest.get("companions", [])
             if (
@@ -99,13 +104,17 @@ class BackupMemorySource:
                 entry["memory"]
             }:
                 raise ValueError("backup_memory_assets_unsupported")
-            original = _database(_member(root, entry["memory"]), MEMORY_TABLES)
+            original = resources.enter_context(
+                _database(_member(root, entry["memory"]), MEMORY_TABLES)
+            )
             uid = original.execute(
                 "SELECT value FROM metadata WHERE key='companion_uid'"
             ).fetchone()
             if not uid or not entry["uid"] or json.loads(uid[0]) != entry["uid"]:
                 raise ValueError("backup_memory_source_invalid")
             db = sqlite3.connect(projected)
+            resources.callback(db.close)
+            resources.enter_context(native_checks(db))
             for table, columns in export_tables(3).items():
                 checkpoint()
                 db.execute(f"CREATE TABLE {table}({columns})")
@@ -131,13 +140,12 @@ class BackupMemorySource:
             }
             yield native, db
         finally:
-            if original is not None:
-                original.close()
-            if db is not None:
-                db.close()
-            if projected.exists():
-                temporaries.register([projected])
-            temporaries.cleanup()
+            try:
+                resources.close()
+            finally:
+                if projected.exists():
+                    temporaries.register([projected])
+                temporaries.cleanup()
 
 
 def publish_preview(home, clock, plan):

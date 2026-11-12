@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,8 +13,10 @@ from clytie.plugin_host.snapshots import canonical, contained
 
 from .container import pack, unpack
 from .errors import BackupError, error_reason
+from .io_client import heavy_io
 from .keys import BackupKeys
 from .mirror import MirrorManager, publish_no_replace
+from .native_sqlite import native_checks, validation_stage
 from .restore import LEDGER_TABLES, MEMORY_TABLES, _database, digest, identity, validate_contents
 from .retention import RetentionConfig
 from .source import capture_instance
@@ -25,6 +28,7 @@ def _settings(home):
     return yaml.safe_load((home / "clytie.local.yaml").read_bytes()).get("backup", {})
 
 
+@heavy_io
 def _validate(root, envelope, *, check=None):
     manifest = envelope["manifest"]
     if manifest["scope"] == "instance" and manifest["completeness"] == "complete":
@@ -56,9 +60,13 @@ def _validate(root, envelope, *, check=None):
                 else None
             )
             if required is not None:
-                verified = _database(path, required)
-                verified.close()
-            with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
+                with _database(path, required):
+                    pass
+            with (
+                validation_stage(),
+                closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db,
+                native_checks(db),
+            ):
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise BackupError("snapshot_inconsistent")
                 if (

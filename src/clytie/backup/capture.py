@@ -14,6 +14,7 @@ from clytie.storage.owner import StorageBusy
 
 from .coordination import CaptureError
 from .io_client import current_client, io_checks, io_scope
+from .native_sqlite import native_checks, validation_stage
 from .sqlite_io import copy_database
 from .view_limits import MAX_VIEW_SECONDS, ViewLimits
 
@@ -149,8 +150,12 @@ class _SnapshotWorker:
             if self.cancelled.is_set():
                 raise CaptureError("cancelled")
 
-        with io_scope(self.io_client), io_checks(checkpoint):
-            return self._copy_checked(directory, pages, checkpoint)
+        with io_scope(self.io_client), io_checks(checkpoint), validation_stage():
+            try:
+                return self._copy_checked(directory, pages, checkpoint)
+            finally:
+                # Fixed source views must exit before this shared stage is released.
+                self._close()
 
     def _copy_checked(self, directory, pages, checkpoint):
         checkpoint()
@@ -166,8 +171,9 @@ class _SnapshotWorker:
             try:
                 copy_database(source, destination, pages=pages, check=checkpoint)
                 checkpoint()
-                if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                    raise CaptureError("snapshot_inconsistent")
+                with native_checks(destination):
+                    if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                        raise CaptureError("snapshot_inconsistent")
             finally:
                 destination.close()
             result[name] = target
@@ -192,6 +198,7 @@ class _SnapshotWorker:
         if error is not None:
             raise error
         self._connections.clear()
+        self._view_limits = None
 
 
 class CapturedGroup:

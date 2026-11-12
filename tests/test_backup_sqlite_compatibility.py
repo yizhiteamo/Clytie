@@ -48,8 +48,7 @@ def test_legacy_json_flags_validate_real_ledger_without_changing_file(tmp_path, 
     path = ledger_file(tmp_path)
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     _, calls = legacy_json(monkeypatch, path)
-    db = restore._database(path, restore.LEDGER_TABLES)
-    try:
+    with restore._database(path, restore.LEDGER_TABLES) as db:
         assert db.execute("SELECT id FROM record").fetchall() == [("fictional",)]
         assert db.execute("PRAGMA query_only").fetchone() == (1,)
         with pytest.raises(sqlite3.DatabaseError):
@@ -57,8 +56,6 @@ def test_legacy_json_flags_validate_real_ledger_without_changing_file(tmp_path, 
         with pytest.raises(sqlite3.DatabaseError):
             db.execute("SELECT dangerous(data) FROM record").fetchall()
         assert "dangerous" not in calls
-    finally:
-        db.close()
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
 
@@ -70,8 +67,8 @@ def test_legacy_json_flags_accept_ledger_before_optional_health_indexes(tmp_path
     db.commit()
     db.close()
     legacy_json(monkeypatch, path)
-    restored = restore._database(path, restore.LEDGER_TABLES)
-    restored.close()
+    with restore._database(path, restore.LEDGER_TABLES):
+        pass
 
 
 def test_legacy_json_flags_do_not_change_memory_schema_policy(tmp_path, monkeypatch):
@@ -79,11 +76,8 @@ def test_legacy_json_flags_do_not_change_memory_schema_policy(tmp_path, monkeypa
     store = MemoryStore(path, clock=MockClock(), config={}, instance={})
     store.close()
     legacy_json(monkeypatch, path)
-    restored = restore._database(path, restore.MEMORY_TABLES)
-    try:
+    with restore._database(path, restore.MEMORY_TABLES) as restored:
         assert restored.execute("PRAGMA trusted_schema").fetchone() == (0,)
-    finally:
-        restored.close()
 
 
 def test_legacy_json_flags_full_restore_checks_progress_and_apply(tmp_path, monkeypatch):
@@ -123,6 +117,7 @@ def test_legacy_json_flags_do_not_trust_modified_schema(tmp_path, monkeypatch, m
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     _, calls = legacy_json(monkeypatch, path)
     with pytest.raises((restore.RestoreError, sqlite3.DatabaseError)):
-        restore._database(path, restore.LEDGER_TABLES)
+        with restore._database(path, restore.LEDGER_TABLES):
+            pytest.fail("modified schema accepted")
     assert not calls
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before

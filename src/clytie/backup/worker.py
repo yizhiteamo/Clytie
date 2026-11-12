@@ -17,8 +17,9 @@ from clytie.plugin_host.locking import OperationBusy, file_lock, process_identit
 from clytie.plugin_host.snapshots import canonical, contained
 
 from .io_channel import IoChannel
-from .io_client import io_scope
+from .io_client import io_checks, io_scope
 from .journal import TERMINAL, BackupJournal
+from .native_sqlite import validation_stage
 from .restore import RestoreManager, digest, read_state, validate_contents
 
 
@@ -160,8 +161,10 @@ class JournalRestore(RestoreManager):
     def _finish(self, plan, state):
         self.journal.phase("verifying")
         self.controls.check()
-        self.journal.phase("publishing")
-        return super()._finish(plan, state)
+        with validation_stage():
+            self.controls.check()
+            self.journal.phase("publishing")
+            return super()._finish(plan, state)
 
 
 def _restore_result(state):
@@ -408,13 +411,20 @@ def execute(home, operation_id, *, stream, emit, clock=None, recover_only=False)
             try:
                 if recover_only:
                     # An EOF during verification must not erase already committed facts.
-                    verify_previous(home, clock, journal, controls)
+                    client = controls.io_channel.client(operation_id, check=controls.check)
+                    with (
+                        io_scope(client),
+                        io_checks(controls.check),
+                        validation_stage(),
+                        io_scope(None),
+                    ):
+                        verify_previous(home, clock, journal, controls)
                 else:
                     controls.check()
                     if journal.value["operation"] == "create":
                         controls.configure_capture(home)
                     client = controls.io_channel.client(operation_id, check=controls.check)
-                    with io_scope(client):
+                    with io_scope(client), io_checks(controls.check):
                         journal.commit(dispatch(home, clock, journal, controls))
             except Cancelled:
                 fresh = WorkerJournal.load(path, clock)

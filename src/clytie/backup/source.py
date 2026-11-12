@@ -24,8 +24,9 @@ from .configuration import config_commit_lock
 from .container import _name
 from .coordination import companion_coordinator
 from .credentials import credential_exclusions, redact_document
-from .io_client import heavy_io, io_read, io_write
+from .io_client import heavy_io, io_checks, io_read, io_write
 from .mirror import publish_no_replace
+from .native_sqlite import native_checks, validation_stage
 from .restore import source_registration
 from .view_limits import ViewLimits
 
@@ -255,54 +256,74 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                     db.execute("BEGIN")
                     db.execute("SELECT count(*) FROM sqlite_schema").fetchone()
                 limits = ViewLimits(sources, clock, pinned_at=pinned_at)
-            if boundary_raw is not None:
-                entries.append(_put(staging, f"companions/{cid}/boundary/state.json", boundary_raw))
-            for kind, db in readers.items():
-                check()
-                name = f"companions/{cid}/{kind}/{kind}.sqlite3"
-                target = staging / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("xb"):
-                    pass
-                destination = sqlite3.connect(target)
-                try:
-                    from .sqlite_io import copy_database
+            with io_checks(check), validation_stage(), ExitStack() as native:
+                for db in readers.values():
+                    native.callback(db.close)
+                    native.enter_context(native_checks(db))
+                if boundary_raw is not None:
+                    entries.append(
+                        _put(staging, f"companions/{cid}/boundary/state.json", boundary_raw)
+                    )
+                for kind, db in readers.items():
+                    check()
+                    name = f"companions/{cid}/{kind}/{kind}.sqlite3"
+                    target = staging / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb"):
+                        pass
+                    destination = sqlite3.connect(target)
+                    try:
+                        from .sqlite_io import copy_database
 
-                    copy_database(db, destination, pages=128, check=check)
-                    if scope == "memory":
-                        destination.execute("DELETE FROM recollect_progress")
-                        destination.commit()
-                    if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-                        raise SourceError("snapshot_inconsistent")
-                finally:
-                    destination.close()
-                entries.append(_entry(staging, name))
-            uid = (
-                readers["memory"]
-                .execute("SELECT value FROM metadata WHERE key='companion_uid'")
-                .fetchone()
-            )
-            companion = {
-                "id": cid,
-                "uid": json.loads(uid[0]) if uid else None,
-                "memory": f"companions/{cid}/memory/memory.sqlite3",
-            }
-            if scope == "instance":
-                companion["ledger"] = f"companions/{cid}/ledger/ledger.sqlite3"
-                companion["configuration_assets"] = dependencies
-            referenced, declarations = set(), []
-            for kind, db in readers.items():
-                tables = (
-                    ["records", "revisions"]
-                    if kind == "memory"
-                    else ["inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit"]
+                        copy_database(db, destination, pages=128, check=check)
+                        if scope == "memory":
+                            destination.execute("DELETE FROM recollect_progress")
+                            destination.commit()
+                        with native_checks(destination):
+                            if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                                raise SourceError("snapshot_inconsistent")
+                    finally:
+                        destination.close()
+                    entries.append(_entry(staging, name))
+                uid = (
+                    readers["memory"]
+                    .execute("SELECT value FROM metadata WHERE key='companion_uid'")
+                    .fetchone()
                 )
-                for table in tables:
-                    for row in db.execute(f'SELECT data FROM "{table}"'):
-                        if kind == "ledger":
-                            referenced.update(
-                                ledger_references(table, json.loads(row[0]), details=declarations)
-                            )
+                companion = {
+                    "id": cid,
+                    "uid": json.loads(uid[0]) if uid else None,
+                    "memory": f"companions/{cid}/memory/memory.sqlite3",
+                }
+                if scope == "instance":
+                    companion["ledger"] = f"companions/{cid}/ledger/ledger.sqlite3"
+                    companion["configuration_assets"] = dependencies
+                referenced, declarations = set(), []
+                for kind, db in readers.items():
+                    tables = (
+                        ["records", "revisions"]
+                        if kind == "memory"
+                        else [
+                            "inbound",
+                            "record",
+                            "invocation",
+                            "intent",
+                            "attempt",
+                            "dedupe",
+                            "audit",
+                        ]
+                    )
+                    for table in tables:
+                        for row in db.execute(f'SELECT data FROM "{table}"'):
+                            check()
+                            if kind == "ledger":
+                                referenced.update(
+                                    ledger_references(
+                                        table, json.loads(row[0]), details=declarations
+                                    )
+                                )
+            readers.clear()
+            limits = None
             asset_files, assets, asset_missing = capture(
                 asset_store,
                 cid,

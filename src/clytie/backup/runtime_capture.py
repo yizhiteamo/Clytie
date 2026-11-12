@@ -14,6 +14,7 @@ from clytie.plugin_host.snapshots import contained, identifier
 from .capture import capture_group
 from .coordination import CaptureError, companion_coordinator
 from .io_client import heavy_io, io_read
+from .native_sqlite import native_checks
 
 
 def _unavailable(cid, epoch, reason):
@@ -38,21 +39,22 @@ def _describe(paths, check):
                 digest.update(chunk)
         db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            member = {
-                "path": path.name,
-                "size": path.stat().st_size,
-                "sha256": digest.hexdigest(),
-                "schema_version": db.execute("PRAGMA user_version").fetchone()[0],
-            }
-            if name == "memory":
-                metadata = dict(
-                    db.execute(
-                        "SELECT key,value FROM metadata WHERE key IN ('generation','companion_uid')"
+            with native_checks(db):
+                member = {
+                    "path": path.name,
+                    "size": path.stat().st_size,
+                    "sha256": digest.hexdigest(),
+                    "schema_version": db.execute("PRAGMA user_version").fetchone()[0],
+                }
+                if name == "memory":
+                    metadata = dict(
+                        db.execute(
+                            "SELECT key,value FROM metadata WHERE key IN ('generation','companion_uid')"
+                        )
                     )
-                )
-                member["generation"] = json.loads(metadata.get("generation", "0"))
-                member["companion_uid"] = json.loads(metadata.get("companion_uid", "null"))
-            members[name] = member
+                    member["generation"] = json.loads(metadata.get("generation", "0"))
+                    member["companion_uid"] = json.loads(metadata.get("companion_uid", "null"))
+                members[name] = member
         finally:
             db.close()
     return members
@@ -523,7 +525,8 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                         entries.append(actual)
                         plugin["state_paths"].append(name)
 
-                def core_files(tick):
+                @heavy_io
+                def core_files(check):
                     core_entries = []
                     referenced, declared = set(), []
                     uid = None
@@ -532,40 +535,41 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                             continue
                         db = sqlite3.connect(path)
                         try:
-                            if kind == "memory":
-                                row = db.execute(
-                                    "SELECT value FROM metadata WHERE key='companion_uid'"
-                                ).fetchone()
-                                uid = json.loads(row[0]) if row else None
-                                if scope == "memory":
-                                    db.execute("DELETE FROM recollect_progress")
-                                    db.commit()
-                            tables = (
-                                ["records", "revisions"]
-                                if kind == "memory"
-                                else [
-                                    "inbound",
-                                    "record",
-                                    "invocation",
-                                    "intent",
-                                    "attempt",
-                                    "dedupe",
-                                    "audit",
-                                ]
-                            )
-                            for table in tables:
-                                for row in db.execute(f'SELECT data FROM "{table}"'):
-                                    tick()
-                                    if kind == "ledger":
-                                        referenced.update(
-                                            ledger_references(
-                                                table, json.loads(row[0]), details=declared
+                            with native_checks(db):
+                                if kind == "memory":
+                                    row = db.execute(
+                                        "SELECT value FROM metadata WHERE key='companion_uid'"
+                                    ).fetchone()
+                                    uid = json.loads(row[0]) if row else None
+                                    if scope == "memory":
+                                        db.execute("DELETE FROM recollect_progress")
+                                        db.commit()
+                                tables = (
+                                    ["records", "revisions"]
+                                    if kind == "memory"
+                                    else [
+                                        "inbound",
+                                        "record",
+                                        "invocation",
+                                        "intent",
+                                        "attempt",
+                                        "dedupe",
+                                        "audit",
+                                    ]
+                                )
+                                for table in tables:
+                                    for row in db.execute(f'SELECT data FROM "{table}"'):
+                                        check()
+                                        if kind == "ledger":
+                                            referenced.update(
+                                                ledger_references(
+                                                    table, json.loads(row[0]), details=declared
+                                                )
                                             )
-                                        )
                         finally:
                             db.close()
                         name = f"companions/{cid}/{kind}/{kind}.sqlite3"
-                        core_entries.append(_copy(work, path, work, name, tick))
+                        core_entries.append(_copy(work, path, work, name, check))
                     return core_entries, uid, referenced, declared
 
                 core, uid, referenced, ledger_assets = await monitored(_thread(core_files, check))
