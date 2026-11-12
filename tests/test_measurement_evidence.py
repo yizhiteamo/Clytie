@@ -1,14 +1,28 @@
 """Only fictional files; real age encryption, fixed schemas and repository scanner."""
 
 import hashlib
+import importlib.util
 import io
 import json
 import stat
+import sys
 import zipfile
+from pathlib import Path
 
 import pyrage
 import pytest
-from scripts import measurement_evidence as evidence
+
+
+def load_tool(name):
+    path = Path(__file__).resolve().parents[1] / "scripts" / (name + ".py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+evidence = load_tool("measurement_evidence")
 
 
 def fixture_files(directory):

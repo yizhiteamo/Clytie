@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts import measurement_evidence as evidence
-from scripts import measurement_transport as transport
-from tests.test_measurement_evidence import fixture_files
+from tests.test_measurement_evidence import evidence, fixture_files, load_tool
+
+transport = load_tool("measurement_transport")
 
 
 @pytest.mark.skipif(transport.os.name != "nt", reason="Windows ACL command encoding")

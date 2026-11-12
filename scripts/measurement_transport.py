@@ -15,7 +15,11 @@ from importlib.metadata import version
 from pathlib import Path
 
 import pyrage
-from scripts import measurement_evidence as evidence
+
+try:
+    from . import measurement_evidence as evidence
+except ImportError:
+    import measurement_evidence as evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "yizhiteamo/Clytie"
