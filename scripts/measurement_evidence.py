@@ -52,6 +52,26 @@ IDENTITY_FIELDS = (
     "parameters",
     "load",
 )
+BASELINE_REFERENCE = "05ec93c7c4ae972b7475911b0aec9db57bb00390"
+ORIGINAL_REFERENCE = "b40bbbc31cfb2ff012a151d0e0e9c79acf07d903"
+V2_FIELDS = (
+    *IDENTITY_FIELDS,
+    "format",
+    "source",
+    "method",
+    "python",
+    "sqlite",
+    "result",
+    "source_commit",
+    "baseline_reference",
+    "fixture_version",
+    "fixture_sha256",
+    "tool_sha256",
+    "environment",
+    "execution",
+    "metrics",
+)
+LEDGER_TABLES = ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit")
 PARAMETERS = {
     "concurrency": 1,
     "waiting": 8,
@@ -159,6 +179,13 @@ def _pattern(value, pattern):
 
 
 def validate_run(run):
+    if type(run) is dict and type(run.get("format")) is int and run["format"] == 2:
+        _validate_run_v2(run)
+    else:
+        _validate_run_v1(run)
+
+
+def _validate_run_v1(run):
     _fields(run, (*IDENTITY_FIELDS, "format", "source", "method", "python", "sqlite", "result"))
     if type(run["format"]) is not int or run["format"] != 1:
         raise EvidenceError("unsupported_format")
@@ -190,6 +217,141 @@ def validate_run(run):
         _number(value, integer=key == "request_count", positive=True)
     if run["load"]["window_seconds"] > run["load"]["maximum_seconds"]:
         raise EvidenceError("invalid_load")
+
+
+def _validate_run_v2(run):
+    _fields(run, V2_FIELDS)
+    _enum(run["source"], {"generated_fictional_only"})
+    _enum(run["method"], {"legal_storage_v1", "legal_fixture_comparison_v1"})
+    _enum(run["fixture_version"], {"legal_memory_v1"})
+    for field in ("candidate", "reference", "baseline_reference", "source_commit"):
+        _pattern(run[field], r"[a-f0-9]{40}")
+    if run["reference"] != ORIGINAL_REFERENCE or run["baseline_reference"] != BASELINE_REFERENCE:
+        raise EvidenceError("unapproved_reference")
+    for field in ("plan_sha256", "fixture_sha256", "tool_sha256"):
+        _pattern(run[field], r"[a-f0-9]{64}")
+    for field in ("python", "sqlite"):
+        _pattern(run[field], r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}")
+    _pattern(run["job_id"], r"[a-z][a-z0-9_-]{0,60}")
+    for field in ("run_id", "attempt", "group"):
+        _number(run[field], integer=True, positive=True)
+    _number(run["seed"], integer=True)
+    _enum(run["platform"], {"Windows", "Linux"})
+    _enum(run["scale"], {"small_text", "large_database", "many_small_files", "large_asset"})
+    _enum(run["arm"], {"baseline", "none", "original", "candidate"})
+    _enum(run["phase"], {"baseline", "mechanism", "matrix", "fixture"})
+    if (run["phase"] == "fixture") != (run["method"] == "legal_fixture_comparison_v1"):
+        raise EvidenceError("measurement_method_mismatch")
+    if (run["arm"] == "baseline" and run["phase"] not in {"baseline", "fixture"}) or (
+        run["phase"] == "baseline" and run["arm"] != "baseline"
+    ):
+        raise EvidenceError("measurement_phase_mismatch")
+    source = {
+        "baseline": run["baseline_reference"],
+        "original": run["reference"],
+        "none": run["candidate"],
+        "candidate": run["candidate"],
+    }[run["arm"]]
+    if run["source_commit"] != source or (
+        run["source_commit"] == BASELINE_REFERENCE and run["phase"] not in {"baseline", "fixture"}
+    ):
+        raise EvidenceError("source_commit_mismatch")
+    _enum(run["result"], {"pass", "fail", "incomplete", "cancelled"})
+    _fields(run["parameters"], PARAMETERS)
+    for key, expected in PARAMETERS.items():
+        _number(run["parameters"][key], integer=type(expected) is int)
+        if run["parameters"][key] != expected:
+            raise EvidenceError("unapproved_parameters")
+    _fields(
+        run["load"],
+        (
+            "window_seconds",
+            "interval_seconds",
+            "request_count",
+            "maximum_seconds",
+            "backup_start_seconds",
+        ),
+    )
+    for key, value in run["load"].items():
+        _number(value, integer=key == "request_count", positive=key != "backup_start_seconds")
+    if (
+        run["load"]["window_seconds"] > run["load"]["maximum_seconds"]
+        or run["load"]["backup_start_seconds"] >= run["load"]["window_seconds"]
+    ):
+        raise EvidenceError("invalid_load")
+    environment = run["environment"]
+    _fields(environment, ("cpu_count", "os", "release_sha256", "machine_sha256"))
+    _number(environment["cpu_count"], integer=True, positive=True)
+    _enum(environment["os"], {run["platform"]})
+    for key in ("release_sha256", "machine_sha256"):
+        _pattern(environment[key], r"[a-f0-9]{64}")
+    execution = run["execution"]
+    _fields(execution, ("order", "position", "warmup_requests"))
+    order = execution["order"]
+    if type(order) is not list or len(order) != 4:
+        raise EvidenceError("invalid_order")
+    for arm in order:
+        _enum(arm, {"baseline", "none", "original", "candidate"})
+    if len(set(order)) != 4:
+        raise EvidenceError("invalid_order")
+    _number(execution["position"], integer=True)
+    _number(execution["warmup_requests"], integer=True)
+    if execution["position"] >= 4 or order[execution["position"]] != run["arm"]:
+        raise EvidenceError("invalid_order")
+    _validate_metrics(run["metrics"])
+
+
+def _validate_metrics(metrics):
+    _fields(
+        metrics,
+        (
+            "logical",
+            "ledger_rows",
+            "memory_database_bytes",
+            "ledger_database_bytes",
+            "asset_file_bytes",
+            "plugin_file_bytes",
+            "backup_bytes",
+        ),
+    )
+    logical = metrics["logical"]
+    _fields(
+        logical,
+        (
+            "records",
+            "revisions",
+            "content_bytes",
+            "content_bytes_per_record",
+            "content_length_distribution",
+            "file_count",
+            "file_bytes",
+            "provider_files",
+            "provider_bytes",
+            "asset_registrations",
+            "asset_bytes",
+            "ledger_rows",
+        ),
+    )
+    distribution = logical["content_length_distribution"]
+    _fields(distribution, ("min_bytes", "max_bytes", "total_bytes", "records"))
+    for container, excluded in (
+        (metrics, {"logical", "ledger_rows"}),
+        (logical, {"ledger_rows", "content_length_distribution"}),
+        (distribution, set()),
+    ):
+        for key, value in container.items():
+            if key not in excluded:
+                _number(value, integer=True)
+    for counts in (metrics["ledger_rows"], logical["ledger_rows"]):
+        _fields(counts, LEDGER_TABLES)
+        for value in counts.values():
+            _number(value, integer=True)
+    if (
+        distribution["min_bytes"] > distribution["max_bytes"]
+        or distribution["records"] != logical["records"]
+        or distribution["total_bytes"] != logical["content_bytes"]
+    ):
+        raise EvidenceError("invalid_metrics")
 
 
 def validate_record(name, row):
@@ -311,8 +473,21 @@ def validate_files(contents, expected):
                             "category": "schema_validated_fictional_numeric",
                         }
                     )
-        if any(run[key] != expected[key] for key in IDENTITY_FIELDS):
+        if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
+        # V2 freezes every approved field except measured outcomes. In particular,
+        # a newer schema must never fall back to the smaller historical identity.
+        identity_fields = (
+            set(V2_FIELDS) - {"result", "metrics"} if run["format"] == 2 else IDENTITY_FIELDS
+        )
+        if any(run[key] != expected[key] for key in identity_fields):
+            raise EvidenceError("run_identity_mismatch")
+        if run["format"] == 2 and any(
+            run["metrics"][key] != expected["metrics"][key] for key in ("logical", "ledger_rows")
+        ):
+            # Physical byte layouts/results are observations; the approved
+            # logical workload is fixed before execution, not a free result field.
+            raise EvidenceError("run_workload_mismatch")
         return exceptions
     except EvidenceError:
         raise
