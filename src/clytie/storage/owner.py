@@ -239,6 +239,8 @@ class Command:
         self.context = context
         self.finalizer = finalizer
         self.cancel_token = cancel_token
+        self.queued_at = owner.clock.monotonic()
+        self.started_at = None
         self._phase = "queued"
         self._cancelled = False
         self._future = owner.loop.create_future()
@@ -314,6 +316,8 @@ class StorageOwner:
         self._active = None
         self._resources = None
         self._capture_ticket = None
+        self._wait_peak = self._execution_peak = self._finalizer_wait_peak = 0.0
+        self._finalizer_capacity_blocked = False
         self._ready = self.loop.create_future()
         self._closed = self.loop.create_future()
         self._closed.add_done_callback(lambda future: future.exception())
@@ -356,7 +360,10 @@ class StorageOwner:
         with self._condition:
             if self._failed:
                 raise StorageFailed()
-            if not self._accepting or len(self._finalizers) >= self.finalizer_capacity:
+            if not self._accepting:
+                raise StorageBusy()
+            if len(self._finalizers) >= self.finalizer_capacity:
+                self._finalizer_capacity_blocked = True
                 raise StorageBusy()
             token = Finalizer(self)
             self._finalizers.add(token)
@@ -428,6 +435,35 @@ class StorageOwner:
                 "capture_pending": self._capture_ticket is not None,
             }
 
+    def sample_io_pressure(self):
+        """只读控制内存，返回自上次采样以来的峰值及仍在进行的等待。
+
+        单一控制发布者每次采样后清空峰值；普通 status 不消费峰值。
+        容量拒绝单列，不能伪称发生了不存在的排队或等待时长。
+        """
+        with self._condition:
+            now = self.clock.monotonic()
+            queued = tuple(self._queue)
+            waiting = max((now - cmd.queued_at for cmd in queued), default=0.0)
+            finalizing = max(
+                (now - cmd.queued_at for cmd in queued if cmd.finalizer is not None),
+                default=0.0,
+            )
+            executing = now - self._active.started_at if self._active is not None else 0.0
+            result = {
+                "source": "owner_control_cache",
+                "observed_at": self.clock.now().isoformat(),
+                "ready_wait_seconds": max(waiting, self._wait_peak),
+                "execution_seconds": max(executing, self._execution_peak),
+                "finalizer_wait_seconds": max(finalizing, self._finalizer_wait_peak),
+                "finalizer_capacity_blocked": self._finalizer_capacity_blocked,
+                "ordinary": self._ordinary,
+                "finalizers": len(self._finalizers),
+            }
+            self._wait_peak = self._execution_peak = self._finalizer_wait_peak = 0.0
+            self._finalizer_capacity_blocked = False
+            return result
+
     def begin_stop(self):
         with self._condition:
             self._accepting = False
@@ -454,6 +490,10 @@ class StorageOwner:
 
     def _finish(self, command, result=None, error=None):
         with self._condition:
+            if command.started_at is not None:
+                self._execution_peak = max(
+                    self._execution_peak, self.clock.monotonic() - command.started_at
+                )
             command._phase = "finished"
             if command.finalizer is None:
                 self._ordinary -= 1
@@ -486,6 +526,11 @@ class StorageOwner:
                     command = self._queue.popleft()
                     self._active = command
                     command._phase = "running"
+                    command.started_at = self.clock.monotonic()
+                    waited = command.started_at - command.queued_at
+                    self._wait_peak = max(self._wait_peak, waited)
+                    if command.finalizer is not None:
+                        self._finalizer_wait_peak = max(self._finalizer_wait_peak, waited)
                 binding = _context.set(command.context)
                 command_binding = _command.set(command)
                 try:
