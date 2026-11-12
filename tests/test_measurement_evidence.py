@@ -15,6 +15,11 @@ import pytest
 
 def load_tool(name):
     path = Path(__file__).resolve().parents[1] / "scripts" / (name + ".py")
+    if name in sys.modules:
+        existing = sys.modules[name]
+        if Path(existing.__file__).resolve() != path.resolve():
+            raise ValueError("measurement_test_tool_origin_mismatch")
+        return existing
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

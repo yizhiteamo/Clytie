@@ -1,0 +1,25 @@
+"""Explicit test-only tool imports, independent of pytest's executable entrypoint."""
+
+from tests.test_measurement_evidence import load_tool
+
+DEPENDENCIES = {
+    "measurement_geometry": ("measurement_fixture",),
+    "measurement_trial": (
+        "measurement_recording",
+        "measurement_load",
+        "measurement_observation",
+        "measurement_resources",
+        "measurement_version",
+        "measurement_views",
+        "measurement_fixture",
+    ),
+    "measurement_launch": ("measurement_version",),
+    "measurement_load": ("measurement_recording",),
+    "measurement_views": ("measurement_recording",),
+}
+
+
+def load(name):
+    for dependency in DEPENDENCIES.get(name, ()):
+        load(dependency)
+    return load_tool(name)

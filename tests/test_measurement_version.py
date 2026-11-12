@@ -6,9 +6,10 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from scripts import measurement_version as versions
+from tests.measurement_tools import load
 
 ROOT = Path(__file__).resolve().parents[1]
+versions = load("measurement_version")
 
 
 def head():

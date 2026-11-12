@@ -2,10 +2,12 @@ import random
 import threading
 
 import pytest
-from scripts import measurement_fixture as fixture
+from tests.measurement_tools import load
 
 from clytie.backup.coordination import run_sync
 from clytie.backup.restore import MEMORY_TABLES
+
+fixture = load("measurement_fixture")
 
 
 @pytest.mark.parametrize("mode", ["legacy", "original", "candidate"])
