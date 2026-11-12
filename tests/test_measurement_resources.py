@@ -28,3 +28,23 @@ def test_real_parent_and_owned_child_rss_requires_matching_process_identity():
         child.stdout.close()
     with pytest.raises((OSError, ProcessLookupError)):
         resources.rss_bytes(identity)
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+def test_tree_sample_handles_only_removed_directory(tmp_path, monkeypatch, error):
+    moving = tmp_path / "moving"
+    moving.mkdir()
+    (tmp_path / "source-wal").write_bytes(b"fictional")
+    original = resources.os.scandir
+
+    def scan(path):
+        if resources.Path(path) == moving:
+            raise error("fictional traversal race")
+        return original(path)
+
+    monkeypatch.setattr(resources.os, "scandir", scan)
+    if error is PermissionError:
+        with pytest.raises(PermissionError):
+            resources.file_bytes(tmp_path, suffix="-wal")
+    else:
+        assert resources.file_bytes(tmp_path, suffix="-wal") == len(b"fictional")

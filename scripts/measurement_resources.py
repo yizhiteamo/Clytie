@@ -7,6 +7,28 @@ from pathlib import Path
 from clytie.plugin_host.locking import process_identity
 
 
+def file_bytes(root, *, suffix=""):
+    """Sample a moving fictional tree; only proven disappearance is benign."""
+
+    def onerror(error):
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
+    total = 0
+    for directory, _, names in os.walk(root, onerror=onerror, followlinks=False):
+        for name in names:
+            if not name.endswith(suffix):
+                continue
+            try:
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise ValueError("measurement_resource_link")
+                total += path.stat().st_size
+            except FileNotFoundError:
+                pass  # publication/retirement completed after enumeration
+    return total
+
+
 def rss_bytes(identity):
     if (
         type(identity) is not dict

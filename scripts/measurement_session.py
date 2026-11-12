@@ -20,7 +20,7 @@ try:
     from .measurement_load import requests
     from .measurement_observation import Observation, request_scope
     from .measurement_recording import Recorder
-    from .measurement_resources import rss_bytes
+    from .measurement_resources import file_bytes, rss_bytes
     from .measurement_views import Views
 except ImportError:
     import benchmark_backup as benchmark
@@ -28,7 +28,7 @@ except ImportError:
     from measurement_load import requests
     from measurement_observation import Observation, request_scope
     from measurement_recording import Recorder
-    from measurement_resources import rss_bytes
+    from measurement_resources import file_bytes, rss_bytes
     from measurement_views import Views
 
 from clytie.backup.controller import CaptureBridge, capture_request
@@ -204,13 +204,8 @@ async def run_fixture(directory, run, *, scale):
                     except OSError as exc:
                         if getattr(exc, "winerror", None) != 87:
                             raise
-                wal = 0
-                for path in owner.home.rglob("*-wal"):
-                    try:
-                        wal += path.stat().st_size
-                    except FileNotFoundError:
-                        pass
-                return total, wal, benchmark.tree_bytes(owner.home / "run")
+                wal = file_bytes(owner.home, suffix="-wal")
+                return total, wal, file_bytes(owner.home / "run")
 
             async def sample():
                 counter = 0
