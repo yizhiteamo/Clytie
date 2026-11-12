@@ -8,7 +8,7 @@
 
 - [x] 主规格、存储/守护同步分开扫描和提交，保留用户确认原文。
 - [x] 用真实线程、确定性交付屏障复现启动失败/取消提前返回；不延长超时、不吞线程异常。
-- [ ] 提交 StorageOwner 启动退出修正及回归：tests/test_storage_start_exit.py、test_storage_owner.py、test_supervisor_startup.py；线程警告提升为测试失败。
+- [x] StorageOwner 启动退出修正及回归：tests/test_storage_start_exit.py 确定性复现两项提前返回；修正后与 owner/companion/startup/stop 合计 43 项通过，线程警告提升为失败。同步等待改用 MockClock 后，start_exit/owner/startup 31 项通过。这是本机定向证据，双平台 CI 尚待核对。
 - [ ] 原始数据归档：冻结应保存的文件及内容哈希；原件与摘要分离；验证失败输出的受控保留位置，未经确认不上传扫描失败原件。旧缺口原样记载。
 
 ## 二、调度器与控制

@@ -331,6 +331,20 @@ class StorageOwner:
             with owner._condition:
                 owner._closing = True
                 owner._condition.notify_all()
+            # 报告启动失败之前，关闭结果必须已交付且原线程真正退出。
+            # 否则调用方可先关闭事件循环，留下仍向该循环投递的线程。
+            while not owner._closed.done():
+                try:
+                    await asyncio.shield(owner._closed)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            while owner._thread.is_alive():
+                try:
+                    await owner.clock.sleep(0)
+                except asyncio.CancelledError:
+                    continue
             raise
         return owner
 
