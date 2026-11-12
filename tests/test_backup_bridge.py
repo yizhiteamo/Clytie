@@ -122,8 +122,11 @@ async def test_real_worker_bridge_captures_and_seals_live_audit(tmp_path):
     audit.append("test_event")
     supervisor = SimpleNamespace(children={}, rows={}, audit=audit, backup_io=IoControl(clock))
     workers = BackupWorkers(home, clock, capture_handler=CaptureBridge(supervisor))
-    await workers.execute("create", {"scope": "instance"}, "d" * 32)
-    result = await completed(workers, "d" * 32)
+    try:
+        await workers.execute("create", {"scope": "instance"}, "d" * 32)
+        result = await completed(workers, "d" * 32)
+    finally:
+        await workers.stop("cancel")
     assert result["phase"] == "committed"
     assert result["result"]["creation"] == "complete"
     assert audit.writer.status()["archive_bytes"] > 0
@@ -155,8 +158,11 @@ async def test_bridge_online_failure_cannot_select_offline(tmp_path):
     )
     attach_test_capture_channel(supervisor)
     workers = BackupWorkers(home, clock, capture_handler=CaptureBridge(supervisor))
-    await workers.execute("create", {"scope": "instance"}, "e" * 32)
-    result = await completed(workers, "e" * 32)
+    try:
+        await workers.execute("create", {"scope": "instance"}, "e" * 32)
+        result = await completed(workers, "e" * 32)
+    finally:
+        await workers.stop("cancel")
     assert calls == [("companion_a", "backup_capture")]
     assert result["result"]["creation"] == "partial"
 
@@ -240,6 +246,9 @@ async def test_controller_shutdown_creates_once_after_worker_cancel_drain(tmp_pa
                 workers.escalate()
                 closing.cancel()
                 await asyncio.gather(closing, return_exceptions=True)
+                # The shutdown backup was accepted after the original stop drain.
+                # Keep the original timeout failure, but settle this new worker too.
+                await workers._drain()
     rows = BackupStorage(home, clock).list()
     assert len(rows) == 1
     assert rows[0]["completeness"] == "complete"

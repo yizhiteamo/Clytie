@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from clytie.plugin_host.locking import OperationBusy, _os_lock, file_lock, process_identity
 from clytie.plugin_host.snapshots import contained
-from clytie.plugin_host.support import timed
+from clytie.plugin_host.support import finish_cleanup, timed
 from clytie.supervisor.processes import python_process
 
 from .io_control import IoControl
@@ -316,30 +316,47 @@ class BackupWorkers:
                 if not process.stdin.is_closing():
                     process.stdin.close()
                 self.io_control.disconnect(session)
-                await process.wait()
-                exit_confirmed = True
         finally:
-            if session is not None:
-                self.io_control.disconnect(session)
-                if exit_confirmed or (process is not None and process.returncode is not None):
-                    await self.io_control.ended(session, confirmed=True)
-            # Captures retain their own views until their actual completion, even
-            # after the worker's pipe closes. Never pretend that cancelling this
-            # receiver has released a companion's snapshot thread.
-            await asyncio.gather(*tuple(bridges), return_exceptions=True)
-            if exit_confirmed or (process is not None and process.returncode is not None):
-                self.io_control.finish_operation(key)
-            if process is not None and process.stdin is not None:
-                process.stdin.close()
+
+            async def finish():
+                nonlocal exit_confirmed
+
+                if session is not None:
+                    self.io_control.disconnect(session)
                 try:
-                    await process.stdin.wait_closed()
-                except (OSError, RuntimeError):
-                    pass
-            if not started.done():
-                started.set_result(False)
-            self.controls.pop(key, None)
-            self.processes.pop(key, None)
-            self.tasks.pop(key, None)
+                    if process is not None:
+                        process.stdin.close()
+                        try:
+                            # Cancelled receivers must still drain bounded chunks:
+                            # waiting on exit alone can leave a writer stuck on stdout.
+                            while await process.stdout.read(64 * 1024):
+                                pass
+                        finally:
+                            await process.wait()
+                            exit_confirmed = True
+                finally:
+                    if session is not None and exit_confirmed:
+                        await self.io_control.ended(session, confirmed=True)
+                    # A companion's capture may outlive the worker pipe. Retain its
+                    # actual completion responsibility before retiring the operation.
+                    await asyncio.gather(*tuple(bridges), return_exceptions=True)
+                    if exit_confirmed:
+                        self.io_control.finish_operation(key)
+                    if process is not None and process.stdin is not None:
+                        process.stdin.close()
+                        try:
+                            await process.stdin.wait_closed()
+                        except (OSError, RuntimeError):
+                            pass
+                    if not started.done():
+                        started.set_result(False)
+                    self.controls.pop(key, None)
+                    self.processes.pop(key, None)
+                    self.tasks.pop(key, None)
+
+            _, cancelled = await finish_cleanup(finish())
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def cancel(self, operation_id):
         path = BackupJournal.path_for(self.home, operation_id)
