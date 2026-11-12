@@ -182,7 +182,7 @@ def frame_locations(frame):
     return result
 
 
-async def setup(directory, scale, *, core_assets=False):
+async def setup(directory, scale, *, core_assets=False, record_payload=False):
     home = directory / "home"
     shutil.copytree(ROOT / "examples/home", home)
     plugin_path = home / "plugins/benchmark-snapshot"
@@ -230,68 +230,106 @@ async def setup(directory, scale, *, core_assets=False):
         clock=clock,
         coordination_path=companion_coordinator(home, "companion_a", clock).path,
     )
-    await runtime.attach_owned(bind_handles(storage_owner, host, runtime))
-    store = host.memory_resources["companion_a"][0]
-    plan = host.plan_enable("companion_a", "benchmark-snapshot")
-    applied = await host.apply(plan.plan_id)
-    if applied["failed"]:
-        raise RuntimeError("fictional_provider_enable_failed")
-    rows, files, size = scale
-    rng = random.Random(SEED)
+    try:
+        await runtime.attach_owned(bind_handles(storage_owner, host, runtime))
+        store = host.memory_resources["companion_a"][0]
+        plan = host.plan_enable("companion_a", "benchmark-snapshot")
+        applied = await host.apply(plan.plan_id)
+        if applied["failed"]:
+            raise RuntimeError("fictional_provider_enable_failed")
+        rows, files, size = scale
+        rng = random.Random(SEED)
 
-    def seed_database():
-        with store.transaction():
-            store.set_meta("companion_uid", "a" * 32)
-            store.db.execute("CREATE TABLE benchmark_payload (id INTEGER PRIMARY KEY, data BLOB)")
-            store.db.executemany(
-                "INSERT INTO benchmark_payload VALUES (?, ?)",
-                ((index, rng.randbytes(4096)) for index in range(rows)),
-            )
-        store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        def seed_database():
+            with store.transaction():
+                store.set_meta("companion_uid", "a" * 32)
+                if record_payload:
+                    from clytie.sdk.types import MemoryRecord
 
-    await run_sync(store, seed_database)
-    data = home / (
-        "companions/companion_a/assets"
-        if core_assets
-        else "companions/companion_a/plugin-data/benchmark-snapshot"
-    )
-    data.mkdir(parents=True, exist_ok=True)
-    paths = []
-    assets = []
-    for index in range(files):
-        path = data / f"fictional_{index:05d}.bin"
-        with path.open("xb") as stream:
-            remaining = size
-            digest = hashlib.sha256()
-            while remaining:
-                block = rng.randbytes(min(1024 * 1024, remaining))
-                stream.write(block)
-                digest.update(block)
-                remaining -= len(block)
-        if core_assets:
-            path.chmod(0o444)
-            ref = AssetRef(
-                asset_id=digest.hexdigest(),
-                size=size,
-                media_type="application/octet-stream",
-                origin="fictional benchmark",
-            )
-            host.asset_store.register_private("companion_a", ref, path.relative_to(home).as_posix())
-            assets.append(ref)
-        else:
-            paths.append(path)
-    host.runtimes["companion_a", "benchmark-snapshot"].plugin.files = tuple(paths)
-    host.runtimes["companion_a", "benchmark-snapshot"].plugin.assets = tuple(assets)
-    return SimpleNamespace(
-        home=home,
-        cid="companion_a",
-        clock=clock,
-        host=host,
-        runtime=runtime,
-        report=report,
-        management_requests=set(),
-        storage_owner=storage_owner,
-    ), store
+                    # New complete-package fixtures need the actual core schema and
+                    # revision chain. Keep the historical component baseline intact.
+                    for index in range(rows):
+                        store._save(
+                            MemoryRecord(
+                                record_id=f"{index + 1:032x}",
+                                revision=1,
+                                kind="fact",
+                                content=rng.randbytes(2048).hex(),
+                                visibility="private",
+                                write_mode="auto",
+                                source_type="private",
+                                created_at=clock.now(),
+                                updated_at=clock.now(),
+                                decay={"weight": 1, "frozen": False},
+                                retracted=False,
+                            ),
+                            operator="fixture",
+                        )
+                else:
+                    store.db.execute(
+                        "CREATE TABLE benchmark_payload (id INTEGER PRIMARY KEY, data BLOB)"
+                    )
+                    store.db.executemany(
+                        "INSERT INTO benchmark_payload VALUES (?, ?)",
+                        ((index, rng.randbytes(4096)) for index in range(rows)),
+                    )
+            store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        await run_sync(store, seed_database)
+        data = home / (
+            "companions/companion_a/assets"
+            if core_assets
+            else "companions/companion_a/plugin-data/benchmark-snapshot"
+        )
+        data.mkdir(parents=True, exist_ok=True)
+        paths = []
+        assets = []
+        for index in range(files):
+            path = data / f"fictional_{index:05d}.bin"
+            with path.open("xb") as stream:
+                remaining = size
+                digest = hashlib.sha256()
+                while remaining:
+                    block = rng.randbytes(min(1024 * 1024, remaining))
+                    stream.write(block)
+                    digest.update(block)
+                    remaining -= len(block)
+            if core_assets:
+                path.chmod(0o444)
+                ref = AssetRef(
+                    asset_id=digest.hexdigest(),
+                    size=size,
+                    media_type="application/octet-stream",
+                    origin="fictional benchmark",
+                )
+                host.asset_store.register_private(
+                    "companion_a", ref, path.relative_to(home).as_posix()
+                )
+                assets.append(ref)
+            else:
+                paths.append(path)
+        host.runtimes["companion_a", "benchmark-snapshot"].plugin.files = tuple(paths)
+        host.runtimes["companion_a", "benchmark-snapshot"].plugin.assets = tuple(assets)
+        return SimpleNamespace(
+            home=home,
+            cid="companion_a",
+            clock=clock,
+            host=host,
+            runtime=runtime,
+            report=report,
+            management_requests=set(),
+            storage_owner=storage_owner,
+        ), store
+
+    except BaseException:
+        try:
+            await host.close()
+        finally:
+            try:
+                await storage_owner.close()
+            finally:
+                runtime.close()
+        raise
 
 
 async def run_case(directory, name, *, backup, requests=800, interval=0.025, scale_override=None):
