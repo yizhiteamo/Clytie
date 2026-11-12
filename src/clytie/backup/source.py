@@ -24,6 +24,7 @@ from .configuration import config_commit_lock
 from .container import _name
 from .coordination import companion_coordinator
 from .credentials import credential_exclusions, redact_document
+from .io_client import heavy_io, io_read, io_write
 from .mirror import publish_no_replace
 from .restore import source_registration
 
@@ -47,11 +48,12 @@ def _hash(value):
     return hashlib.sha256(value).hexdigest()
 
 
+@heavy_io
 def _entry(root, name, check=None):
     path = contained(root, root / name)
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
+        while chunk := io_read(stream, 1024 * 1024):
             if check:
                 check()
             digest.update(chunk)
@@ -66,15 +68,16 @@ def _put(root, name, value):
     return _entry(root, name)
 
 
+@heavy_io
 def _copy(home, source, root, name, check):
     source = contained(home, source)
     target = contained(root, root / name)
     target.parent.mkdir(parents=True, exist_ok=True)
     before = source.stat()
     with source.open("rb") as incoming, target.open("xb") as outgoing:
-        while chunk := incoming.read(1024 * 1024):
+        while chunk := io_read(incoming, 1024 * 1024):
             check()
-            outgoing.write(chunk)
+            io_write(outgoing, chunk)
     after = source.stat()
     if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
         after.st_dev,

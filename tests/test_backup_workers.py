@@ -21,6 +21,8 @@ async def completed(workers, operation_id):
             await workers.stop("wait")
             return result
         await SystemClock().sleep(0.02)
+        if isinstance(workers.clock, MockClock):
+            workers.clock.advance(0.02)
     pytest.fail("backup worker did not finish")
 
 
@@ -216,6 +218,11 @@ if len(sys.argv) > 5:
 
 
 def started_worker(home, op, hook, target, *, exit_gate=None):
+    import queue
+    import threading
+
+    from clytie.backup.io_control import IoControl
+
     process = subprocess.Popen(
         [sys.executable, "-c", HOOK_WORKER, str(home), op, hook, str(target)]
         + ([str(exit_gate)] if exit_gate is not None else []),
@@ -223,18 +230,61 @@ def started_worker(home, op, hook, target, *, exit_gate=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert json.loads(process.stdout.readline())["type"] == "ready"
+    process.messages = queue.Queue()
+
+    def control_pipe():
+        async def serve():
+            clock = MockClock()
+            control = IoControl(clock)
+            session = control.register()
+            control.authorize(session, op)
+
+            async def send(value):
+                process.stdin.write(json.dumps(value).encode() + b"\n")
+                process.stdin.flush()
+
+            try:
+                while raw := await asyncio.to_thread(process.stdout.readline):
+                    message = json.loads(raw)
+                    if message["type"] != "backup_io":
+                        process.messages.put(message)
+                        continue
+                    response = control.dispatch(session, message, send)
+                    while not response.done():
+                        await SystemClock().sleep(0.01)
+                        clock.advance(0.01)
+                    await response
+            except Exception as exc:
+                process.messages.put(exc)
+            finally:
+                await asyncio.to_thread(process.wait)
+                await control.ended(session, confirmed=True)
+
+        asyncio.run(serve())
+
+    process.controller = threading.Thread(target=control_pipe, daemon=True)
+    process.controller.start()
+    assert worker_message(process)["type"] == "ready"
     process.stdin.write(b"start\n")
     process.stdin.flush()
-    assert json.loads(process.stdout.readline())["type"] == "started"
-    assert json.loads(process.stdout.readline())["type"] == "checkpoint"
+    assert worker_message(process)["type"] == "started"
+    assert worker_message(process)["type"] == "checkpoint"
     return process
+
+
+def worker_message(process):
+    value = process.messages.get(timeout=15)
+    if isinstance(value, Exception):
+        raise value
+    return value
 
 
 def finish_child(process, *, kill=True):
     if kill and process.poll() is None:
         process.kill()
     process.wait(timeout=15)
+    process.controller.join(timeout=15)
+    assert not process.controller.is_alive()
     process.stdin.close()
     process.stdout.close()
     process.stderr.close()
@@ -293,7 +343,7 @@ def test_cancel_during_publishing_finishes_commit(tmp_path, monkeypatch):
     process = started_worker(manager.home, op, "cancel_published", target)
     process.stdin.write(b"cancel\n")
     process.stdin.flush()
-    result = json.loads(process.stdout.readline())
+    result = worker_message(process)
     finish_child(process, kill=False)
     assert result["result"]["phase"] == "committed"
     assert (
@@ -351,7 +401,13 @@ async def spawn(executable, *args, **kwargs):
 asyncio.create_subprocess_exec = spawn
 async def main():
     from clytie.sdk.testing import MockClock
-    workers=BackupWorkers(Path(sys.argv[1]),MockClock())
+    clock=MockClock()
+    workers=BackupWorkers(Path(sys.argv[1]),clock)
+    async def tick():
+        while True:
+            await SystemClock().sleep(0.01)
+            clock.advance(0.01)
+    ticking=asyncio.create_task(tick())
     await workers.execute("restore_apply",{"plan_id":sys.argv[2]},"4"*32)
     print("controller_started",flush=True)
     await asyncio.Event().wait()
@@ -508,9 +564,7 @@ async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypat
         assert not stopping.done()
         process.stdin.write(b"cancel\n")
         process.stdin.flush()
-        response = json.loads(
-            await timed(asyncio.to_thread(process.stdout.readline), SystemClock(), 15)
-        )
+        response = await timed(asyncio.to_thread(worker_message, process), SystemClock(), 15)
         assert response["type"] == "result"
         assert response["result"]["phase"] == "committed"
         # 固定最后一次轮询先于真实退出；机器快慢不能改变此顺序。

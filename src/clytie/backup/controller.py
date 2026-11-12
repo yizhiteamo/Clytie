@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from clytie.plugin_host.snapshots import atomic_write, canonical, contained, identifier
 
+from .io_client import io_scope
 from .restore import digest
 from .scheduling import BackupScheduler
 
@@ -78,9 +79,12 @@ async def capture_request(companion, args):
     from .source import SourceError
 
     try:
-        result = await capture_online(
-            companion, work, epoch, scope=args["scope"], check=check, space_guard=space
-        )
+        factory = getattr(companion, "backup_io_client", None)
+        client = factory(epoch, check=check) if factory is not None else None
+        with io_scope(client):
+            result = await capture_online(
+                companion, work, epoch, scope=args["scope"], check=check, space_guard=space
+            )
     except SourceError as exc:
         raise APIError(str(exc), 409) from None
     check()
@@ -113,6 +117,7 @@ class CaptureBridge:
             cid = identifier(args["companion_id"])
             if cid not in supervisor.children:
                 raise ValueError("snapshot_unavailable")
+            supervisor.authorize_backup_capture(cid, operation_id)
             return await supervisor.request(
                 cid,
                 "backup_capture",

@@ -4,8 +4,35 @@ from types import SimpleNamespace
 import pytest
 from tests.test_backup_online_source import online  # noqa: F401
 
+from clytie.backup.io_channel import IoChannel
 from clytie.backup.io_control import IoControl
 from clytie.backup.worker import Controls
+
+
+def attach_test_capture_channel(supervisor, runtime=None):
+    import asyncio
+
+    sessions = {}
+    control = supervisor.backup_io
+    loop = asyncio.get_running_loop()
+
+    def authorize(cid, operation):
+        if cid not in sessions:
+            sessions[cid] = control.register(storage_owner=True)
+        control.authorize(sessions[cid], operation)
+
+    supervisor.authorize_backup_capture = authorize
+    if runtime is not None:
+
+        async def reply(value):
+            channel.receive(value)
+
+        def emit(value):
+            loop.call_soon_threadsafe(lambda: control.dispatch(sessions[runtime.cid], value, reply))
+
+        channel = IoChannel(emit)
+        runtime.backup_io_client = channel.client
+    return sessions
 
 
 async def test_generated_key_notice_persists_until_acknowledged_not_copy_verified(tmp_path):
@@ -126,6 +153,7 @@ async def test_bridge_online_failure_cannot_select_offline(tmp_path):
         request=request,
         backup_io=IoControl(clock),
     )
+    attach_test_capture_channel(supervisor)
     workers = BackupWorkers(home, clock, capture_handler=CaptureBridge(supervisor))
     await workers.execute("create", {"scope": "instance"}, "e" * 32)
     result = await completed(workers, "e" * 32)
@@ -179,6 +207,7 @@ async def test_controller_shutdown_creates_once_after_worker_cancel_drain(tmp_pa
     from clytie.backup.controller import BackupController
     from clytie.backup.storage import BackupStorage
     from clytie.backup.workers import BackupWorkers
+    from clytie.clock import SystemClock
     from clytie.sdk.testing import MockClock
 
     home, _ = fictional(tmp_path)
@@ -196,8 +225,21 @@ async def test_controller_shutdown_creates_once_after_worker_cancel_drain(tmp_pa
         supervisor, workers, {"backup": {"schedule": {"catch_up": False}}}
     )
     await workers.stop("cancel")
-    await controller.shutdown()
-    await controller.shutdown()
+    for _ in range(2):
+        closing = asyncio.create_task(controller.shutdown())
+        try:
+            for _ in range(500):
+                if closing.done():
+                    break
+                await SystemClock().sleep(0.02)
+                clock.advance(0.02)
+            assert closing.done(), workers.io_control.budget.status()
+            await closing
+        finally:
+            if not closing.done():
+                workers.escalate()
+                closing.cancel()
+                await asyncio.gather(closing, return_exceptions=True)
     rows = BackupStorage(home, clock).list()
     assert len(rows) == 1
     assert rows[0]["completeness"] == "complete"
@@ -234,6 +276,7 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
         request=request,
         backup_io=IoControl(owner.clock),
     )
+    sessions = attach_test_capture_channel(supervisor, owner)
     workers = BackupWorkers(owner.home, owner.clock, capture_handler=CaptureBridge(supervisor))
     store = owner.host.memory_resources[owner.cid][0]
     finished = asyncio.Event()
@@ -256,9 +299,14 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
         await workers.execute("create", {"scope": "instance"}, "f" * 32)
         result = await completed(workers, "f" * 32)
     finally:
+        if workers.tasks:
+            await workers.stop("cancel")
         finished.set()
         await writer
     assert result["result"]["creation"] == "complete"
     assert calls == ["backup_capture"]
     assert holder.plugin.phases == ["prepare", "capture", "materialize", "release"]
     assert len(writes) > 2
+    assert sessions
+    assert not supervisor.backup_io.sessions[sessions[owner.cid]].endpoints
+    assert supervisor.backup_io.budget.status()["charged"]["read"] > 0

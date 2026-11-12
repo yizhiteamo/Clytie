@@ -13,6 +13,8 @@ from clytie.storage.capture_scope import capture_scope
 from clytie.storage.owner import StorageBusy
 
 from .coordination import CaptureError
+from .io_client import current_client, io_checks, io_scope
+from .sqlite_io import copy_database
 from .view_limits import MAX_VIEW_SECONDS, ViewLimits
 
 
@@ -31,6 +33,7 @@ async def _settle(future):
 class _SnapshotWorker:
     def __init__(self, paths, coordinator):
         self.paths, self.coordinator = dict(paths), coordinator
+        self.io_client = current_client()
         self.started = coordinator.clock.monotonic()
         self.acquired = None
         self.cancelled = threading.Event()
@@ -146,6 +149,10 @@ class _SnapshotWorker:
             if self.cancelled.is_set():
                 raise CaptureError("cancelled")
 
+        with io_scope(self.io_client), io_checks(checkpoint):
+            return self._copy_checked(directory, pages, checkpoint)
+
+    def _copy_checked(self, directory, pages, checkpoint):
         checkpoint()
         directory_path = Path(directory)
         directory_path.mkdir(parents=True, exist_ok=False)
@@ -157,7 +164,7 @@ class _SnapshotWorker:
                 pass
             destination = sqlite3.connect(target)
             try:
-                source.backup(destination, pages=pages, progress=checkpoint, sleep=0)
+                copy_database(source, destination, pages=pages, check=checkpoint)
                 checkpoint()
                 if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise CaptureError("snapshot_inconsistent")

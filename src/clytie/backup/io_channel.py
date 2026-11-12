@@ -6,7 +6,7 @@ from functools import partial
 from uuid import uuid4
 
 from .io_budget import IoBudgetError
-from .io_client import IoClient
+from .io_client import IoClient, checkpoint
 
 
 async def pressure_updates(runtime, clock, emit):
@@ -57,6 +57,7 @@ class IoChannel:
         else:
             raise IoBudgetError("backup_io_on_event_loop")
         if not cleanup:
+            checkpoint()
             check()
         key = uuid4().hex
         with self._condition:
@@ -72,6 +73,7 @@ class IoChannel:
             )
             while True:
                 if not cleanup:
+                    checkpoint()
                     check()
                 with self._condition:
                     if self._disconnected:

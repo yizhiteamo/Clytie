@@ -4,15 +4,31 @@ import asyncio
 import os
 import stat
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
+from inspect import signature
 from uuid import uuid4
 
 from .io_budget import CHUNK, IoBudgetError
 
 _client = ContextVar("backup_io_client", default=None)
 _stage = ContextVar("backup_io_stage", default=None)
+_checks = ContextVar("backup_io_checks", default=())
+
+
+@contextmanager
+def io_checks(check):
+    binding = _checks.set((*_checks.get(), check))
+    try:
+        yield
+    finally:
+        _checks.reset(binding)
+
+
+def checkpoint():
+    for check in _checks.get():
+        check()
 
 
 @contextmanager
@@ -32,6 +48,12 @@ class IoClient:
     def __init__(self, request):
         # request 与原操作/真实执行者绑定；不能携带客户端选择的其他执行者。
         self.request = request
+
+    def _request(self, arguments):
+        checkpoint()
+        result = self.request(arguments)
+        checkpoint()
+        return result
 
     @contextmanager
     def stage(self):
@@ -53,7 +75,7 @@ class IoClient:
         binding = _stage.set(state)
         try:
             try:
-                self.request({"action": "acquire", "stage": key})
+                self._request({"action": "acquire", "stage": key})
                 yield
             except BaseException as original:
                 try:
@@ -75,7 +97,7 @@ class IoClient:
         if state["client"] is not self or state["thread"] != threading.get_ident():
             raise IoBudgetError("backup_io_stage_context_mismatch")
         state["sequence"] += 1
-        self.request(
+        self._request(
             {
                 "action": "charge",
                 "stage": state["id"],
@@ -90,13 +112,15 @@ def heavy_io(function):
     """只用于同步门闩外阶段；必要发布/恢复收尾不得标此装饰器。"""
     if asyncio.iscoroutinefunction(function):
         raise TypeError("backup_io_async_stage_forbidden")
+    parameters = signature(function)
 
     @wraps(function)
     def wrapped(*args, **kwargs):
         client = current_client()
         if client is None:
             return function(*args, **kwargs)
-        with client.stage():
+        check = parameters.bind(*args, **kwargs).arguments.get("check")
+        with io_checks(check) if callable(check) else nullcontext(), client.stage():
             return function(*args, **kwargs)
 
     return wrapped

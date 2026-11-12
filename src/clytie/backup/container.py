@@ -15,6 +15,9 @@ from pathlib import Path
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .io_buffer import ChunkReader, ChunkWriter
+from .io_client import current_client, heavy_io
+
 MAGIC = b"CLYTIEB1"
 CHUNK = 1024 * 1024
 MAX_MANIFEST = 16 * CHUNK
@@ -85,6 +88,7 @@ def _read(stream, count):
     return value
 
 
+@heavy_io
 def pack(staging: Path, target: Path, key: bytes, manifest: dict, *, check: Check = None) -> str:
     """Write an exclusive unpublished package; caller owns cleanup/publication."""
     staging, target = Path(staging), Path(target)
@@ -110,7 +114,8 @@ def pack(staging: Path, target: Path, key: bytes, manifest: dict, *, check: Chec
     digest = hashlib.sha256()
     sequence = 0
     files, seen = [], {}
-    with target.open("xb") as output:
+    with target.open("xb") as raw_output:
+        output = ChunkWriter(raw_output) if current_client() is not None else raw_output
 
         def write(data):
             output.write(data)
@@ -144,7 +149,8 @@ def pack(staging: Path, target: Path, key: bytes, manifest: dict, *, check: Chec
                     raise ContainerError("container_limit")
                 frame(b"F", _json(relative))
                 size, hashed = 0, hashlib.sha256()
-                with path.open("rb") as source:
+                with path.open("rb") as raw_source:
+                    source = ChunkReader(raw_source) if current_client() is not None else raw_source
                     while block := source.read(CHUNK):
                         hashed.update(block)
                         size += len(block)
@@ -195,6 +201,7 @@ def _empty_target(target, marker):
             raise ContainerError("restore_target_not_empty")
 
 
+@heavy_io
 def unpack(
     source: Path, target: Path, key: bytes, *, check: Check = None, owned_marker: dict | None = None
 ) -> dict:
@@ -206,7 +213,8 @@ def unpack(
     current = None
     callback_failed = False
     try:
-        with source.open("rb") as stream:
+        with source.open("rb") as raw_stream:
+            stream = ChunkReader(raw_stream) if current_client() is not None else raw_stream
             if _read(stream, len(MAGIC)) != MAGIC:
                 raise ContainerError()
             length = struct.unpack(">I", _read(stream, 4))[0]
@@ -257,6 +265,8 @@ def unpack(
                     _safe(path)
                     path.parent.mkdir(parents=True, exist_ok=True)
                     current = path.open("xb")
+                    if current_client() is not None:
+                        current = ChunkWriter(current)
                     size, hashed = 0, hashlib.sha256()
                 elif kind == b"D" and current is not None:
                     decoder = zlib.decompressobj()
@@ -308,4 +318,7 @@ def unpack(
         raise ContainerError() from exc
     finally:
         if current is not None:
-            current.close()
+            if isinstance(current, ChunkWriter):
+                current.abort()
+            else:
+                current.close()
