@@ -112,7 +112,7 @@ def dispatch(home, clock, journal, controls):
             if not store.valid(row):
                 raise BackupError("backup_evidence_mismatch")
             _verify(home, Path(row["path"]), keys._read(), work / "verify", check=controls.check)
-            temporaries.register([work / "verify"])
+            temporaries.register([work / "verify"], budgeted=True, check=controls.check)
             temporaries.cleanup()
         return dict(backup_id=row["backup_id"], verification="passed")
     keys.ensure()
@@ -171,9 +171,9 @@ def dispatch(home, clock, journal, controls):
     guard.check(force=True)
     if not captured["files"]:
         raise BackupError("snapshot_unavailable")
-    temporaries.register([stage])
+    temporaries.register([stage], budgeted=True, check=checkpoint)
     if not captured["missing"]:
-        temporaries.register(captured["temporary_directories"])
+        temporaries.register(captured["temporary_directories"], budgeted=True, check=checkpoint)
     captured["manifest"].update(
         operation_id=operation_id,
         captured_at=clock.now().isoformat(),
@@ -189,7 +189,7 @@ def dispatch(home, clock, journal, controls):
     }
     # Container order follows directory traversal; compare actual file maps, not input ordering.
     envelope = _verify(home, temporary, key, work / "verified", check=checkpoint)
-    temporaries.register([work / "verified"])
+    temporaries.register([work / "verified"], budgeted=True, check=checkpoint)
     if (
         envelope["manifest"] != expected["manifest"]
         or sorted(envelope["files"], key=lambda r: r["path"]) != expected["files"]

@@ -5,7 +5,7 @@ from pathlib import Path
 from clytie.plugin_host.snapshots import atomic_write, canonical, contained
 from clytie.supervisor.common import read
 
-from .restore import digest, identity
+from .restore import budget_digest, digest, identity
 
 
 class TemporaryArtifacts:
@@ -33,27 +33,40 @@ class TemporaryArtifacts:
         contained(self.home, self.path)
         atomic_write(self.path, canonical(state), retry_sharing=True)
 
-    def register(self, roots):
-        """仅在本操作完成写入后登记其明确工作树，删除时只用此固定清单。"""
+    def register(self, roots, *, budgeted=False, check=None):
+        """登记已写完的明确材料；仅可取消的提交前调用显式启用摘要预算。"""
+
+        def checkpoint():
+            if check:
+                check()
+
+        checkpoint()
         state = self.state()
         for root in roots:
+            checkpoint()
             root = contained(self.root, Path(root))
             for path in [root, *sorted(root.rglob("*"))]:
+                checkpoint()
                 contained(self.root, path)
                 entry = {"identity": identity(path), "state": "retained"}
                 if path.is_file():
-                    entry.update(size=path.stat().st_size, sha256=digest(path))
+                    size = path.stat().st_size
+                    hashed = budget_digest(path, check=check) if budgeted else digest(path)
+                    checkpoint()
+                    entry.update(size=size, sha256=hashed)
                     state["files"][str(path)] = entry
                 elif path.is_dir():
                     state["directories"][str(path)] = entry
                 else:
                     raise ValueError("temporary_identity_mismatch")
             for parent in [root.parent, *root.parents]:
+                checkpoint()
                 if parent == self.root or parent.is_relative_to(self.root):
                     state["directories"][str(parent)] = {
                         "identity": identity(parent),
                         "state": "retained",
                     }
+        checkpoint()
         self._save(state)
 
     def cleanup(self):
