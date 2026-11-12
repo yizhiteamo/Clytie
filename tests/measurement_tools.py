@@ -8,6 +8,7 @@ DEPENDENCIES = {
         "measurement_recording",
         "measurement_load",
         "measurement_observation",
+        "measurement_native_observation",
         "measurement_resources",
         "measurement_version",
         "measurement_views",

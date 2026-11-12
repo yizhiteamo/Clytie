@@ -170,8 +170,51 @@ class Observation:
         original_connect, original_fsync = sqlite3.connect, os.fsync
         original_os_lock = locking._os_lock
         original_capture_lock = CaptureCoordinator._lock
+        native = None
+        if self.recorder.format_version == 4:
+            try:
+                from .measurement_native_observation import NativeObservation, _validation
+            except ImportError:
+                from measurement_native_observation import NativeObservation, _validation
+            native = NativeObservation(self)
 
         class Connection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                state = native.before_sql(self, sql, _request.get()) if native is not None else None
+                state = state or getattr(self, "_measurement_implicit", None)
+                try:
+                    cursor = super().execute(sql, *args, **kwargs)
+                except BaseException as exc:
+                    if state is not None:
+                        native.end(state, exc)
+                    raise
+                finally:
+                    if state is not None:
+                        state["last_call"] = observer.now()
+                return native.cursor(cursor, state) if native is not None else cursor
+
+            def close(self):
+                state = getattr(self, "_measurement_implicit", None)
+                if state is not None:
+                    native.end(state)
+                result = super().close()
+                if native is not None:
+                    native.closed(self)
+                return result
+
+            def set_progress_handler(self, callback, instructions):
+                state = _validation.get() if native is not None else None
+                if callback is not None and state is not None:
+                    original_callback = callback
+
+                    def callback():
+                        result = original_callback()
+                        if result:
+                            native.interrupted(state)
+                        return result
+
+                return super().set_progress_handler(callback, instructions)
+
             def commit(self):
                 return observer.call("commit", super().commit)
 
@@ -195,7 +238,10 @@ class Observation:
                 if kwargs.get("factory", sqlite3.Connection) is not sqlite3.Connection:
                     raise ValueError("observation_factory_unsupported")
                 kwargs["factory"] = Connection
-            return original_connect(database, *positional, **kwargs)
+            connection = original_connect(database, *positional, **kwargs)
+            if native is not None and native.legacy:
+                native.bind(connection)
+            return connection
 
         def fsync(descriptor):
             return observer.call("fsync", original_fsync, descriptor)
@@ -220,4 +266,10 @@ class Observation:
             stack.enter_context(patch.object(os, "fsync", fsync))
             stack.enter_context(patch.object(locking, "_os_lock", os_lock))
             stack.enter_context(patch.object(CaptureCoordinator, "_lock", capture_lock))
-            yield self
+            if native is not None:
+                native.install(stack, _request.get)
+            try:
+                yield self
+            finally:
+                if native is not None:
+                    native.check_unsettled()

@@ -18,7 +18,12 @@ except ImportError:
 
 
 class Recorder:
-    def __init__(self, *, max_file_bytes=None):
+    def __init__(self, *, max_file_bytes=None, format_version=None):
+        if format_version is not None and (
+            type(format_version) is not int or format_version not in {1, 2, 3, 4}
+        ):
+            raise evidence.EvidenceError("unsupported_format")
+        self.format_version = format_version
         self.limit = evidence.MAX_FILE if max_file_bytes is None else max_file_bytes
         if type(self.limit) is not int or not 0 < self.limit <= evidence.MAX_FILE:
             raise evidence.EvidenceError("recording_invalid_limit")
@@ -35,7 +40,7 @@ class Recorder:
             try:
                 if name not in self.rows:
                     raise evidence.EvidenceError("unknown_file")
-                evidence.validate_record(name, row)
+                evidence.validate_record(name, row, format_version=self.format_version)
                 raw = (json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n").encode()
                 if len(raw) > evidence.MAX_LINE or len(self.rows[name]) + len(raw) > self.limit:
                     raise evidence.EvidenceError("recording_capacity")
@@ -52,6 +57,9 @@ class Recorder:
                 raise evidence.EvidenceError("recording_closed")
             if self.failed:
                 raise evidence.EvidenceError("recording_invalid")
+            if self.format_version is not None and run.get("format") != self.format_version:
+                self.failed = True
+                raise evidence.EvidenceError("recording_format_mismatch")
             self.closed = True
             contents = {name: bytes(raw) for name, raw in self.rows.items()}
         contents["run-manifest.json"] = json.dumps(run, separators=(",", ":")).encode()
@@ -87,7 +95,9 @@ class Recorder:
                 for line in raw.splitlines(keepends=True):
                     if len(line) > evidence.MAX_LINE:
                         raise evidence.EvidenceError("line_size_limit")
-                    evidence.validate_record(name, evidence._json(line))
+                    evidence.validate_record(
+                        name, evidence._json(line), format_version=self.format_version
+                    )
                 self.rows[name].extend(raw)
             except Exception:
                 self.failed = True

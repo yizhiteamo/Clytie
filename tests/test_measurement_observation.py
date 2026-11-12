@@ -11,6 +11,7 @@ import pytest
 from tests.test_measurement_evidence import load_tool
 
 observation = load_tool("measurement_observation")
+load_tool("measurement_native_observation")
 recording = load_tool("measurement_recording")
 
 
@@ -277,3 +278,279 @@ async def test_invalidated_recorder_still_releases_completed_future_references(t
         assert reference() is None
         assert rows(recorder) == []
     assert recorder.failed
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_native_checks_keep_real_driver_close_and_stage_times(tmp_path, cancel):
+    from clytie.backup import native_sqlite
+    from clytie.backup.errors import BackupError
+    from clytie.backup.io_client import io_checks
+
+    recorder = recording.Recorder(format_version=4)
+    ticks = iter(range(1000))
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: next(ticks))
+    calls = 0
+
+    def check():
+        nonlocal calls
+        calls += 1
+        if cancel and calls >= 2:
+            raise BackupError("cancelled")
+
+    with observer.install(), observation.request_scope(17):
+        try:
+            with native_sqlite.validation_stage():
+                db = sqlite3.connect(tmp_path / "fictional.db")
+                try:
+                    with io_checks(check), native_sqlite.native_checks(db):
+                        db.execute(
+                            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) SELECT sum(x) FROM n"
+                        ).fetchall()
+                finally:
+                    assert not any(
+                        row.get("event") == "connection_closed" for row in rows(recorder)
+                    )
+                    db.close()
+                    assert not any(row.get("event") == "finished" for row in rows(recorder))
+        except BackupError as exc:
+            assert cancel and exc.code == "cancelled"
+    events = [row for row in rows(recorder) if row["phase"] == "native_validation"]
+    assert [row["event"] for row in events] == [
+        "started",
+        "connection_attached",
+        *(["interrupt_accepted", "cancel_accepted"] if cancel else []),
+        "driver_finished",
+        "connection_closed",
+        "finished",
+    ]
+    assert len({row["validation_id"] for row in events}) == 1
+    assert all(row["request_id"] == 17 and row["internal_read_bytes"] is None for row in events)
+    assert [row["at_s"] for row in events] == sorted(row["at_s"] for row in events)
+    checked = recording.evidence.NativeEvents()
+    for row in events:
+        checked.add(row)
+    checked.complete()
+
+
+def test_native_stage_release_before_close_is_not_hidden_by_observer(tmp_path):
+    from clytie.backup import native_sqlite
+
+    recorder = recording.Recorder(format_version=4)
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    with observer.install():
+        with native_sqlite.validation_stage():
+            db = sqlite3.connect(tmp_path / "fictional.db")
+            with native_sqlite.native_checks(db):
+                db.execute("PRAGMA quick_check").fetchall()
+        db.close()
+    checked = recording.evidence.NativeEvents()
+    with pytest.raises(recording.evidence.EvidenceError, match="native_release_unconfirmed"):
+        for row in rows(recorder):
+            if row["phase"] == "native_validation":
+                checked.add(row)
+
+
+def test_native_unclosed_connection_does_not_produce_completed_evidence(tmp_path):
+    from clytie.backup import native_sqlite
+
+    recorder = recording.Recorder(format_version=4)
+    observer = observation.Observation(tmp_path, recorder, origin=0)
+    db = None
+    try:
+        with pytest.raises(ValueError, match="native_unsettled"), observer.install():
+            db = sqlite3.connect(tmp_path / "fictional.db")
+            with native_sqlite.native_checks(db):
+                db.execute("PRAGMA quick_check").fetchall()
+        assert recorder.failed
+        assert any(row.get("event") == "connection_close_unknown" for row in rows(recorder))
+    finally:
+        if db is not None:
+            db.close()
+
+
+@pytest.mark.parametrize("explicit_close", [False, True])
+def test_legacy_sql_observation_preserves_unknown_close_and_requires_process_exit(
+    tmp_path, monkeypatch, explicit_close
+):
+    native_tool = load_tool("measurement_native_observation")
+    original_import = native_tool.importlib.import_module
+
+    def old_product(name):
+        if name == "clytie.backup.native_sqlite":
+            raise ModuleNotFoundError(name=name)
+        return original_import(name)
+
+    monkeypatch.setattr(native_tool.importlib, "import_module", old_product)
+    recorder = recording.Recorder(format_version=4)
+    ticks = iter(range(1000))
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: next(ticks))
+    observer.sequence = 1 << 40
+    db = None
+    try:
+        with observer.install():
+            with sqlite3.connect(tmp_path / "fictional.db") as db:
+                db.execute("CREATE TABLE fixture(value)")
+                db.executemany("INSERT INTO fixture VALUES (?)", [(1,), (2,), (3,)])
+                assert db.execute("PRAGMA quick_check").fetchone() == ("ok",)
+                assert list(db.execute("SELECT value FROM fixture")) == [(1,), (2,), (3,)]
+            # __exit__ preserved its original transaction-only behavior.
+            assert not any(row.get("event") == "connection_closed" for row in rows(recorder))
+            if explicit_close:
+                db.close()
+        events = [row for row in rows(recorder) if row["phase"] == "native_validation"]
+        checked = recording.evidence.NativeEvents()
+        for row in events:
+            checked.add(row)
+        if explicit_close:
+            checked.complete()
+        else:
+            assert events[-1]["event"] == "connection_close_unknown"
+            assert events[-1]["outcome"] == "unknown"
+            with pytest.raises(
+                recording.evidence.EvidenceError, match="native_release_unconfirmed"
+            ):
+                checked.complete()
+            checked.complete(process_exit_s=1000)
+        assert not any(row["event"] == "cancel_accepted" for row in events)
+    finally:
+        if db is not None:
+            db.close()
+
+
+def test_helpers_imported_during_observation_do_not_retain_previous_recorder(tmp_path, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from clytie.backup import native_sqlite
+
+    original = native_sqlite.native_checks
+    first = recording.Recorder(format_version=4)
+    with observation.Observation(tmp_path, first, origin=0).install():
+        late = ModuleType("clytie.measurement_fictional")
+        late.native_checks = native_sqlite.native_checks
+        monkeypatch.setitem(sys.modules, late.__name__, late)
+        assert late.native_checks is not original
+    assert late.native_checks is original
+    first.closed = True
+    second = recording.Recorder(format_version=4)
+    with observation.Observation(tmp_path, second, origin=0).install():
+        db = sqlite3.connect(tmp_path / "fictional.db")
+        try:
+            with late.native_checks(db):
+                db.execute("PRAGMA quick_check").fetchall()
+        finally:
+            db.close()
+    assert not rows(first)
+    assert any(row.get("event") == "finished" for row in rows(second))
+
+
+def test_progress_failure_is_not_misreported_as_accepted_cancellation(tmp_path):
+    from clytie.backup import native_sqlite
+    from clytie.backup.errors import BackupError
+    from clytie.backup.io_client import io_checks
+
+    recorder = recording.Recorder(format_version=4)
+    calls = 0
+
+    def check():
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise BackupError("snapshot_view_expired")
+
+    with observation.Observation(tmp_path, recorder, origin=0).install():
+        db = sqlite3.connect(tmp_path / "fictional.db")
+        try:
+            with pytest.raises(BackupError, match="snapshot_view_expired"):
+                with io_checks(check), native_sqlite.native_checks(db):
+                    db.execute(
+                        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) SELECT sum(x) FROM n"
+                    ).fetchall()
+        finally:
+            db.close()
+    events = rows(recorder)
+    assert any(row.get("event") == "interrupt_accepted" for row in events)
+    assert not any(row.get("event") == "cancel_accepted" for row in events)
+    assert (
+        next(row for row in events if row.get("event") == "driver_finished")["outcome"] == "failed"
+    )
+
+
+def test_nested_native_checks_bind_only_their_explicit_connections(tmp_path):
+    from clytie.backup import native_sqlite
+
+    recorder = recording.Recorder(format_version=4)
+    with observation.Observation(tmp_path, recorder, origin=0).install():
+        with native_sqlite.validation_stage():
+            outer = sqlite3.connect(tmp_path / "outer.db")
+            try:
+                with native_sqlite.native_checks(outer):
+                    inner = sqlite3.connect(tmp_path / "inner.db")
+                    try:
+                        with native_sqlite.native_checks(inner):
+                            inner.execute("PRAGMA quick_check").fetchall()
+                    finally:
+                        inner.close()
+                    outer.execute("PRAGMA quick_check").fetchall()
+            finally:
+                outer.close()
+    checked = recording.evidence.NativeEvents()
+    for row in rows(recorder):
+        checked.add(row)
+    checked.complete()
+    assert len([row for row in rows(recorder) if row["event"] == "connection_attached"]) == 2
+
+
+@pytest.mark.parametrize("source", ["worker", "sdk", "asyncio", "unrelated"])
+@pytest.mark.parametrize("stage_exit", [False, True])
+def test_native_checks_classify_actual_cancellation_types_without_message_matching(
+    tmp_path, source, stage_exit
+):
+    from clytie.backup import native_sqlite
+    from clytie.backup.worker import Cancelled as WorkerCancelled
+    from clytie.sdk.cancellation import Cancelled as SdkCancelled
+
+    class Cancelled(Exception):
+        pass
+
+    exception = {
+        "worker": WorkerCancelled,
+        "sdk": SdkCancelled,
+        "asyncio": asyncio.CancelledError,
+        "unrelated": Cancelled,
+    }[source]
+    calls = 0
+
+    def check():
+        nonlocal calls
+        calls += 1
+        if calls >= 2 and not stage_exit:
+            raise exception("cancelled")
+
+    from clytie.backup.io_client import io_checks
+
+    recorder = recording.Recorder(format_version=4)
+    with observation.Observation(tmp_path, recorder, origin=0).install():
+        with pytest.raises(exception):
+            with native_sqlite.validation_stage():
+                db = sqlite3.connect(tmp_path / "fictional.db")
+                try:
+                    with io_checks(check), native_sqlite.native_checks(db):
+                        db.execute(
+                            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) SELECT sum(x) FROM n"
+                        ).fetchall()
+                finally:
+                    db.close()
+                if stage_exit:
+                    raise exception("cancelled")
+    events = rows(recorder)
+    expected = "failed" if source == "unrelated" else "cancelled"
+    assert next(row for row in events if row["event"] == "driver_finished")["outcome"] == (
+        "ok" if stage_exit else expected
+    )
+    assert next(row for row in events if row["event"] == "finished")["outcome"] == expected
+    accepted = [row for row in events if row["event"] == "cancel_accepted"]
+    assert len(accepted) == (0 if source == "unrelated" or stage_exit else 1)
+    if accepted:
+        interrupt = next(row for row in events if row["event"] == "interrupt_accepted")
+        assert accepted[0]["at_s"] == interrupt["at_s"]

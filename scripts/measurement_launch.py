@@ -30,6 +30,7 @@ TOOL_FILES = (
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_observation.py",
+    "scripts/measurement_native_observation.py",
     "scripts/measurement_recording.py",
     "scripts/measurement_resources.py",
     "scripts/measurement_transport.py",
@@ -95,7 +96,7 @@ def tiny_manifest(inventory, tools, arm, scale):
         warmup_requests=2,
     )
     run = dict(
-        format=3,
+        format=4,
         source="generated_fictional_only",
         method="legal_fixture_comparison_v1",
         candidate=inventory["candidate"],

@@ -171,7 +171,7 @@ async def run(directory, run, product_root, tiny=False):
     evidence.validate_run(run)
     if (
         tiny is not True
-        or run["format"] != 3
+        or run["format"] != 4
         or run["phase"] != "fixture"
         or run["method"] != "legal_fixture_comparison_v1"
     ):
@@ -195,12 +195,13 @@ async def run(directory, run, product_root, tiny=False):
     if root.exists() or root.is_symlink():
         raise ValueError("measurement_destination_exists")
     root.parent.mkdir(parents=True, exist_ok=True)
-    recorder, origin = Recorder(), perf_counter()
+    recorder, origin = Recorder(format_version=run["format"]), perf_counter()
     observation = Observation(root.parent, recorder, origin=origin)
     mode, backup_enabled = MODES[run["arm"]], run["arm"] in {"original", "candidate"}
     views = Views(recorder, now=observation.now) if mode != "legacy" else None
     owner = workers = control = session = sampling = deadline = None
     operations, processes, sample_processes, identities, errors = [], [], [], {}, []
+    child_exit_times = {}
     diagnostics = []
     parent_identity = process_identity()
     metrics = run["metrics"]
@@ -306,10 +307,27 @@ async def run(directory, run, product_root, tiny=False):
                     ):
                         raise ValueError("measurement_unexpected_child")
                     child = await native_spawn(
-                        args[0], str(wrapper), str(root), args[4], str(origin), **kwargs
+                        args[0],
+                        str(wrapper),
+                        str(root),
+                        args[4],
+                        str(origin),
+                        str(run["format"]),
+                        **kwargs,
                     )
                     processes.append(child)
-                    release(len(processes), "process", "acquired")
+                    child_number = len(processes)
+                    release(child_number, "process", "acquired")
+                    original_wait = child.wait
+
+                    async def observed_wait():
+                        result = await original_wait()
+                        if child_number not in child_exit_times:
+                            child_exit_times[child_number] = perf_counter()
+                            release(child_number, "process", "exit_verified")
+                        return result
+
+                    child.wait = observed_wait
                     try:
                         register_child(sample_processes, identities, child, process_identity)
                     except BaseException:
@@ -495,6 +513,8 @@ async def run(directory, run, product_root, tiny=False):
                 or last_business_finished is None
                 or backup_finished > start + run["load"]["window_seconds"]
                 or backup_finished > last_business_finished
+                or len(child_exit_times) != len(processes)
+                or any(at > backup_finished for at in child_exit_times.values())
             ):
                 completed = False
                 errors.append("measurement_backup_window_uncovered")
@@ -546,7 +566,9 @@ async def run(directory, run, product_root, tiny=False):
                 if child.returncode is None:
                     errors.append("measurement_worker_exit_unconfirmed")
                 else:
-                    release(index, "process", "exit_verified")
+                    if index not in child_exit_times:
+                        child_exit_times[index] = perf_counter()
+                        release(index, "process", "exit_verified")
                     if child.returncode != 0:
                         errors.append("measurement_worker_failed")
             try:

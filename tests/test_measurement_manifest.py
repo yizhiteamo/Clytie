@@ -76,6 +76,65 @@ def manifest_v3(directory):
     return run
 
 
+def manifest_v4(directory):
+    run = manifest_v3(directory)
+    run["format"] = 4
+    save_manifest(directory, run)
+    return run
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_all_manifest_versions_preserve_raw_bytes_and_archive_version(tmp_path, version):
+    import io
+    import zipfile
+
+    import pyrage
+
+    source = tmp_path / "source"
+    run = {1: fixture_files, 2: manifest_v2, 3: manifest_v3, 4: manifest_v4}[version](source)
+    original = contents(source)
+    identity = evidence.native_identity().generate()
+    evidence.seal(source, tmp_path / "sealed", str(identity.to_public()), run)
+    ciphertext = tmp_path / "sealed/measurements.age"
+    with zipfile.ZipFile(
+        io.BytesIO(pyrage.decrypt(ciphertext.read_bytes(), [identity]))
+    ) as archive:
+        inner = json.loads(archive.read("archive-manifest.json"))
+        assert inner["format"] == (2 if version in {3, 4} else 1)
+    evidence.open_bundle(
+        ciphertext, tmp_path / "opened", identity, run, private_scan=lambda _: "pass"
+    )
+    assert contents(tmp_path / "opened/raw") == original
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_native_event_requires_format_four_and_unknown_internal_bytes(version):
+    row = dict(
+        id=1,
+        request_id=0,
+        phase="native_validation",
+        validation_id=1,
+        connection_id=0,
+        event="started",
+        at_s=0,
+        outcome="ok",
+        internal_read_bytes=None,
+        boundary="native_checks",
+    )
+    if version == 4:
+        evidence.validate_record("storage-phases.jsonl", row, format_version=version)
+        for value in (0, 4096, "unknown"):
+            with pytest.raises(evidence.EvidenceError, match="native_bytes_unknown_required"):
+                evidence.validate_record(
+                    "storage-phases.jsonl",
+                    {**row, "internal_read_bytes": value},
+                    format_version=version,
+                )
+    else:
+        with pytest.raises(evidence.EvidenceError, match="unsupported_native_event"):
+            evidence.validate_record("storage-phases.jsonl", row, format_version=version)
+
+
 def save_manifest(directory, run):
     (directory / "run-manifest.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
 

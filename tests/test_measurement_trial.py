@@ -43,6 +43,7 @@ def tmp_path():
 
 def prepared(tmp_path, monkeypatch, arm="candidate", *, window=3):
     run = manifest_v3(tmp_path / "expected")
+    run["format"] = 4
     run.update(
         arm=arm,
         scale="small_text",
@@ -228,7 +229,9 @@ async def test_recording_capacity_preserves_invalid_bytes_and_closes_owner(tmp_p
         return owner, metrics
 
     monkeypatch.setattr(measurement_fixture, "setup", setup)
-    monkeypatch.setattr(trial, "Recorder", lambda: original_recorder(max_file_bytes=16 * 1024))
+    monkeypatch.setattr(
+        trial, "Recorder", lambda **kwargs: original_recorder(max_file_bytes=16 * 1024, **kwargs)
+    )
     # Exhaust bounded observation storage without substituting success records.
     run["load"].update(window_seconds=1, request_count=40)
     root = tmp_path / "capacity"

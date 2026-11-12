@@ -213,7 +213,7 @@ def _pattern(value, pattern):
 
 
 def validate_run(run):
-    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3}:
+    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3, 4}:
         _validate_run_versioned(run)
     else:
         _validate_run_v1(run)
@@ -257,7 +257,10 @@ def _validate_run_versioned(run):
     _fields(run, V2_FIELDS)
     _enum(run["source"], {"generated_fictional_only"})
     _enum(run["method"], {"legal_storage_v1", "legal_fixture_comparison_v1"})
-    _enum(run["fixture_version"], {"legal_memory_v2" if run["format"] == 3 else "legal_memory_v1"})
+    _enum(
+        run["fixture_version"],
+        {"legal_memory_v2" if run["format"] in {3, 4} else "legal_memory_v1"},
+    )
     for field in ("candidate", "reference", "baseline_reference", "source_commit"):
         _pattern(run[field], r"[a-f0-9]{40}")
     if run["reference"] != ORIGINAL_REFERENCE or run["baseline_reference"] != BASELINE_REFERENCE:
@@ -390,9 +393,18 @@ def _validate_metrics(metrics):
 
 def validate_record(name, row, *, format_version=None):
     if format_version is not None and (
-        type(format_version) is not int or format_version not in {1, 2, 3}
+        type(format_version) is not int or format_version not in {1, 2, 3, 4}
     ):
         raise EvidenceError("unsupported_format")
+    if (
+        name == "storage-phases.jsonl"
+        and type(row) is dict
+        and row.get("phase") == "native_validation"
+    ):
+        if format_version not in {None, 4}:
+            raise EvidenceError("unsupported_native_event")
+        _validate_native_event(row)
+        return
     if name == "requests.jsonl":
         _fields(row, ("id", "kind", "scheduled_s", "started_s", "finished_s", "outcome"))
         _enum(row["kind"], {"business", "control", "cancel", "backup"})
@@ -416,7 +428,7 @@ def validate_record(name, row, *, format_version=None):
     elif name == "resources.jsonl":
         fields = (
             RESOURCE_FIELDS_V3
-            if format_version == 3
+            if format_version in {3, 4}
             or (
                 format_version is None and type(row) is dict and set(row) == set(RESOURCE_FIELDS_V3)
             )
@@ -454,6 +466,137 @@ def validate_record(name, row, *, format_version=None):
             _number(value, integer=not key.endswith(("_s", "_ms")))
     if "started_s" in row and row["finished_s"] < row["started_s"]:
         raise EvidenceError("invalid_interval")
+
+
+NATIVE_FIELDS = (
+    "id",
+    "request_id",
+    "phase",
+    "validation_id",
+    "connection_id",
+    "event",
+    "at_s",
+    "outcome",
+    "internal_read_bytes",
+    "boundary",
+)
+NATIVE_EVENTS = {
+    "started",
+    "cancel_accepted",
+    "driver_finished",
+    "connection_closed",
+    "finished",
+    "connection_close_unknown",
+    "connection_attached",
+    "interrupt_accepted",
+}
+
+
+def _validate_native_event(row):
+    _fields(row, NATIVE_FIELDS)
+    _enum(row["phase"], {"native_validation"})
+    _enum(row["event"], NATIVE_EVENTS)
+    _enum(row["boundary"], {"native_checks", "legacy_validation"})
+    _enum(row["outcome"], {"ok", "failed", "cancelled", "unknown"})
+    if row["internal_read_bytes"] is not None:
+        raise EvidenceError("native_bytes_unknown_required")
+    for field in ("id", "request_id", "validation_id", "connection_id", "at_s"):
+        _number(row[field], integer=field != "at_s")
+    if bool(row["connection_id"]) != (
+        row["event"]
+        in {
+            "connection_attached",
+            "connection_closed",
+            "connection_close_unknown",
+        }
+    ):
+        raise EvidenceError("native_connection_identity_invalid")
+
+
+class NativeEvents:
+    """Check incremental lifecycle evidence without retaining the complete log."""
+
+    def __init__(self):
+        self.active = {}
+        self.latest = 0
+        self.failed = False
+
+    def add(self, row):
+        identifier, event, at = row["validation_id"], row["event"], row["at_s"]
+        self.latest = max(self.latest, at)
+        self.failed = self.failed or row["outcome"] in {"failed", "cancelled"}
+        if event == "started":
+            if identifier in self.active or len(self.active) >= 8192:
+                raise EvidenceError("native_event_sequence_invalid")
+            self.active[identifier] = dict(
+                start=at,
+                last=at,
+                end=None,
+                cancel=None,
+                interrupt=None,
+                attached=set(),
+                closed=set(),
+                unknown=set(),
+                boundary=row["boundary"],
+                request=row["request_id"],
+            )
+            return
+        state = self.active.get(identifier)
+        if (
+            state is None
+            or at < state["last"]
+            or (row["boundary"], row["request_id"]) != (state["boundary"], state["request"])
+        ):
+            raise EvidenceError("native_event_sequence_invalid")
+        state["last"] = at
+        connection = row["connection_id"]
+        if event == "connection_attached":
+            if connection in state["attached"]:
+                raise EvidenceError("native_event_sequence_invalid")
+            state["attached"].add(connection)
+        elif event in {"connection_closed", "connection_close_unknown"}:
+            if (
+                connection not in state["attached"]
+                or connection in state["closed"] | state["unknown"]
+            ):
+                raise EvidenceError("native_event_sequence_invalid")
+            if event == "connection_close_unknown":
+                if state["boundary"] != "legacy_validation" or row["outcome"] != "unknown":
+                    raise EvidenceError("native_close_unconfirmed")
+                state["unknown"].add(connection)
+            else:
+                if state["boundary"] == "native_checks" and state["end"] is None:
+                    raise EvidenceError("native_close_before_driver_return")
+                state["closed"].add(connection)
+        elif event == "cancel_accepted":
+            if state["cancel"] is not None or state["end"] is not None:
+                raise EvidenceError("native_event_sequence_invalid")
+            state["cancel"] = at
+        elif event == "interrupt_accepted":
+            if state["interrupt"] is not None or state["end"] is not None:
+                raise EvidenceError("native_event_sequence_invalid")
+            state["interrupt"] = at
+        elif event == "driver_finished":
+            if state["end"] is not None or (state["cancel"] is not None and at < state["cancel"]):
+                raise EvidenceError("native_event_sequence_invalid")
+            state["end"] = at
+        elif event == "finished":
+            if state["end"] is None or at < state["end"] or state["attached"] != state["closed"]:
+                raise EvidenceError("native_release_unconfirmed")
+            self.active.pop(identifier)
+
+    def complete(self, *, process_exit_s=None):
+        for identifier, state in self.active.items():
+            if (
+                state["boundary"] != "legacy_validation"
+                or state["end"] is None
+                or state["attached"] != state["closed"] | state["unknown"]
+                or not state["unknown"]
+                or identifier < 1 << 40
+                or process_exit_s is None
+                or process_exit_s < state["last"]
+            ):
+                raise EvidenceError("native_release_unconfirmed")
 
 
 def _strings(value):
@@ -502,15 +645,19 @@ def validate_files(contents, expected, *, report_format=None):
             raise EvidenceError("file_size_limit")
         run = _json(manifest_raw)
         validate_run(run)
+        native = NativeEvents() if run["format"] == 4 else None
+        process_exit_s = None
+        business_start = business_finish = backup_finish = None
         if report_format is None:
-            report_format = 2 if run["format"] == 3 else 1
+            report_format = 2 if run["format"] in {3, 4} else 1
         if (
             type(report_format) is not int
             or report_format not in {1, 2}
-            or (report_format == 2 and run["format"] != 3)
+            or (report_format == 2 and run["format"] not in {3, 4})
+            or (run["format"] == 4 and report_format != 2)
         ):
             raise EvidenceError("unsupported_report_format")
-        file_limit = MAX_FILE if run["format"] == 3 else LEGACY_MAX_FILE
+        file_limit = MAX_FILE if run["format"] in {3, 4} else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
             if not raw or len(raw) > file_limit:
@@ -523,6 +670,29 @@ def validate_files(contents, expected, *, report_format=None):
                 if name != "run-manifest.json":
                     row = _json(line)
                     validate_record(name, row, format_version=run["format"])
+                    if (
+                        native is not None
+                        and name == "storage-phases.jsonl"
+                        and row["phase"] == "native_validation"
+                    ):
+                        native.add(row)
+                    if native is not None and name == "requests.jsonl":
+                        if row["kind"] == "business":
+                            business_start = min(
+                                business_start
+                                if business_start is not None
+                                else row["scheduled_s"],
+                                row["scheduled_s"],
+                            )
+                            business_finish = max(business_finish or 0, row["finished_s"])
+                        elif row["kind"] == "backup":
+                            backup_finish = max(backup_finish or 0, row["finished_s"])
+                    if (
+                        native is not None
+                        and name == "release-events.jsonl"
+                        and (row["resource"], row["event"]) == ("process", "exit_verified")
+                    ):
+                        process_exit_s = max(process_exit_s or 0, row["at_s"])
                     # Only numeric tokens may use the numerical exception. Every
                     # row and string is checked before counting its scan result.
                     if any(scan(token) for token in _strings(row)):
@@ -551,16 +721,38 @@ def validate_files(contents, expected, *, report_format=None):
                     summary["last_line"] = number
             if summary is not None:
                 exceptions.append(summary)
+        if native is not None:
+            native.complete(process_exit_s=process_exit_s)
+            if run["result"] == "pass" and native.failed:
+                raise EvidenceError("native_failure_with_success")
+            if (
+                run["result"] == "pass"
+                and run["arm"] in {"original", "candidate"}
+                and (run["method"] == "legal_storage_v1" or backup_finish is not None)
+            ):
+                if (
+                    business_start is None
+                    or business_finish is None
+                    or backup_finish is None
+                    or process_exit_s is None
+                    or (
+                        max(native.latest, process_exit_s, backup_finish)
+                        > min(business_start + run["load"]["window_seconds"], business_finish)
+                    )
+                ):
+                    raise EvidenceError("native_business_window_uncovered")
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
         # V2/V3 freeze every approved field except measured outcomes. In particular,
         # a newer schema must never fall back to the smaller historical identity.
         identity_fields = (
-            set(V2_FIELDS) - {"result", "metrics"} if run["format"] in {2, 3} else IDENTITY_FIELDS
+            set(V2_FIELDS) - {"result", "metrics"}
+            if run["format"] in {2, 3, 4}
+            else IDENTITY_FIELDS
         )
         if any(run[key] != expected[key] for key in identity_fields):
             raise EvidenceError("run_identity_mismatch")
-        if run["format"] in {2, 3} and any(
+        if run["format"] in {2, 3, 4} and any(
             run["metrics"][key] != expected["metrics"][key] for key in ("logical", "ledger_rows")
         ):
             # Physical byte layouts/results are observations; the approved
@@ -645,7 +837,7 @@ def seal(source, target, recipient, expected):
     exceptions = validate_files(contents, expected)
     public_fingerprint = fingerprint(recipient)
     manifest = {
-        "format": 2 if expected["format"] == 3 else 1,
+        "format": 2 if expected["format"] in {3, 4} else 1,
         "tool": "pyrage",
         "version": version("pyrage"),
         "recipient_sha256": public_fingerprint,
@@ -732,7 +924,7 @@ def _archive(plain, ident, expected):
     if (
         type(manifest["format"]) is not int
         or manifest["format"] not in {1, 2}
-        or (manifest["format"] == 2 and expected["format"] != 3)
+        or (manifest["format"] == 2 and expected["format"] not in {3, 4})
         or manifest["tool"] != "pyrage"
         or manifest["version"] != "1.4.0"
         or manifest["private_scan"] != "not_run_in_ci"

@@ -23,7 +23,7 @@ except ImportError:
 def main(arguments=None):
     args = sys.argv[1:] if arguments is None else arguments
     try:
-        if len(args) != 3:
+        if len(args) not in {3, 4}:
             raise ValueError()
         root = evidence._safe_path(Path(args[0]).absolute())
         marker = evidence._safe_path(root / "measurement-fixture.json")
@@ -36,6 +36,9 @@ def main(arguments=None):
         if not home.is_dir():
             raise ValueError()
         operation, origin = args[1], float(args[2])
+        format_version = int(args[3]) if len(args) == 4 else 1
+        if format_version not in {1, 2, 3, 4}:
+            raise ValueError()
         evidence._pattern(operation, r"[a-f0-9]{32}")
         if not math.isfinite(origin) or origin < 0:
             raise ValueError()
@@ -47,7 +50,7 @@ def main(arguments=None):
         return 2
     from clytie.backup import worker
 
-    recorder = Recorder()
+    recorder = Recorder(format_version=format_version)
     observer = Observation(root, recorder, origin=origin)
     # A fixed disjoint namespace keeps child rows distinguishable after exact
     # byte concatenation; it is not a process identifier or filesystem path.
