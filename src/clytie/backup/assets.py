@@ -9,6 +9,8 @@ from pathlib import Path
 from clytie.assets import validate_registry
 from clytie.plugin_host.snapshots import atomic_read, canonical, contained
 
+from .io_client import heavy_io, io_read, io_write
+
 REGISTRY = "shared/assets/registry.json"
 
 
@@ -119,6 +121,7 @@ def boundary(store, cid):
     return snapshot, resolved
 
 
+@heavy_io
 def capture(store, cid, fixed, ids, root, *, declarations=(), check=None):
     files, assets, missing = [], [], []
     declared = {}
@@ -136,7 +139,7 @@ def capture(store, cid, fixed, ids, root, *, declarations=(), check=None):
                 raise ValueError("asset_metadata_mismatch")
             target = contained(root, Path(root) / row.path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            store.copy_resolved(resolved, target, check=check)
+            store.copy_resolved(resolved, target, check=check, reader=io_read, writer=io_write)
             files.append(dict(path=row.path, size=row.size, sha256=row.asset_id))
             assets.append(
                 dict(
@@ -270,6 +273,7 @@ def restore_size(envelope):
     return sum(row["size"] for row in envelope["files"]) + sum(extra.values())
 
 
+@heavy_io
 def materialize(root, envelope, *, check=None):
     _, targets = layout(root, envelope)
     for name, asset in targets.items():
@@ -278,17 +282,17 @@ def materialize(root, envelope, *, check=None):
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             with source.open("rb") as incoming, path.open("xb") as outgoing:
-                while chunk := incoming.read(1024 * 1024):
+                while chunk := io_read(incoming, 1024 * 1024):
                     if check:
                         check()
-                    outgoing.write(chunk)
+                    io_write(outgoing, chunk)
                 outgoing.flush()
                 os.fsync(outgoing.fileno())
         if path.stat().st_size != asset["size"]:
             raise ValueError("restore_asset_invalid")
         digest = hashlib.sha256()
         with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
+            while chunk := io_read(stream, 1024 * 1024):
                 if check:
                     check()
                 digest.update(chunk)

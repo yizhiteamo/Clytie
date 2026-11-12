@@ -25,10 +25,10 @@ def _settings(home):
     return yaml.safe_load((home / "clytie.local.yaml").read_bytes()).get("backup", {})
 
 
-def _validate(root, envelope):
+def _validate(root, envelope, *, check=None):
     manifest = envelope["manifest"]
     if manifest["scope"] == "instance" and manifest["completeness"] == "complete":
-        validate_contents(root, envelope)
+        validate_contents(root, envelope, budgeted=True, check=check)
         return
     members = {r["path"]: r for r in envelope["files"]}
     covered = set()
@@ -73,7 +73,7 @@ def _verify(home, package, key, work, *, expected=None, check=None):
     envelope = unpack(package, work, key, check=check)
     if expected is not None and canonical(envelope) != canonical(expected):
         raise BackupError("backup_evidence_mismatch")
-    _validate(work, envelope)
+    _validate(work, envelope, check=check)
     return envelope
 
 

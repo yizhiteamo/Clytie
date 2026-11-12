@@ -11,6 +11,8 @@ PUBLIC_REASONS = frozenset(
     {
         "backup_evidence_mismatch",
         "backup_identity_conflict",
+        "backup_io_busy",
+        "backup_io_executor_lost",
         "backup_not_published",
         "backup_referenced",
         "baseline_absent",

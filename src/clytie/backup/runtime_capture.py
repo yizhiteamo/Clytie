@@ -13,6 +13,7 @@ from clytie.plugin_host.snapshots import contained, identifier
 
 from .capture import capture_group
 from .coordination import CaptureError, companion_coordinator
+from .io_client import heavy_io, io_read
 
 
 def _unavailable(cid, epoch, reason):
@@ -25,12 +26,13 @@ def _unavailable(cid, epoch, reason):
     }
 
 
+@heavy_io
 def _describe(paths, check):
     members = {}
     for name, path in paths.items():
         digest = hashlib.sha256()
         with path.open("rb") as stream:
-            while chunk := stream.read(1024 * 1024):
+            while chunk := io_read(stream, 1024 * 1024):
                 if check:
                     check()
                 digest.update(chunk)

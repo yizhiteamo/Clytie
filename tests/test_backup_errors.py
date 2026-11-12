@@ -4,6 +4,7 @@ import pytest
 
 from clytie.backup.coordination import CaptureError
 from clytie.backup.errors import BackupError
+from clytie.backup.io_budget import IoBudgetError
 from clytie.backup.journal import BackupJournal
 from clytie.backup.restore import RestoreError
 from clytie.backup.source import SourceError
@@ -17,6 +18,9 @@ from clytie.sdk.testing import MockClock
         (SourceError("snapshot_unsupported"), "snapshot_unsupported"),
         (BackupError("space_insufficient"), "space_insufficient"),
         (RestoreError("restore_incompatible"), "restore_incompatible"),
+        (IoBudgetError("backup_io_busy"), "backup_io_busy"),
+        (IoBudgetError("backup_io_executor_lost"), "backup_io_executor_lost"),
+        (IoBudgetError("fictional sensitive detail"), "worker_failed"),
         (OSError("fictional sensitive detail"), "worker_failed"),
         (RestoreError("fictional sensitive detail"), "worker_failed"),
     ],
@@ -25,6 +29,7 @@ def test_worker_result_keeps_fixed_reason_not_exception_text(
     tmp_path, monkeypatch, error, expected
 ):
     from clytie.backup import worker
+    from clytie.backup.io_channel import IoChannel
 
     clock = MockClock()
     key = "a" * 32
@@ -36,7 +41,7 @@ def test_worker_result_keeps_fixed_reason_not_exception_text(
         started.set()
 
         def __init__(self, *args, **kwargs):
-            pass
+            self.io_channel = IoChannel(lambda _: pytest.fail("dispatch failed before I/O"))
 
         def check(self):
             pass

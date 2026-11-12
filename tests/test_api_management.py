@@ -6,6 +6,7 @@ import pytest
 
 from clytie.api.auth import APIError
 from clytie.api.management import Management
+from clytie.backup.io_control import IoControl
 from clytie.sdk.testing import MockClock
 from clytie.supervisor.common import read, write
 
@@ -15,6 +16,7 @@ def management(tmp_path):
     svc = SimpleNamespace(
         home=tmp_path,
         clock=clock,
+        backup_io=IoControl(clock),
         companions=["companion_a", "companion_b"],
         rows={c: {"state": "stopped", "inflight_tasks": 2} for c in ("companion_a", "companion_b")},
         setting=lambda group, key, default: default,

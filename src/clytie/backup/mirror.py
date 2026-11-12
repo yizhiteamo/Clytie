@@ -14,6 +14,7 @@ from uuid import uuid4
 from clytie.plugin_host.locking import file_lock
 from clytie.plugin_host.snapshots import atomic_write, canonical, contained
 
+from .io_client import heavy_io, io_read, io_write
 from .retention import BackupRecord, plan_mirror_retention
 
 
@@ -172,15 +173,35 @@ def latest_per_group(records):
     return [latest[key] for key in sorted(latest)]
 
 
-def _digest(path, check=None):
+def _digest(path, check=None, *, reader=None):
     digest, size = hashlib.sha256(), 0
+    read = reader or (lambda source, size: source.read(size))
     with Path(path).open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
+        while chunk := read(stream, 1024 * 1024):
             if check:
                 check()
             size += len(chunk)
             digest.update(chunk)
     return size, digest.hexdigest()
+
+
+@heavy_io
+def _budget_digest(path, check=None):
+    return _digest(path, check, reader=io_read)
+
+
+@heavy_io
+def _copy_pending(source, temporary, *, check, validate, reserve_bytes):
+    with source.open("rb") as incoming, temporary.open("xb") as outgoing:
+        while chunk := io_read(incoming, 1024 * 1024):
+            if check:
+                check()
+            validate()
+            if shutil.disk_usage(temporary.parent).free < len(chunk) + reserve_bytes:
+                raise MirrorError("space_insufficient")
+            io_write(outgoing, chunk)
+        outgoing.flush()
+        os.fsync(outgoing.fileno())
 
 
 def _file_id(path):
@@ -407,7 +428,7 @@ class MirrorManager:
                     raise MirrorError("mirror_operation_conflict")
                 self._validate(repository)
                 if prior["state"] == "committed":
-                    if _file_id(final) != prior.get("file_id") or _digest(final, check) != (
+                    if _file_id(final) != prior.get("file_id") or _budget_digest(final, check) != (
                         record.size,
                         sha256,
                     ):
@@ -422,7 +443,7 @@ class MirrorManager:
             self._save(state)
             try:
                 self._validate(repository)
-                if not verify(source) or _digest(source, check) != (record.size, sha256):
+                if not verify(source) or _budget_digest(source, check) != (record.size, sha256):
                     raise MirrorError("mirror_source_invalid")
                 if shutil.disk_usage(root).free < record.size + self.reserve_bytes:
                     raise MirrorError("space_insufficient")
@@ -431,7 +452,7 @@ class MirrorManager:
                     if (
                         prior
                         and _file_id(final) == prior["file_id"]
-                        and _digest(final, check) == (record.size, sha256)
+                        and _budget_digest(final, check) == (record.size, sha256)
                     ):
                         operation["file_id"] = prior["file_id"]
                         self._receipt(state, operation)
@@ -442,17 +463,14 @@ class MirrorManager:
                             "repo_id": repository["repo_id"],
                         }
                     raise MirrorError("mirror_target_exists")
-                with source.open("rb") as incoming, temporary.open("xb") as outgoing:
-                    while chunk := incoming.read(1024 * 1024):
-                        if check:
-                            check()
-                        self._validate(repository)
-                        if shutil.disk_usage(root).free < len(chunk) + self.reserve_bytes:
-                            raise MirrorError("space_insufficient")
-                        outgoing.write(chunk)
-                    outgoing.flush()
-                    os.fsync(outgoing.fileno())
-                if _digest(temporary, check) != (record.size, sha256):
+                _copy_pending(
+                    source,
+                    temporary,
+                    check=check,
+                    validate=lambda: self._validate(repository),
+                    reserve_bytes=self.reserve_bytes,
+                )
+                if _budget_digest(temporary, check) != (record.size, sha256):
                     raise MirrorError("mirror_verification_failed")
                 self._validate(repository)
                 operation["state"] = "publishing"

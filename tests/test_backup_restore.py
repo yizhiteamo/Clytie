@@ -187,7 +187,10 @@ def test_cancelled_restore_is_incomplete_and_not_replayed(tmp_path, monkeypatch)
     plan = manager.plan(package, key, target, work)
 
     def cancel():
-        raise RuntimeError("cancelled")
+        # Exercise cancellation after target initialization, independently of
+        # additional pre-copy hashing checkpoints.
+        if (target / restore.MARKER).exists():
+            raise RuntimeError("cancelled")
 
     with pytest.raises(RuntimeError):
         manager.apply(plan["id"], check=cancel)
@@ -298,6 +301,10 @@ from clytie.backup import restore
 from clytie.sdk.testing import MockClock
 manager = restore.RestoreManager(Path(sys.argv[1]), MockClock(), reserve_bytes=0)
 def pause(*args, **kwargs):
+    if sys.argv[3] == "copying":
+        target = Path(manager._load(sys.argv[2])["target"])
+        if not (target / restore.MARKER).exists():
+            return
     print("checkpoint", flush=True)
     threading.Event().wait()
 if sys.argv[3] == "verifying":

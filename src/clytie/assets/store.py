@@ -205,7 +205,7 @@ class AssetStore:
     def read_resolved(self, resolved):
         return b"".join(self.iter_resolved(resolved))
 
-    def iter_resolved(self, resolved, *, check=None):
+    def iter_resolved(self, resolved, *, check=None, reader=None):
         """固定授权、路径及身份；捕获后无需查最新登记，也不按哈希找替代文件。"""
         row = resolved.registration
         if resolved.companion_id not in (row.companion_id, *row.shared_with):
@@ -221,7 +221,8 @@ class AssetStore:
                 if _identity(os.fstat(stream.fileno())) != resolved.identity:
                     raise AssetError("asset_identity_changed")
                 digest, size = hashlib.sha256(), 0
-                while chunk := stream.read(1024 * 1024):
+                read = reader or (lambda source, size: source.read(size))
+                while chunk := read(stream, 1024 * 1024):
                     if check is not None:
                         check()
                     digest.update(chunk)
@@ -240,11 +241,12 @@ class AssetStore:
         for _ in self.iter_resolved(resolved):
             pass
 
-    def copy_resolved(self, resolved, target, *, check=None):
+    def copy_resolved(self, resolved, target, *, check=None, reader=None, writer=None):
         """流式写独占目标；调用方在失败时保留/登记未完成文件，不把它当成功成员。"""
         with Path(target).open("xb") as stream:
-            for chunk in self.iter_resolved(resolved, check=check):
-                stream.write(chunk)
+            write = writer or (lambda destination, data: destination.write(data))
+            for chunk in self.iter_resolved(resolved, check=check, reader=reader):
+                write(stream, chunk)
             stream.flush()
             os.fsync(stream.fileno())
 

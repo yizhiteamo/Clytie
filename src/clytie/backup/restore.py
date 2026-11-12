@@ -24,6 +24,7 @@ from clytie.sdk.types import MemoryRecord
 
 from .container import _name, _safe, owned_marker, unpack
 from .credentials import validate_restored
+from .io_client import heavy_io, io_read, io_scope
 from .previews import PreviewCatalog, PreviewError
 
 MARKER = "supervisor/restore.json"
@@ -39,6 +40,17 @@ def digest(path):
     result = hashlib.sha256()
     with Path(path).open("rb") as stream:
         while block := stream.read(1024 * 1024):
+            result.update(block)
+    return result.hexdigest()
+
+
+@heavy_io
+def budget_digest(path, check=None):
+    result = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        while block := io_read(stream, 1024 * 1024):
+            if check:
+                check()
             result.update(block)
     return result.hexdigest()
 
@@ -507,7 +519,7 @@ def _companion(root, entry, assets):
             ledger.close()
 
 
-def validate_contents(root, envelope, *, repo_root=None):
+def validate_contents(root, envelope, *, repo_root=None, budgeted=False, check=None):
     """Read-only component/version/reference checks after container authentication."""
     try:
         manifest = envelope["manifest"]
@@ -530,7 +542,8 @@ def validate_contents(root, envelope, *, repo_root=None):
             ):
                 raise RestoreError("restore_forbidden_member")
             path = _member(root, name)
-            if path.stat().st_size != item["size"] or digest(path) != item["sha256"]:
+            hashed = budget_digest(path, check) if budgeted else digest(path)
+            if path.stat().st_size != item["size"] or hashed != item["sha256"]:
                 raise RestoreError("restore_member_changed")
         covered, membership = set(), {}
         for number, group in enumerate(manifest["consistency_groups"]):
@@ -822,11 +835,13 @@ class RestoreManager:
             or target.is_relative_to(workspace)
         ):
             raise RestoreError("restore_target_invalid")
-        key, before = key_path.read_bytes(), digest(source)
+        key, before = key_path.read_bytes(), budget_digest(source, check)
         envelope = unpack(source, workspace, key, check=self._checkpoint(workspace, check))
         target_identity = self._empty(target, source, envelope)
-        validation = validate_contents(workspace, envelope, repo_root=self.repo_root)
-        if before != digest(source):
+        validation = validate_contents(
+            workspace, envelope, repo_root=self.repo_root, budgeted=True, check=check
+        )
+        if before != budget_digest(source, check):
             raise RestoreError("restore_source_changed")
         from .assets import restore_size
 
@@ -913,7 +928,7 @@ class RestoreManager:
             _safe(key_path)
             key = key_path.read_bytes()
             if (
-                digest(source) != plan["source_sha256"]
+                budget_digest(source, check) != plan["source_sha256"]
                 or hashlib.sha256(key).hexdigest() != plan["key_fingerprint"]
             ):
                 raise RestoreError("restore_source_changed")
@@ -925,13 +940,22 @@ class RestoreManager:
             envelope = unpack(
                 source, target, key, check=check, owned_marker=owned_marker(target, target / MARKER)
             )
-            if envelope != plan["envelope"] or digest(source) != plan["source_sha256"]:
+            if (
+                envelope != plan["envelope"]
+                or budget_digest(source, check) != plan["source_sha256"]
+            ):
                 raise RestoreError("restore_source_changed")
             state["data_state"] = "verifying"
             _write(target, state)
             return self._finish(plan, state)
 
     def _finish(self, plan, state):
+        # Existing publishing/recovery boundary: necessary completion must not
+        # acquire an artificial token, even when invoked by a budgeted worker.
+        with io_scope(None):
+            return self._finish_committed(plan, state)
+
+    def _finish_committed(self, plan, state):
         target = Path(plan["target"])
         try:
             from .assets import materialize

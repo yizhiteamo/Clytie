@@ -27,6 +27,7 @@ from .credentials import credential_exclusions, redact_document
 from .io_client import heavy_io, io_read, io_write
 from .mirror import publish_no_replace
 from .restore import source_registration
+from .view_limits import ViewLimits
 
 
 class SourceError(ValueError):
@@ -226,8 +227,17 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
             raise SourceError("snapshot_unavailable")
         readers = {}
         boundary_raw = None
+        outer_check = check
+        limits = None
+
+        def check():
+            outer_check()
+            if limits is not None:
+                limits.check()
+
         try:
             with companion_coordinator(home, cid, clock).commit():
+                pinned_at = clock.monotonic()
                 _, fixed_assets = boundary(asset_store, cid) if scope == "instance" else (None, {})
                 if scope == "instance":
                     state_path = contained(home, base / "boundary/state.json")
@@ -244,6 +254,7 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                     readers[kind] = db
                     db.execute("BEGIN")
                     db.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+                limits = ViewLimits(sources, clock, pinned_at=pinned_at)
             if boundary_raw is not None:
                 entries.append(_put(staging, f"companions/{cid}/boundary/state.json", boundary_raw))
             for kind, db in readers.items():
@@ -255,7 +266,9 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                     pass
                 destination = sqlite3.connect(target)
                 try:
-                    db.backup(destination, pages=128, progress=lambda *_: check(), sleep=0)
+                    from .sqlite_io import copy_database
+
+                    copy_database(db, destination, pages=128, check=check)
                     if scope == "memory":
                         destination.execute("DELETE FROM recollect_progress")
                         destination.commit()

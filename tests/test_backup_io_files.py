@@ -106,3 +106,133 @@ def test_container_budget_requests_follow_file_chunks_not_crypto_frame_headers(t
         unpack(package, target, bytes(range(32)))
     reads = [call for call in calls if call["action"] == "charge" and call["direction"] == "read"]
     assert len(reads) == (package.stat().st_size + CHUNK - 1) // CHUNK
+
+
+async def test_production_asset_capture_bills_copy_without_throttling_tool_put(tmp_path):
+    import asyncio
+
+    from clytie.assets import AssetStore
+    from clytie.backup.assets import boundary, capture
+    from clytie.sdk.testing import MockClock
+
+    store = AssetStore(tmp_path / "home", MockClock())
+    calls = []
+    data = b"fictional asset" * CHUNK
+    with io_scope(budget_client(calls)):
+        ref = await store.bind("companion_a").put(data, "text/plain", "tool")
+    assert not calls  # Ordinary tool publication never enters the backup budget.
+    _, fixed = boundary(store, "companion_a")
+    with io_scope(budget_client(calls)):
+        files, assets, missing = await asyncio.to_thread(
+            capture, store, "companion_a", fixed, {ref.asset_id}, tmp_path / "copy"
+        )
+    assert not missing
+    assert len(files) == len(assets) == 1
+    assert charges(calls) == {"read": len(data), "write": len(data)}
+    assert (tmp_path / "copy" / files[0]["path"]).read_bytes() == data
+
+
+async def test_offline_databases_use_budgeted_sqlite_batches(tmp_path, monkeypatch):
+    from tests.test_backup_source import fictional
+
+    from clytie.backup import sqlite_io
+    from clytie.backup.source import capture_instance
+
+    home, clock = fictional(tmp_path)
+    original = sqlite_io.copy_database
+    copied = []
+
+    def copy(source, destination, **kwargs):
+        copied.append(source.execute("PRAGMA database_list").fetchone()[2])
+        return original(source, destination, **kwargs)
+
+    monkeypatch.setattr(sqlite_io, "copy_database", copy)
+    calls = []
+    with io_scope(budget_client(calls)):
+        result = await capture_instance(
+            home,
+            clock,
+            tmp_path / "stage",
+            scope="instance",
+            epoch="test_epoch",
+            source_instance_id="fictional_instance",
+        )
+    assert result["manifest"]["completeness"] == "complete", result["missing"]
+    assert len(copied) == 2
+    assert charges(calls)["write"] > 0
+
+
+async def test_plugin_sink_releases_slot_before_waiting_for_next_chunk(tmp_path):
+    from clytie.backup.providers import NamespaceSink
+
+    calls = []
+    sink = NamespaceSink(tmp_path / "plugin")
+
+    async def chunks():
+        yield b"a" * (CHUNK * 2)
+        assert calls[-1]["action"] == "release"
+        yield b"b" * 7
+
+    with io_scope(budget_client(calls)):
+        result = await sink.write("state.bin", chunks())
+    assert result.size == CHUNK * 2 + 7
+    assert charges(calls) == {"write": result.size}
+    assert sum(call["action"] == "acquire" for call in calls) == 2
+
+
+def test_mirror_copy_budget_finishes_before_publication_and_recovery(tmp_path, monkeypatch):
+    from tests.test_backup_mirror import reference, setup, source
+
+    manager, primary, target, _ = setup(tmp_path)
+    record, digest = source(primary)
+    manager.confirm(manager.plan(target, [record])["plan_id"])
+    calls = []
+    receipt = manager._receipt
+
+    def fail_receipt(*args):
+        assert calls[-1]["action"] == "release"
+        raise OSError("fictional_crash")
+
+    monkeypatch.setattr(manager, "_receipt", fail_receipt)
+    with io_scope(budget_client(calls)):
+        result = manager.copy_verified(record, digest, reference=reference, verify=lambda _: True)
+    assert result["status"] == "failed"
+    assert charges(calls) == {"read": record.size * 3, "write": record.size}
+    monkeypatch.setattr(manager, "_receipt", receipt)
+    calls.clear()
+    with io_scope(budget_client(calls)):
+        assert manager.recover_pending()[0]["status"] == "committed"
+    assert not calls  # Necessary recovery cannot wait for an artificial token.
+
+
+def test_restore_verification_handoff_excludes_necessary_completion(tmp_path, monkeypatch):
+    from tests.test_backup_restore import configured_package
+
+    from clytie.backup.io_client import current_client
+
+    manager, package, key, target, workspace = configured_package(
+        tmp_path, monkeypatch, missing_credentials=False
+    )
+    calls = []
+    with io_scope(budget_client(calls)):
+        plan = manager.plan(package, key, target, workspace)
+    assert charges(calls)["read"] > package.stat().st_size
+    finish = manager._finish_committed
+    entered = []
+
+    def verify_handoff(*args):
+        assert current_client() is None
+        assert calls[-1]["action"] == "release"
+        entered.append(len(calls))
+        return finish(*args)
+
+    monkeypatch.setattr(manager, "_finish_committed", verify_handoff)
+    calls.clear()
+    with io_scope(budget_client(calls)):
+        state = manager.apply(plan["id"])
+    assert state["data_state"] == "ready_for_switch"
+    assert entered == [len(calls)]
+    calls.clear()
+    with io_scope(budget_client(calls)):
+        assert manager.recover(plan["id"])["data_state"] == "ready_for_switch"
+    assert not calls

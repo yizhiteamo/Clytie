@@ -9,6 +9,9 @@ from pathlib import Path
 from clytie.plugin_host.snapshots import contained
 from clytie.sdk.backup import BackupEntry, BackupTicket, BackupView
 
+from .io_budget import CHUNK
+from .io_client import current_client, heavy_io, io_checks
+
 _FAILED = object()
 
 
@@ -106,12 +109,22 @@ class NamespaceSink:
                 if not isinstance(chunk, bytes) or len(chunk) > self.max_chunk_bytes:
                     raise ValueError("sink_chunk_invalid")
 
+                @heavy_io
                 def append(data):
-                    self._check()
-                    offset = 0
-                    while offset < len(data):
-                        offset += os.write(descriptor, data[offset:])
-                    digest.update(data)
+                    with io_checks(self._check):
+                        client = current_client()
+                        for start in range(0, len(data), CHUNK):
+                            self._check()
+                            block = data[start : start + CHUNK]
+                            if client is not None:
+                                client.charge("write", len(block))
+                            offset = 0
+                            while offset < len(block):
+                                written = os.write(descriptor, block[offset:])
+                                if written <= 0:
+                                    raise OSError("sink_short_write")
+                                offset += written
+                        digest.update(data)
 
                 # 单次后台写执行者必须收回后再关 descriptor。
                 task = asyncio.create_task(asyncio.to_thread(append, chunk))
@@ -124,6 +137,10 @@ class NamespaceSink:
                             await asyncio.shield(task)
                         except asyncio.CancelledError:
                             continue
+                        except Exception:
+                            break
+                    if task.done() and not task.cancelled():
+                        task.exception()
                     raise
                 self._check()
                 size += len(chunk)
