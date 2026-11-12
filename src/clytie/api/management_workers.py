@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 
+from clytie.backup.io_control import IoControl
 from clytie.plugin_host.snapshots import contained, identifier
 from clytie.plugin_host.support import timed
 from clytie.supervisor.processes import python_process
@@ -21,6 +22,7 @@ class Workers:
         self.stopping = False
         self.cancel_since = None
         self._closing = None
+        self.io_control = IoControl(clock)
 
     @property
     def still_finishing(self):
@@ -176,6 +178,15 @@ class Workers:
                 if not recover_only:
                     journal.phase("failed")
             return {"ok": False, "code": "management_worker_failed"}
+        session = self.io_control.register()
+        self.io_control.authorize(session, journal.value["id"])
+
+        async def send(reply):
+            if process.stdin.is_closing():
+                raise RuntimeError("management_control_disconnected")
+            process.stdin.write(json.dumps(reply).encode("utf-8") + b"\n")
+            await process.stdin.drain()
+
         try:
             process.stdin.write(json.dumps(args, ensure_ascii=False).encode("utf-8") + b"\n")
             await process.stdin.drain()
@@ -191,17 +202,31 @@ class Workers:
 
         control(cancel)
         try:
+            response, result_count = None, 0
             try:
-                line = await process.stdout.readline()
+                while line := await process.stdout.readline():
+                    try:
+                        frame = json.loads(line)
+                    except (ValueError, TypeError):
+                        result_count += 1
+                        continue
+                    if isinstance(frame, dict) and frame.get("type") == "backup_io":
+                        self.io_control.dispatch(session, frame, send)
+                    else:
+                        result_count += 1
+                        response = frame if isinstance(frame, dict) else None
             except ValueError:
                 # A large result must not orphan a still-running writer or leave it
                 # blocked on a full pipe. Discard transport bytes without logging them,
                 # then retain the durable result rather than replaying the operation.
+                self.io_control.disconnect(session)
+                process.stdin.close()
                 while await process.stdout.read(64 * 1024):
                     pass
-                line = None
+                response = None
+            self.io_control.disconnect(session)
             await process.wait()
-            if not line:
+            if response is None or result_count != 1:
                 # Do not open SQLite or retry recovery in the daemon. A future admission
                 # starts an isolated verification worker, never the original operation.
                 recovered = Journal.load(journal.path, self.clock)
@@ -213,9 +238,17 @@ class Workers:
                     "code": "management_result_unconfirmed",
                     "result": recovered.public(),
                 }
-            return json.loads(line)
+            return response
         finally:
+            # EOF, cancellation of this waiter and transport loss are not executor
+            # exit. Keep the slot and accepted task until the actual child settles.
+            from .management_io import settle
+
+            self.io_control.disconnect(session)
             process.stdin.close()
+            await settle(asyncio.create_task(process.wait()))
+            await self.io_control.ended(session, confirmed=True)
+            self.io_control.finish_operation(journal.value["id"])
 
     def escalate(self):
         if not self.stopping:

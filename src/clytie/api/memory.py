@@ -64,7 +64,7 @@ class MemoryAPI:
         from clytie.api.management_io import file_call
 
         if self.hosted is None:
-            return function(*args, **kwargs)
+            return await file_call(None, function, *args, **kwargs)
         with self.open(companion_id) as store:
             return await file_call(store, function, *args, **kwargs)
 

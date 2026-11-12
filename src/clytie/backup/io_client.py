@@ -44,6 +44,11 @@ def current_client():
     return _client.get()
 
 
+def current_checks():
+    """文件执行者只转交明确的可信检查，不复制调用方的任意上下文。"""
+    return _checks.get()
+
+
 class IoClient:
     def __init__(self, request):
         # request 与原操作/真实执行者绑定；不能携带客户端选择的其他执行者。

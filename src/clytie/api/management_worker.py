@@ -4,9 +4,11 @@ import asyncio
 import json
 import sys
 import threading
-from contextlib import nullcontext, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stdout
 from pathlib import Path
 
+from clytie.backup.io_channel import IoChannel
+from clytie.backup.io_client import io_checks, io_scope
 from clytie.clock import SystemClock
 from clytie.memory.transfer import runtime_lock
 from clytie.plugin_host.locking import process_identity
@@ -26,6 +28,7 @@ async def execute(
     operation=memory_operation,
     controls=None,
     hosted=None,
+    io_channel=None,
 ):
     clock = clock or SystemClock()
     if hosted is not None:
@@ -57,12 +60,29 @@ async def execute(
 
                 def control():
                     # EOF is a cancellation request, never a kill deadline or commit signal.
-                    for line in controls:
-                        if line.strip() == b"cancel":
-                            journal.cancel()
-                    journal.cancel()
+                    try:
+                        for line in controls:
+                            if line.strip() == b"cancel":
+                                journal.cancel()
+                            elif io_channel is not None:
+                                try:
+                                    io_channel.receive(json.loads(line))
+                                except (ValueError, TypeError):
+                                    continue
+                    finally:
+                        journal.cancel()
+                        if io_channel is not None:
+                            io_channel.disconnect()
 
                 threading.Thread(target=control, daemon=True).start()
+            client = (
+                io_channel.client(operation_id, check=journal.checkpoint)
+                if io_channel is not None
+                else None
+            )
+            scope = ExitStack()
+            scope.enter_context(io_scope(client))
+            scope.enter_context(io_checks(journal.checkpoint))
             try:
                 journal.checkpoint()
                 if hosted is not None:
@@ -89,6 +109,7 @@ async def execute(
                     "operation_id": operation_id,
                 }
             finally:
+                scope.__exit__(None, None, None)
                 if hosted is not None:
                     hosted.management_journals.pop(operation_id, None)
                 current.reset(token)
@@ -151,6 +172,11 @@ async def _execute_hosted(home, cid, operation_id, args, clock, operation, hoste
             journal = work["journal"]
             binding = current.set(journal)
             hosted.management_journals[operation_id] = journal
+            factory = getattr(hosted, "backup_io_client", None)
+            client = factory(operation_id, check=journal.checkpoint) if factory else None
+            scope = ExitStack()
+            scope.enter_context(io_scope(client))
+            scope.enter_context(io_checks(journal.checkpoint))
             try:
                 result = await operation(home, clock, cid, selected, args, hosted)
                 await management_command(store, journal.committed, result)
@@ -170,6 +196,7 @@ async def _execute_hosted(home, cid, operation_id, args, clock, operation, hoste
                 complete = result["code"] != "recovery_blocked"
                 return result
             finally:
+                scope.__exit__(None, None, None)
                 hosted.management_journals.pop(operation_id, None)
                 current.reset(binding)
         finally:
@@ -182,10 +209,19 @@ async def _execute_hosted(home, cid, operation_id, args, clock, operation, hoste
 def main():
     home, cid, operation_id = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
     stream = sys.stdin.buffer.raw
+    protocol = sys.stdout.buffer
+    output_lock = threading.Lock()
+
+    def emit(value):
+        with output_lock:
+            protocol.write(json.dumps(value, ensure_ascii=False).encode("utf-8") + b"\n")
+            protocol.flush()
+
+    channel = IoChannel(emit)
     try:
         args = json.loads(stream.readline())
-        # The private response pipe must contain exactly one protocol frame. Plugin
-        # diagnostic output is not a result and must never corrupt that frame.
+        # The response pipe has internal I/O frames and exactly one final result.
+        # Arbitrary plugin stdout remains diagnostic output, never protocol data.
         with redirect_stdout(sys.stderr):
             if len(sys.argv) > 4 and sys.argv[4] == "recover":
                 from .management_journal import recover_pending
@@ -193,11 +229,12 @@ def main():
                 recover_pending(home, cid, SystemClock())
                 result = {"ok": True, "result": {"verified": True}}
             else:
-                result = asyncio.run(execute(home, cid, operation_id, args, controls=stream))
+                result = asyncio.run(
+                    execute(home, cid, operation_id, args, controls=stream, io_channel=channel)
+                )
     except Exception:
         result = {"ok": False, "code": "management_worker_failed", "operation_id": operation_id}
-    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
+    emit(result)
 
 
 if __name__ == "__main__":

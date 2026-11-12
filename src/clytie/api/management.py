@@ -780,6 +780,7 @@ class Management:
                         # send must not leave the still-live daemon recorded as writer.
                         journal.value["executor"] = identity
                         journal.save()
+                        self.svc.authorize_backup_capture(cid, journal.value["id"])
 
                     def cancel():
                         child = self.svc.children.get(cid)
@@ -795,13 +796,18 @@ class Management:
 
                     control(cancel)
                     try:
-                        return await self.svc.request(
+                        result = await self.svc.request(
                             cid,
                             "managed_memory/" + op,
                             {"operation_id": journal.value["id"], "arguments": arguments},
                             timeout=None,
                             before_send=dispatch,
                         )
+                        # The owning process replies only after its managed executor
+                        # and file commands settle. An uncertain transport failure
+                        # cannot retire an operation that may still own native I/O.
+                        self.svc.backup_io.finish_operation(journal.value["id"])
+                        return result
                     except RequestNotDelivered:
                         journal.phase("failed")
                         raise

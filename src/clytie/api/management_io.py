@@ -3,10 +3,12 @@
 import asyncio
 import threading
 from concurrent.futures import Future
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from queue import Queue
 from uuid import uuid4
 
+from clytie.backup.io_client import current_checks, current_client, io_checks, io_scope
+from clytie.clock import SystemClock
 from clytie.storage.owner import _snapshot
 
 from .management_journal import current
@@ -34,13 +36,17 @@ class FileCommands:
 
     def _run(self):
         while True:
-            function, journal, future = self._requests.get()
+            function, journal, client, checks, future = self._requests.get()
             if function is None:
                 future.set_result(None)
                 return
             binding = current.set(journal)
             try:
-                result = _snapshot(function())
+                with ExitStack() as scope:
+                    scope.enter_context(io_scope(client))
+                    for check in checks:
+                        scope.enter_context(io_checks(check))
+                    result = _snapshot(function())
             except BaseException as exc:
                 future.set_exception(exc)
             else:
@@ -53,7 +59,15 @@ class FileCommands:
             raise RuntimeError("management_file_command_busy")
         self._active = True
         result = Future()
-        self._requests.put_nowait((lambda: function(*args, **kwargs), current.get(), result))
+        self._requests.put_nowait(
+            (
+                lambda: function(*args, **kwargs),
+                current.get(),
+                current_client(),
+                current_checks(),
+                result,
+            )
+        )
         future = asyncio.wrap_future(result)
         try:
             return await asyncio.shield(future)
@@ -74,7 +88,7 @@ class FileCommands:
             raise RuntimeError("management_file_command_active")
         self._closed = True
         result = Future()
-        self._requests.put_nowait((None, None, result))
+        self._requests.put_nowait((None, None, None, (), result))
         await settle(asyncio.wrap_future(result))
         while self.thread.is_alive():
             await self.clock.sleep(0)
@@ -87,12 +101,12 @@ class FileCommands:
 
 
 async def file_call(store, function, *args, **kwargs):
-    """仅在线句柄把独立文件阶段交给专用执行者，离线进程原地运行。"""
+    """仅文件阶段转交线程；活动及离线业务数据库仍属于原执行者。"""
     from clytie.storage.handle import StoreHandle
 
-    if not isinstance(store, StoreHandle):
+    if not isinstance(store, StoreHandle) and current_client() is None:
         return function(*args, **kwargs)
-    async with FileCommands(store.clock) as worker:
+    async with FileCommands(store.clock if store is not None else SystemClock()) as worker:
         return await worker.run(function, *args, **kwargs)
 
 
