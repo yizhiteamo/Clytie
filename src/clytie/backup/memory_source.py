@@ -129,7 +129,9 @@ class BackupMemorySource:
             db.commit()
             db.execute("PRAGMA trusted_schema=OFF")
             db.execute("PRAGMA query_only=ON")
-            _validate_database(db, 3)
+            # This scope owns handler removal and actual connection close. The
+            # package reader's default error-close would hide the original error.
+            _validate_database(db, 3, close_on_error=False)
             db.row_factory = sqlite3.Row
             native = {
                 "version": 3,

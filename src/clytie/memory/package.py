@@ -126,7 +126,7 @@ def open_database(data, home, companion_id, version=3):
     return result
 
 
-def _validate_database(connection, version):
+def _validate_database(connection, version, *, close_on_error=True):
     tables = export_tables(version)
     try:
         connection.execute("PRAGMA trusted_schema=OFF")
@@ -211,7 +211,8 @@ def _validate_database(connection, version):
                 raise PackageError("会话登记存在未引用条目")
         return connection
     except BaseException:
-        connection.close()
+        if close_on_error:
+            connection.close()
         raise
 
 

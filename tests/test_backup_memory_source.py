@@ -12,6 +12,23 @@ from .test_memory_transfer import homes as homes
 from .test_memory_transfer import remember, revise
 
 
+def test_backup_projection_invalid_revision_preserves_package_error(homes, tmp_path):
+    from clytie.memory.package import PackageError
+
+    original, _, _ = homes("original")
+    record = remember(original, explicit=True)
+    with original.transaction():
+        original.db.execute(
+            "UPDATE revisions SET hash=? WHERE record_id=?", ("f" * 64, record.record_id)
+        )
+    target, target_home, _ = homes("target")
+    source, binding = backup(original, target_home, tmp_path)
+    adapter = BackupMemorySource(target_home, target.clock, "companion_a", binding)
+    with pytest.raises(PackageError, match="修订链"):
+        with adapter.open(source):
+            pytest.fail("invalid revision accepted")
+
+
 def backup(store, home, tmp_path, *, scope="memory", complete=True, assets=None, extra_file=False):
     stage = tmp_path / "stage"
     stage.mkdir()
