@@ -5,22 +5,19 @@ import threading
 
 import pytest
 
+from clytie.clock import SystemClock
+from clytie.plugin_host.support import timed
 from clytie.sdk.testing import MockClock
 from clytie.storage.owner import StorageFailed, StorageOwner
 
 
-async def signalled(event, clock):
-    for _ in range(10_000):
-        if event.is_set():
-            return
-        await clock.sleep(0)
-    raise AssertionError("owner synchronization signal missing")
-
-
 @pytest.mark.parametrize("cancel_start", [False, True])
 async def test_start_failure_or_cancel_waits_for_closed_delivery_and_real_exit(cancel_start):
-    factory_entered, factory_release = threading.Event(), threading.Event()
-    delivering_closed, release_delivery = threading.Event(), threading.Event()
+    # Explicit cross-thread signals: loop-turn counts are not elapsed time.
+    # The existing ten-second thread gate remains the test deadlock guard.
+    loop = asyncio.get_running_loop()
+    factory_entered, delivering_closed = asyncio.Event(), asyncio.Event()
+    factory_release, release_delivery = threading.Event(), threading.Event()
     owners, lifecycle = [], []
     clock = MockClock()
 
@@ -31,7 +28,7 @@ async def test_start_failure_or_cancel_waits_for_closed_delivery_and_real_exit(c
 
         def _deliver(self, future, *args, **kwargs):
             if future is self._closed:
-                delivering_closed.set()
+                loop.call_soon_threadsafe(delivering_closed.set)
                 assert release_delivery.wait(10)
             return super()._deliver(future, *args, **kwargs)
 
@@ -40,7 +37,7 @@ async def test_start_failure_or_cancel_waits_for_closed_delivery_and_real_exit(c
             lifecycle.append(("closed", threading.get_ident()))
 
     def factory():
-        factory_entered.set()
+        loop.call_soon_threadsafe(factory_entered.set)
         assert factory_release.wait(10)
         if not cancel_start:
             raise ValueError("fictional initialization failure")
@@ -48,11 +45,11 @@ async def test_start_failure_or_cancel_waits_for_closed_delivery_and_real_exit(c
 
     task = asyncio.create_task(Observed.start(factory, companion_id="companion_a", clock=clock))
     try:
-        await signalled(factory_entered, clock)
+        await timed(factory_entered.wait(), SystemClock(), 10)
         if cancel_start:
             task.cancel()
         factory_release.set()
-        await signalled(delivering_closed, clock)
+        await timed(delivering_closed.wait(), SystemClock(), 10)
         for _ in range(20):
             await clock.sleep(0)
         assert not task.done(), "startup returned while owner still delivers into loop"
