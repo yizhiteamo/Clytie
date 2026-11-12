@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import sys
 import threading
@@ -53,6 +54,10 @@ class Controls:
             threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream):
+        # FileIO.readline reads a pipe one byte at a time. Keep one buffered
+        # reader for this control channel without delaying newline delivery.
+        if isinstance(stream, io.RawIOBase):
+            stream = io.BufferedReader(stream)
         try:
             for line in stream:
                 command = line.strip()
