@@ -15,6 +15,7 @@ from clytie.plugin_host.snapshots import contained
 from clytie.plugin_host.support import timed
 from clytie.supervisor.processes import python_process
 
+from .io_control import IoControl
 from .journal import TERMINAL, BackupJournal
 
 
@@ -66,6 +67,8 @@ class BackupWorkers:
         from .controller import CaptureBridge
 
         self.capture_handler = capture_handler or CaptureBridge()
+        supervisor = getattr(self.capture_handler, "supervisor", None)
+        self.io_control = supervisor.backup_io if supervisor is not None else IoControl(clock)
 
     @property
     def still_finishing(self):
@@ -198,6 +201,31 @@ class BackupWorkers:
 
     async def _run(self, journal, started, *, recover_only):
         key, process = journal.value["id"], None
+        session, exit_confirmed = None, False
+        bridges = set()
+
+        async def send(reply):
+            encoded = json.dumps(reply).encode() + b"\n"
+            if len(encoded) > 64 * 1024:
+                raise ValueError("capture_response_too_large")
+            if process.stdin.is_closing():
+                raise RuntimeError("backup_control_disconnected")
+            process.stdin.write(encoded)
+            await process.stdin.drain()
+
+        async def bridge(response):
+            reply = dict(type="bridge_reply", id=response.get("id"))
+            try:
+                if self.capture_handler is None:
+                    raise ValueError("capture_bridge_unavailable")
+                reply["result"] = await self.capture_handler(journal, response)
+            except Exception:
+                reply["error"] = "snapshot_unavailable"
+            try:
+                await send(reply)
+            except (OSError, RuntimeError):
+                self.io_control.disconnect(session)
+
         try:
             executable, env = python_process()
             env.pop("CLYTIE_HOME", None)
@@ -221,6 +249,8 @@ class BackupWorkers:
                 **kwargs,
             )
             self.processes[key] = process
+            session = self.io_control.register()
+            self.io_control.authorize(session, key)
 
             def control():
                 if process.returncode is None and not process.stdin.is_closing():
@@ -252,21 +282,27 @@ class BackupWorkers:
                     if fresh.value.get("delivery") == "received" and not started.done():
                         started.set_result(True)
                 elif response.get("type") == "bridge":
-                    reply = dict(type="bridge_reply", id=response.get("id"))
-                    try:
-                        if self.capture_handler is None:
-                            raise ValueError("capture_bridge_unavailable")
-                        reply["result"] = await self.capture_handler(journal, response)
-                    except Exception:
-                        reply["error"] = "snapshot_unavailable"
-                    encoded = json.dumps(reply).encode() + b"\n"
-                    if len(encoded) > 64 * 1024:
-                        raise ValueError("capture_response_too_large")
-                    if not process.stdin.is_closing():
-                        process.stdin.write(encoded)
-                        await process.stdin.drain()
+                    if len(bridges) >= 8:
+                        await send(
+                            dict(
+                                type="bridge_reply",
+                                id=response.get("id"),
+                                error="snapshot_unavailable",
+                            )
+                        )
+                        continue
+                    task = asyncio.create_task(bridge(response))
+                    bridges.add(task)
+                    task.add_done_callback(bridges.discard)
+                    task.add_done_callback(
+                        lambda done: done.exception() if not done.cancelled() else None
+                    )
+                elif response.get("type") == "backup_io":
+                    self.io_control.dispatch(session, response, send)
                 # Result transport is only a notification. Durable journal is authority.
+            self.io_control.disconnect(session)
             await process.wait()
+            exit_confirmed = True
         except (OSError, ValueError, RuntimeError):
             if process is None:
                 try:
@@ -279,8 +315,20 @@ class BackupWorkers:
                 # Keep tracking an executor even when its output channel failed.
                 if not process.stdin.is_closing():
                     process.stdin.close()
+                self.io_control.disconnect(session)
                 await process.wait()
+                exit_confirmed = True
         finally:
+            if session is not None:
+                self.io_control.disconnect(session)
+                if exit_confirmed or (process is not None and process.returncode is not None):
+                    await self.io_control.ended(session, confirmed=True)
+            # Captures retain their own views until their actual completion, even
+            # after the worker's pipe closes. Never pretend that cancelling this
+            # receiver has released a companion's snapshot thread.
+            await asyncio.gather(*tuple(bridges), return_exceptions=True)
+            if exit_confirmed or (process is not None and process.returncode is not None):
+                self.io_control.finish_operation(key)
             if process is not None and process.stdin is not None:
                 process.stdin.close()
                 try:

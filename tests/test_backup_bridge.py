@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from tests.test_backup_online_source import online  # noqa: F401
 
+from clytie.backup.io_control import IoControl
 from clytie.backup.worker import Controls
 
 
@@ -92,7 +93,7 @@ async def test_real_worker_bridge_captures_and_seals_live_audit(tmp_path):
     clock = SystemClock()
     audit = Audit(home, clock)
     audit.append("test_event")
-    supervisor = SimpleNamespace(children={}, rows={}, audit=audit)
+    supervisor = SimpleNamespace(children={}, rows={}, audit=audit, backup_io=IoControl(clock))
     workers = BackupWorkers(home, clock, capture_handler=CaptureBridge(supervisor))
     await workers.execute("create", {"scope": "instance"}, "d" * 32)
     result = await completed(workers, "d" * 32)
@@ -123,6 +124,7 @@ async def test_bridge_online_failure_cannot_select_offline(tmp_path):
         rows={"companion_a": {"state": "running"}},
         audit=Audit(home, clock),
         request=request,
+        backup_io=IoControl(clock),
     )
     workers = BackupWorkers(home, clock, capture_handler=CaptureBridge(supervisor))
     await workers.execute("create", {"scope": "instance"}, "e" * 32)
@@ -230,6 +232,7 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
         rows={owner.cid: {"state": "running"}},
         audit=Audit(owner.home, owner.clock),
         request=request,
+        backup_io=IoControl(owner.clock),
     )
     workers = BackupWorkers(owner.home, owner.clock, capture_handler=CaptureBridge(supervisor))
     store = owner.host.memory_resources[owner.cid][0]

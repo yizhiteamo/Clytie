@@ -15,6 +15,8 @@ from clytie.clock import SystemClock
 from clytie.plugin_host.locking import OperationBusy, file_lock, process_identity
 from clytie.plugin_host.snapshots import canonical, contained
 
+from .io_channel import IoChannel
+from .io_client import io_scope
 from .journal import TERMINAL, BackupJournal
 from .restore import RestoreManager, digest, read_state, validate_contents
 
@@ -46,6 +48,7 @@ class Controls:
         self.emit = emit
         self.responses = {}
         self.response_ready = threading.Condition()
+        self.io_channel = IoChannel(emit)
         if stream is not None:
             threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
@@ -62,6 +65,8 @@ class Controls:
                 elif len(command) <= 64 * 1024 and command.startswith(b"{"):
                     try:
                         value = json.loads(command)
+                        if self.io_channel.receive(value):
+                            continue
                         if value.get("type") == "bridge_reply":
                             with self.response_ready:
                                 self.responses[value["id"]] = value
@@ -71,6 +76,7 @@ class Controls:
         finally:
             self.cancelled.set()
             self.started.set()
+            self.io_channel.disconnect()
 
     def request(self, operation, arguments):
         key = uuid4().hex
@@ -402,7 +408,9 @@ def execute(home, operation_id, *, stream, emit, clock=None, recover_only=False)
                     controls.check()
                     if journal.value["operation"] == "create":
                         controls.configure_capture(home)
-                    journal.commit(dispatch(home, clock, journal, controls))
+                    client = controls.io_channel.client(operation_id, check=controls.check)
+                    with io_scope(client):
+                        journal.commit(dispatch(home, clock, journal, controls))
             except Cancelled:
                 fresh = WorkerJournal.load(path, clock)
                 if fresh.value["phase"] not in TERMINAL:
@@ -429,10 +437,12 @@ def main():
     home, operation_id = Path(sys.argv[1]).resolve(), sys.argv[2]
     recover_only = len(sys.argv) > 3 and sys.argv[3] == "recover-only"
     protocol = sys.stdout.buffer
+    output_lock = threading.Lock()
 
     def emit(value):
-        protocol.write(json.dumps(value, ensure_ascii=False).encode() + b"\n")
-        protocol.flush()
+        with output_lock:
+            protocol.write(json.dumps(value, ensure_ascii=False).encode() + b"\n")
+            protocol.flush()
 
     try:
         with redirect_stdout(sys.stderr):

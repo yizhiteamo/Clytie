@@ -52,14 +52,21 @@ class IoClient:
         state = {"client": self, "id": key, "thread": threading.get_ident(), "sequence": 0}
         binding = _stage.set(state)
         try:
-            self.request({"action": "acquire", "stage": key})
-            yield
-        finally:
             try:
-                # 授予响应丢失也确认本阶段不再执行 I/O，不能丢下虚假占用。
+                self.request({"action": "acquire", "stage": key})
+                yield
+            except BaseException as original:
+                try:
+                    self.request({"action": "release", "stage": key}, cleanup=True)
+                except IoBudgetError as cleanup_error:
+                    # The parent retains unconfirmed occupancy until actual exit.
+                    # Losing the cleanup pipe cannot change accepted cancellation.
+                    raise original from cleanup_error
+                raise
+            else:
                 self.request({"action": "release", "stage": key}, cleanup=True)
-            finally:
-                _stage.reset(binding)
+        finally:
+            _stage.reset(binding)
 
     def charge(self, direction, size):
         state = _stage.get()

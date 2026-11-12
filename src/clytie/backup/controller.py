@@ -133,6 +133,9 @@ class CaptureBridge:
 
 
 def bind(supervisor, backup_workers, *, memory_workers=None):
+    if backup_workers.tasks or backup_workers.io_control.sessions:
+        raise ValueError("backup_io_bind_while_active")
+    backup_workers.io_control = supervisor.backup_io
     backup_workers.capture_handler = CaptureBridge(supervisor)
     supervisor.management_workers = ManagementWorkers(
         *((memory_workers,) if memory_workers is not None else ()), backup_workers

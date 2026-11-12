@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from typing import Protocol
 
+from clytie.backup.io_budget import IoBudgetError
+from clytie.backup.io_control import IoControl
 from clytie.plugin_host.locking import file_lock, process_identity
 from clytie.plugin_host.support import HostLog, timed
 
@@ -63,6 +65,8 @@ class Supervisor:
         self.suspended = set()
         self.request_stop = None
         self.startup_cancelled = lambda: False
+        self.backup_io = IoControl(clock)
+        self.backup_io_sessions = {}
 
     def setting(self, group, key, default):
         return self.config.get(group, {}).get(key, default)
@@ -110,6 +114,21 @@ class Supervisor:
         await child.send(dict(type=kind, seq=self.seq, **fields))
         return self.seq
 
+    def authorize_backup_capture(self, cid, operation_id):
+        self.backup_io.authorize(self.backup_io_sessions[cid], operation_id)
+
+    async def _backup_io_reply(self, child, response):
+        await self.command(
+            child,
+            response["type"],
+            **{key: value for key, value in response.items() if key != "type"},
+        )
+
+    async def _backup_io_exit_confirmed(self, cid):
+        session = self.backup_io_sessions.pop(cid, None)
+        if session is not None:
+            await self.backup_io.ended(session, confirmed=True)
+
     async def monitor(self, cid):
         row = self.rows[cid]
         while not self.stopping and cid not in self.suspended:
@@ -119,9 +138,12 @@ class Supervisor:
             fatal, ready = None, None
             reason = None
             last = self.clock.monotonic()
+            io_session, exit_confirmed = None, False
             try:
                 child = await self.launcher.launch(cid)
                 self.children[cid] = child
+                io_session = self.backup_io.register(storage_owner=True)
+                self.backup_io_sessions[cid] = io_session
                 while True:
                     now = self.clock.monotonic()
                     if row["phase"] == "starting" and ready is None:
@@ -227,6 +249,17 @@ class Supervisor:
                             )
                         else:
                             self.problems.pop(f"quota_exhausted:{cid}", None)
+                    elif kind == "backup_io":
+
+                        async def reply(response, child=child):
+                            await self._backup_io_reply(child, response)
+
+                        self.backup_io.dispatch(io_session, msg, reply)
+                    elif kind == "storage_pressure":
+                        try:
+                            self.backup_io.pressure(io_session, msg.get("sample"))
+                        except IoBudgetError:
+                            self.log.warning("supervisor.backup_pressure_invalid")
                     elif kind == "fatal":
                         fatal = msg.get("reason")
                         if fatal not in FATAL:
@@ -258,7 +291,9 @@ class Supervisor:
                         await child.kill()
                         reason = "startup_timeout"
                         break
+                self.backup_io.disconnect(io_session)
                 code = await child.wait()
+                exit_confirmed = True
                 from clytie.api.auth import APIError
 
                 for (owner, _), pending in tuple(self.requests.items()):
@@ -272,6 +307,15 @@ class Supervisor:
                 child = self.children.get(cid)
                 if child:
                     await child.kill()
+                    await child.wait()
+                    exit_confirmed = True
+            finally:
+                if io_session is not None:
+                    self.backup_io.disconnect(io_session)
+                    if exit_confirmed:
+                        await self.backup_io.ended(io_session, confirmed=True)
+                        if self.backup_io_sessions.get(cid) == io_session:
+                            self.backup_io_sessions.pop(cid)
             if self.stopping or cid in self.suspended:
                 return
             if fatal:
@@ -502,6 +546,7 @@ class Supervisor:
         except TimeoutError:
             await child.kill()
             await child.wait()
+            await self._backup_io_exit_confirmed(cid)
             result = {"stopped": [], "not_stopped": {}, "reason": "timeout_killed"}
             self.audit.append("force_stop", cid, reason="timeout_killed", source="companion_stop")
             self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"
@@ -635,6 +680,7 @@ class Supervisor:
             except Exception as exc:
                 await child.kill()
                 await child.wait()
+                await self._backup_io_exit_confirmed(cid)
                 reason = "timeout_killed" if isinstance(exc, TimeoutError) else "stop_failed"
                 self.audit.append("force_stop", cid, reason=reason, source=source)
                 self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"

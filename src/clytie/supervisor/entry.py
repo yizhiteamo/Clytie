@@ -100,6 +100,8 @@ class _SilenceApplications:
 
 
 async def companion_main(home, cid):
+    from clytie.backup.io_channel import IoChannel, pressure_updates
+
     from .heartbeat import Heartbeat
 
     clock = SystemClock()
@@ -118,8 +120,13 @@ async def companion_main(home, cid):
     stop_requested, orphan = threading.Event(), threading.Event()
     loop = asyncio.get_running_loop()
     startup = None
+    io_channel = IoChannel(lambda value: emit(value.pop("type"), **value))
 
     def observed(message):
+        if message is None:
+            io_channel.disconnect()
+        elif io_channel.receive(message):
+            return
         if message is None or message.get("type") in {"stop", "session_ending"}:
             stop_requested.set()
             if message is None:
@@ -132,6 +139,7 @@ async def companion_main(home, cid):
     if first is None:
         return 0
     runtime = Companion(home, cid, clock)
+    runtime.backup_io_client = io_channel.client
     runtime.on_phase = lambda phase: heartbeat.update(phase=phase)
     runtime.stop_requested = stop_requested.is_set
     heartbeat.start()
@@ -147,6 +155,16 @@ async def companion_main(home, cid):
             await clock.sleep(runtime.config.get("heartbeat_seconds", 5))
 
     heartbeat_task = asyncio.create_task(refresh())
+    pressure_task = asyncio.create_task(
+        pressure_updates(runtime, clock, lambda value: emit(value.pop("type"), **value))
+    )
+
+    async def close_telemetry():
+        heartbeat.close()
+        heartbeat_task.cancel()
+        pressure_task.cancel()
+        await asyncio.gather(heartbeat_task, pressure_task, return_exceptions=True)
+
     startup = asyncio.create_task(runtime.start())
     try:
         started = await startup
@@ -154,16 +172,12 @@ async def companion_main(home, cid):
         started = False
     except StartupBlocked as exc:
         emit("fatal", reason=exc.reason)
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
         await runtime.stop()
         return 1
     except Exception:
         logging.exception("companion.start_failed")
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
         await runtime.stop()
         return 1
     if not started or stop_requested.is_set():
@@ -175,9 +189,7 @@ async def companion_main(home, cid):
             if not orphan.is_set():
                 emit("stop_result", result=result)
         finally:
-            heartbeat.close()
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            await close_telemetry()
         return 0
     emit("ready")
     heartbeat.update(runtime.health(), phase="running")
@@ -227,6 +239,8 @@ async def companion_main(home, cid):
             if msg is None:
                 await orphan_exit(runtime, clock, protocol)
             kind = msg["type"]
+            if kind == "backup_io_reply":
+                continue  # The pipe reader already delivered this to the I/O thread.
             if kind == "request":
                 task = asyncio.create_task(handle_request(msg))
                 requests.add(task)
@@ -255,9 +269,7 @@ async def companion_main(home, cid):
         for task in requests:
             task.cancel()
         await asyncio.gather(*requests, return_exceptions=True)
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
 
 
 class FrontendSignals:
