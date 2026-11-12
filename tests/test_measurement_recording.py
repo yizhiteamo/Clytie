@@ -52,3 +52,19 @@ def test_recorder_refuses_existing_destination_and_keeps_prior_evidence(tmp_path
     with pytest.raises(evidence.EvidenceError):
         recorder.finish(target, expected)
     assert (target / "prior").read_bytes() == b"fictional prior evidence"
+
+
+def test_child_rows_keep_exact_bytes_when_joined_to_parent_evidence():
+    recorder = recording.Recorder()
+    raw = b'{ "id": 8, "request_id": 0, "phase": "fsync", "started_s": 1.00, "finished_s": 2.00, "outcome": "ok" }\r\n'
+    recorder.append_bytes("storage-phases.jsonl", raw)
+    assert bytes(recorder.rows["storage-phases.jsonl"]) == raw
+
+
+@pytest.mark.parametrize("raw", [b"", b"{}\n", b'{"id": 1}', b"{}\ntruncated"])
+def test_child_incomplete_or_invalid_rows_invalidate_recording(raw):
+    recorder = recording.Recorder()
+    with pytest.raises(evidence.EvidenceError):
+        recorder.append_bytes("storage-phases.jsonl", raw)
+    assert recorder.failed
+    assert not recorder.rows["storage-phases.jsonl"]

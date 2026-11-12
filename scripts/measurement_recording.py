@@ -69,3 +69,26 @@ class Recorder:
                 stream.flush()
                 os.fsync(stream.fileno())
         return {name: hashlib.sha256(raw).hexdigest() for name, raw in contents.items()}
+
+    def append_bytes(self, name, raw):
+        """Join complete child records without re-encoding their original bytes."""
+        with self.lock:
+            if self.closed:
+                raise evidence.EvidenceError("recording_closed")
+            if self.failed:
+                raise evidence.EvidenceError("recording_invalid")
+            try:
+                if name not in self.rows:
+                    raise evidence.EvidenceError("unknown_file")
+                if type(raw) is not bytes or not raw or not raw.endswith(b"\n"):
+                    raise evidence.EvidenceError("child_recording_incomplete")
+                if len(self.rows[name]) + len(raw) > self.limit:
+                    raise evidence.EvidenceError("recording_capacity")
+                for line in raw.splitlines(keepends=True):
+                    if len(line) > evidence.MAX_LINE:
+                        raise evidence.EvidenceError("line_size_limit")
+                    evidence.validate_record(name, evidence._json(line))
+                self.rows[name].extend(raw)
+            except Exception:
+                self.failed = True
+                raise
