@@ -33,7 +33,8 @@ FILES = (
     "release-events.jsonl",
     "run-manifest.json",
 )
-MAX_FILE = 64 * 1024 * 1024
+LEGACY_MAX_FILE = 64 * 1024 * 1024
+MAX_FILE = 256 * 1024 * 1024
 MAX_TOTAL = len(FILES) * MAX_FILE + 1024 * 1024
 MAX_LINE = 16 * 1024
 IDENTITY_FIELDS = (
@@ -72,6 +73,39 @@ V2_FIELDS = (
     "metrics",
 )
 LEDGER_TABLES = ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit")
+RESOURCE_FIELDS_V1 = (
+    "at_s",
+    "rss_bytes",
+    "wal_bytes",
+    "temp_bytes",
+    "queue",
+    "finalizers",
+    "views",
+    "backup_bytes",
+    "loop_delay_ms",
+    "rate",
+)
+# Formats 1 and 2 retain their historical resource fields and byte semantics.
+RESOURCE_FIELDS_V2 = RESOURCE_FIELDS_V1
+# V3 backup_bytes is physical artifact/package bytes; logical_io_bytes is the
+# separate scheduler charge counter, or null when that counter is not available.
+RESOURCE_FIELDS_V3 = (*RESOURCE_FIELDS_V1, "logical_io_bytes", "backup_phase")
+# Intentionally fixed, checked against the product journal in tests. Loading an
+# older product must not silently change the evidence format's allowed strings.
+BACKUP_PHASES = {
+    "accepted",
+    "preparing",
+    "capturing",
+    "copying",
+    "verifying",
+    "publishing",
+    "committed",
+    "cancelled",
+    "failed",
+    "recovery_blocked",
+    "not_started",
+    "not_applicable",
+}
 PARAMETERS = {
     "concurrency": 1,
     "waiting": 8,
@@ -179,8 +213,8 @@ def _pattern(value, pattern):
 
 
 def validate_run(run):
-    if type(run) is dict and type(run.get("format")) is int and run["format"] == 2:
-        _validate_run_v2(run)
+    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3}:
+        _validate_run_versioned(run)
     else:
         _validate_run_v1(run)
 
@@ -219,11 +253,11 @@ def _validate_run_v1(run):
         raise EvidenceError("invalid_load")
 
 
-def _validate_run_v2(run):
+def _validate_run_versioned(run):
     _fields(run, V2_FIELDS)
     _enum(run["source"], {"generated_fictional_only"})
     _enum(run["method"], {"legal_storage_v1", "legal_fixture_comparison_v1"})
-    _enum(run["fixture_version"], {"legal_memory_v1"})
+    _enum(run["fixture_version"], {"legal_memory_v2" if run["format"] == 3 else "legal_memory_v1"})
     for field in ("candidate", "reference", "baseline_reference", "source_commit"):
         _pattern(run[field], r"[a-f0-9]{40}")
     if run["reference"] != ORIGINAL_REFERENCE or run["baseline_reference"] != BASELINE_REFERENCE:
@@ -354,7 +388,11 @@ def _validate_metrics(metrics):
         raise EvidenceError("invalid_metrics")
 
 
-def validate_record(name, row):
+def validate_record(name, row, *, format_version=None):
+    if format_version is not None and (
+        type(format_version) is not int or format_version not in {1, 2, 3}
+    ):
+        raise EvidenceError("unsupported_format")
     if name == "requests.jsonl":
         _fields(row, ("id", "kind", "scheduled_s", "started_s", "finished_s", "outcome"))
         _enum(row["kind"], {"business", "control", "cancel", "backup"})
@@ -376,22 +414,18 @@ def validate_record(name, row):
             },
         )
     elif name == "resources.jsonl":
-        _fields(
-            row,
-            (
-                "at_s",
-                "rss_bytes",
-                "wal_bytes",
-                "temp_bytes",
-                "queue",
-                "finalizers",
-                "views",
-                "backup_bytes",
-                "loop_delay_ms",
-                "rate",
-            ),
+        fields = (
+            RESOURCE_FIELDS_V3
+            if format_version == 3
+            or (
+                format_version is None and type(row) is dict and set(row) == set(RESOURCE_FIELDS_V3)
+            )
+            else RESOURCE_FIELDS_V1
         )
+        _fields(row, fields)
         _enum(row["rate"], {"normal", "busy", "none"})
+        if "backup_phase" in row:
+            _enum(row["backup_phase"], BACKUP_PHASES)
     elif name == "release-events.jsonl":
         _fields(row, ("id", "at_s", "resource", "event"))
         _enum(row["resource"], {"view", "slot", "reference", "thread", "process"})
@@ -410,7 +444,9 @@ def validate_record(name, row):
     else:
         raise EvidenceError("unknown_file")
     for key, value in row.items():
-        if key in {"kind", "phase", "rate", "resource", "event"}:
+        if key in {"kind", "phase", "rate", "resource", "event", "backup_phase"}:
+            continue
+        if key == "logical_io_bytes" and value is None and row["rate"] == "none":
             continue
         if key == "outcome":
             _enum(value, {"ok", "failed", "cancelled", "unknown", "busy"})
@@ -439,23 +475,26 @@ def validate_files(contents, expected):
         scan = public_scanner()
         validate_run(expected)
         exceptions = []
-        run = None
+        manifest_raw = contents["run-manifest.json"]
+        if not manifest_raw or len(manifest_raw) > MAX_FILE:
+            raise EvidenceError("file_size_limit")
+        run = _json(manifest_raw)
+        validate_run(run)
+        file_limit = MAX_FILE if run["format"] == 3 else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
-            if not raw or len(raw) > MAX_FILE:
+            if not raw or len(raw) > file_limit:
                 raise EvidenceError("file_size_limit")
             text = raw.decode("utf-8")
             lines = text.splitlines()
             if any(len(line.encode("utf-8")) > MAX_LINE for line in lines):
                 raise EvidenceError("line_size_limit")
             if name == "run-manifest.json":
-                run = _json(text)
-                validate_run(run)
                 values = [run]
             else:
                 values = [_json(line) for line in lines]
                 for row in values:
-                    validate_record(name, row)
+                    validate_record(name, row, format_version=run["format"])
             # Only actual numeric JSON tokens may use the numerical exception.
             # Strict schemas prevent unknown strings from hiding behind that exception.
             for value in values:
@@ -475,14 +514,14 @@ def validate_files(contents, expected):
                     )
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
-        # V2 freezes every approved field except measured outcomes. In particular,
+        # V2/V3 freeze every approved field except measured outcomes. In particular,
         # a newer schema must never fall back to the smaller historical identity.
         identity_fields = (
-            set(V2_FIELDS) - {"result", "metrics"} if run["format"] == 2 else IDENTITY_FIELDS
+            set(V2_FIELDS) - {"result", "metrics"} if run["format"] in {2, 3} else IDENTITY_FIELDS
         )
         if any(run[key] != expected[key] for key in identity_fields):
             raise EvidenceError("run_identity_mismatch")
-        if run["format"] == 2 and any(
+        if run["format"] in {2, 3} and any(
             run["metrics"][key] != expected["metrics"][key] for key in ("logical", "ledger_rows")
         ):
             # Physical byte layouts/results are observations; the approved

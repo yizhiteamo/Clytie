@@ -65,6 +65,17 @@ def manifest_v2(directory):
     return run
 
 
+def manifest_v3(directory):
+    run = manifest_v2(directory)
+    run.update(format=3, fixture_version="legal_memory_v2")
+    resource_path = directory / "resources.jsonl"
+    resource = json.loads(resource_path.read_text())
+    resource.update(logical_io_bytes=0, backup_phase="not_started")
+    resource_path.write_text(json.dumps(resource) + "\n", encoding="utf-8")
+    save_manifest(directory, run)
+    return run
+
+
 def save_manifest(directory, run):
     (directory / "run-manifest.json").write_text(json.dumps(run, indent=2), encoding="utf-8")
 
@@ -287,3 +298,208 @@ def test_expected_manifest_itself_cannot_contain_unknown_or_invalid_identity(tmp
     expected[field] = "unapproved"
     with pytest.raises(evidence.EvidenceError):
         evidence.validate_files(contents(source), expected)
+
+
+@pytest.mark.parametrize("format_version", [1, 2, 3])
+def test_resource_record_schema_is_bound_to_manifest_format(tmp_path, format_version):
+    source = tmp_path / "source"
+    run = {1: fixture_files, 2: manifest_v2, 3: manifest_v3}[format_version](source)
+    evidence.validate_files(contents(source), run)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    evidence.validate_record("resources.jsonl", row)
+    if format_version in {1, 2}:
+        row.update(logical_io_bytes=0, backup_phase="not_started")
+    else:
+        del row["logical_io_bytes"]
+        del row["backup_phase"]
+    evidence.validate_record("resources.jsonl", row)
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(evidence.EvidenceError, match="invalid_fields"):
+        evidence.validate_files(contents(source), run)
+
+
+@pytest.mark.parametrize("field", ["logical_io_bytes", "backup_phase"])
+def test_partial_resource_extensions_are_not_optional(tmp_path, field):
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    del row[field]
+    with pytest.raises(evidence.EvidenceError, match="invalid_fields"):
+        evidence.validate_record("resources.jsonl", row)
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(evidence.EvidenceError, match="invalid_fields"):
+        evidence.validate_files(contents(source), run)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("logical_io_bytes", True),
+        ("logical_io_bytes", -1),
+        ("logical_io_bytes", 0.5),
+        ("logical_io_bytes", "123"),
+        ("logical_io_bytes", float("inf")),
+        ("logical_io_bytes", None),
+        ("backup_phase", "unknown"),
+        ("backup_phase", "private/path"),
+        ("backup_phase", 0),
+        ("backup_phase", None),
+        ("unexpected", 0),
+    ],
+)
+def test_resource_v3_tamper_is_rejected(tmp_path, field, value):
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    row[field] = value
+    with pytest.raises(evidence.EvidenceError):
+        evidence.validate_record("resources.jsonl", row)
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(evidence.EvidenceError):
+        evidence.validate_files(contents(source), run)
+
+
+def test_resource_phase_enum_matches_real_journal_phases(tmp_path):
+    from clytie.backup.journal import PHASES
+
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    for phase in PHASES | {"not_started", "not_applicable"}:
+        row["backup_phase"] = phase
+        evidence.validate_record("resources.jsonl", row)
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        evidence.validate_files(contents(source), run)
+    assert evidence.BACKUP_PHASES == PHASES | {"not_started", "not_applicable"}
+
+
+def test_resource_mixed_versions_in_one_file_are_rejected(tmp_path):
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    legacy = {
+        key: value for key, value in row.items() if key not in {"logical_io_bytes", "backup_phase"}
+    }
+    path.write_text(json.dumps(row) + "\n" + json.dumps(legacy) + "\n", encoding="utf-8")
+    with pytest.raises(evidence.EvidenceError, match="invalid_fields"):
+        evidence.validate_files(contents(source), run)
+
+
+def test_resource_unmetered_io_is_null_only_without_a_rate(tmp_path):
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    path = source / "resources.jsonl"
+    row = json.loads(path.read_text())
+    row.update(rate="none", logical_io_bytes=None)
+    evidence.validate_record("resources.jsonl", row)
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    evidence.validate_files(contents(source), run)
+    for rate in ("normal", "busy"):
+        row["rate"] = rate
+        with pytest.raises(evidence.EvidenceError, match="invalid_number"):
+            evidence.validate_record("resources.jsonl", row)
+
+
+@pytest.mark.parametrize("format_version", [2, 3])
+def test_fixture_version_is_fixed_for_each_manifest_format(tmp_path, format_version):
+    source = tmp_path / "source"
+    run = {2: manifest_v2, 3: manifest_v3}[format_version](source)
+    evidence.validate_files(contents(source), run)
+    run["fixture_version"] = "legal_memory_v2" if format_version == 2 else "legal_memory_v1"
+    with pytest.raises(evidence.EvidenceError, match="invalid_enum"):
+        evidence.validate_run(run)
+
+
+def test_v3_real_age_roundtrip_preserves_raw_and_container_format(tmp_path):
+    source = tmp_path / "source"
+    run = manifest_v3(source)
+    identity = evidence.native_identity().generate()
+    receipt = evidence.seal(source, tmp_path / "encrypted", str(identity.to_public()), run)
+    assert receipt["format"] == 1
+    result = evidence.open_bundle(
+        tmp_path / "encrypted/measurements.age",
+        tmp_path / "opened",
+        identity,
+        run,
+        private_scan=lambda files: "pass",
+    )
+    assert result["accepted"] is True
+    assert contents(tmp_path / "opened/raw") == contents(source)
+
+
+@pytest.mark.parametrize("field", ["fixture_sha256", "tool_sha256", "python", "execution"])
+def test_v3_frozen_fields_remain_identity_checked(tmp_path, field):
+    source = tmp_path / "source"
+    expected = manifest_v3(source)
+    actual = copy.deepcopy(expected)
+    if field.endswith("sha256"):
+        actual[field] = "dd" * 32
+    elif field == "python":
+        actual[field] = "3.11.1"
+    else:
+        actual[field]["warmup_requests"] += 1
+    evidence.validate_run(actual)
+    save_manifest(source, actual)
+    with pytest.raises(evidence.EvidenceError, match="run_identity_mismatch"):
+        evidence.validate_files(contents(source), expected)
+
+
+def test_v3_logical_workload_remains_frozen(tmp_path):
+    source = tmp_path / "source"
+    expected = manifest_v3(source)
+    actual = copy.deepcopy(expected)
+    actual["metrics"]["logical"]["revisions"] += 1
+    evidence.validate_run(actual)
+    save_manifest(source, actual)
+    with pytest.raises(evidence.EvidenceError, match="run_workload_mismatch"):
+        evidence.validate_files(contents(source), expected)
+
+
+@pytest.mark.parametrize("format_version", [1, 2, 3])
+def test_manifest_format_controls_file_limit_at_exact_boundary(
+    tmp_path, monkeypatch, format_version
+):
+    source = tmp_path / "source"
+    run = {1: fixture_files, 2: manifest_v2, 3: manifest_v3}[format_version](source)
+    files = contents(source)
+    legacy_limit = max(map(len, files.values())) + 64
+    monkeypatch.setattr(evidence, "LEGACY_MAX_FILE", legacy_limit)
+    monkeypatch.setattr(evidence, "MAX_FILE", legacy_limit * 2)
+    selected_limit = legacy_limit * (2 if format_version == 3 else 1)
+    raw = files["run-manifest.json"]
+    files["run-manifest.json"] = raw + b" " * (selected_limit - len(raw))
+    evidence.validate_files(files, run)
+    files["run-manifest.json"] += b" "
+    with pytest.raises(evidence.EvidenceError, match="file_size_limit"):
+        evidence.validate_files(files, run)
+
+
+@pytest.mark.parametrize("format_version", [1, 2, 3])
+def test_resource_file_over_legacy_limit_is_allowed_only_in_v3(
+    tmp_path, monkeypatch, format_version
+):
+    source = tmp_path / "source"
+    run = {1: fixture_files, 2: manifest_v2, 3: manifest_v3}[format_version](source)
+    files = contents(source)
+    legacy_limit = max(map(len, files.values())) + 64
+    monkeypatch.setattr(evidence, "LEGACY_MAX_FILE", legacy_limit)
+    monkeypatch.setattr(evidence, "MAX_FILE", legacy_limit * 2)
+    row = files["resources.jsonl"]
+    files["resources.jsonl"] = row * (legacy_limit // len(row) + 1)
+    assert legacy_limit < len(files["resources.jsonl"]) <= evidence.MAX_FILE
+    if format_version == 3:
+        evidence.validate_files(files, run)
+    else:
+        with pytest.raises(evidence.EvidenceError, match="file_size_limit"):
+            evidence.validate_files(files, run)
+
+
+def test_evidence_capacity_constants_keep_fixed_archive_bound():
+    assert evidence.LEGACY_MAX_FILE == 64 * 1024 * 1024
+    assert evidence.MAX_FILE == 256 * 1024 * 1024
+    assert evidence.MAX_TOTAL == len(evidence.FILES) * evidence.MAX_FILE + 1024 * 1024
