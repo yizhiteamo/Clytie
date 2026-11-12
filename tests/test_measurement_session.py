@@ -33,10 +33,14 @@ def local_fixture(path):
     return run
 
 
+@pytest.mark.parametrize("short_alias", [False, True])
 async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encryption_schema(
     tmp_path,
     monkeypatch,
+    short_alias,
 ):
+    if short_alias and session.platform.system() != "Windows":
+        pytest.skip("Windows short-path alias regression")
     errors = []
     original = session.capture_request
 
@@ -52,7 +56,21 @@ async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encrypt
     run["load"] = dict(
         window_seconds=0.25, interval_seconds=0.025, request_count=10, maximum_seconds=30
     )
-    root = Path(tempfile.mkdtemp(prefix="cm-")) / "r"
+    parent = Path(tempfile.mkdtemp(prefix="cm-"))
+    if short_alias:
+        import ctypes
+
+        function = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        function.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        function.restype = ctypes.c_uint
+        buffer = ctypes.create_unicode_buffer(4096)
+        assert function(str(parent), buffer, len(buffer))
+        alias = Path(buffer.value)
+        if str(alias).casefold() == str(parent).casefold():
+            pytest.skip("filesystem did not provide a distinct Windows short alias")
+        assert alias.resolve() == parent.resolve()
+        parent = alias
+    root = parent / "r"
     result = await timed(session.run_fixture(root, run, scale=(8, 1, 32)), SystemClock(), 30)
     if errors:
         error = errors[0]

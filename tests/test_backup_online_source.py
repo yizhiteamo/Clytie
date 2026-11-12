@@ -152,6 +152,32 @@ async def test_online_full_provider_uses_live_object_and_fixed_db_view(online, t
         ).fetchone()
 
 
+async def test_online_home_alias_keeps_instance_plugin_in_package(online, tmp_path):
+    owner, _ = online
+    canonical = owner.home.resolve()
+    (canonical / "alias_segment").mkdir()
+    owner.home = canonical / "alias_segment" / ".."
+
+    async def callback(cid, work, epoch):
+        return await capture_online(owner, work, epoch)
+
+    stage = tmp_path / "alias-stage"
+    result = await capture_instance(
+        canonical,
+        owner.clock,
+        stage,
+        source_instance_id="fictional",
+        online_ids={owner.cid},
+        online=callback,
+        epoch="alias_epoch",
+    )
+    assert result["manifest"]["completeness"] == "complete", result["missing"]
+    local = next(p for p in result["manifest"]["plugins"] if p["id"] == "snapshot-test")
+    assert local["manifest_path"] == "plugins/snapshot-test/plugin.json"
+    assert (stage / local["manifest_path"]).is_file()
+    validate_contents(stage, result, repo_root=ROOT)
+
+
 async def test_online_provider_failure_is_partial_without_stopping_plugin(online, tmp_path):
     owner, holder = online
 

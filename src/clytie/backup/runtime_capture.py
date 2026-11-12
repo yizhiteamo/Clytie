@@ -179,7 +179,9 @@ def _online_files(companion, work, documents, versions_raw, expected, scope, che
     from .configuration import config_commit_lock
     from .source import SourceError, _copy, _put, _small
 
-    home, cid, host = Path(companion.home), companion.cid, companion.host
+    # Manifest paths are canonical. Compare the same namespace even when the
+    # caller supplied a Windows short alias or an equivalent relative path.
+    home, cid, host = Path(companion.home).resolve(), companion.cid, companion.host
     base = home / "companions" / cid
     if companion.report is None:
         raise SourceError("configuration_runtime_unverified")
