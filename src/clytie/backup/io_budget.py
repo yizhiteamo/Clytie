@@ -154,11 +154,7 @@ class IoBudget:
             if stage.finished:
                 raise IoBudgetError("backup_io_stage_finished")
         else:
-            if any(
-                value.key.executor == key.executor and not value.finished
-                for value in self._stages.values()
-            ):
-                raise IoBudgetError("backup_io_nested_stage")
+            # 同执行者的独立就绪调用链也可排队；嵌套同步调用由客户端共用阶段。
             if self._active is not None and len(self._waiting) >= WAITING:
                 raise IoBudgetError("backup_io_busy")
             stage = self._stages[key] = _Stage(key)
@@ -250,6 +246,20 @@ class IoBudget:
         self._grant()
         self._wake()
 
+    async def finish_requested(self, key):
+        """绑定控制通道确认阶段已无 I/O；包括 acquire 回复未到达的情况。"""
+        stage = self._stages.get(key)
+        if stage is None or stage.finished:
+            return
+        if stage.disconnected:
+            raise IoBudgetError("backup_io_exit_unconfirmed")
+        task = stage.charge_task
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._finish(stage)
+
     def disconnected(self, executor):
         self._lost.add(executor)
         for stage in self._stages.values():
@@ -272,6 +282,8 @@ class IoBudget:
             raise IoBudgetError("backup_io_exit_unconfirmed")
         for value in stages:
             del self._stages[value.key]
+        remaining = {value.key.executor for value in self._stages.values()}
+        self._lost.intersection_update(remaining)
 
     def status(self):
         self._refill()

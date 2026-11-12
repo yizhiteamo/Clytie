@@ -28,8 +28,6 @@ async def test_single_stage_eight_waiters_fifo_and_replay():
     assert budget.status()["waiting"] == 8
     with pytest.raises(IoBudgetError, match="backup_io_busy"):
         await budget.acquire(key(9))
-    with pytest.raises(IoBudgetError, match="backup_io_nested_stage"):
-        await budget.acquire(key(10, executor="executor_0"))
     budget.release(first)
     for index, task in enumerate(waiting):
         await clock.drain()
@@ -40,6 +38,18 @@ async def test_single_stage_eight_waiters_fifo_and_replay():
     with pytest.raises(IoBudgetError, match="backup_io_stage_finished"):
         await budget.acquire(key(0))
     assert budget.status()["active"] is None
+
+
+async def test_independent_ready_stages_from_same_executor_can_queue():
+    clock = MockClock()
+    budget = IoBudget(clock)
+    first = await budget.acquire(key(0))
+    second = asyncio.create_task(budget.acquire(key(1, executor="executor_0")))
+    await clock.drain()
+    assert not second.done()
+    assert budget.status()["waiting"] == 1
+    budget.release(first)
+    budget.release(await second)
 
 
 async def test_queue_cancellation_is_not_executor_exit_after_grant():
