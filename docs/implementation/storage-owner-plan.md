@@ -104,3 +104,15 @@
 微软 LockFile 文档明确进程终止后的 OS 解锁时间与资源有关： https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfile 。原日志没有保留底层 errno，不能声称已证明该次拒绝的唯一系统原因；但测试把进程结束等同锁已回收的前提不成立。
 
 测试改为先对既存恢复锁做有界、非阻塞 OS 就绪探测，再且仅一次执行原恢复核验；不写锁元数据、不绕过锁、不修改产品等待期限或 busy 行为。只等待锁冲突错误，其他 I/O 错误立即失败，持续占用也失败。确定性注入延后释放、真实 OS 锁竞争、元数据不改写及错误不隐藏，加原三种资产强杀恢复共 7 项通过；原字节、登记、授权、源保护与不重放断言保留。这些局部证据不替代修正候选的双平台回归与性能结果。
+
+## 10. Linux 迁移前 EOF 测试的跨线程同步
+
+用户提供候选 c0916f5624a1ff01bc0be3b70b118ad985ac3a2b 的原 Linux 作业日志，核对 SHA-256 一致后原样保存；没有重跑该作业。结果为 1 failed、1908 passed、5 skipped，263.97 秒。唯一失败是 test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start 的 before_memory 分支：父进程关闭 stdin 后立即放行 memory open，子进程没有在原 12 秒测试期限内退出。该日志未记录子进程观察 EOF 和进入 memory 的实际先后，不能仅凭超时确定根因；Linux 后续性能步骤全部跳过。
+
+定向故障注入只在测试子进程延迟真实 Lines 的 EOF 回调，强制 memory open 先进入，再调用原生产回调。未改原测试的 12 秒期限、memory 阻塞器或退出断言，一次复现同类超时：memory_entered=true、eof_observed=true、memory_completed=false、release_exists=false，进程仍存活。此时等待迁移是 supervisor-spec 第 1 节已批准的行为；原测试从父进程关管道推导“子进程已处理 EOF”的跨线程同步前提不成立。该注入证明一条可导致原症状的具体时序，不冒称还原了原 CI 中未记录的全部执行顺序。
+
+修正仅涉及测试同步：before_memory 在原 EOF 回调返回的确认信号后才放行启动，确认 memory 未进入；保留 memory_blocked 分支；新增 memory_before_eof_observed 分支，明确让真实 memory open 在 EOF 回调之前开始。后两种顺序在确认 EOF 已处理后保持迁移阻塞超过原 5 秒退出预算，再释放迁移；所有分支仍须在原测试期限内退出，且无插件启动或 ready。三种真实子进程定向回归本机 3 passed，19.90 秒。生产停止、迁移保护、StorageOwner 和超时均未改动；本地结果不能代替修正候选的双平台 CI。
+
+原日志的双扫描未通过，保留本地原件及扫描结果，不发布命中原文、不添加豁免。公开材料只包含独立扫描的事实说明。此核查不消耗正式审查轮次，仍为 1/3；备份性能超标及原始性能数据归档缺口仍未解决。
+
+关联八个文件的启动、阶段、真实子进程、存储停止、控制及强杀回归为 67 passed，58.86 秒；运行前后文件清单一致。通用/私有扫描、ruff/格式、架构检查通过。该集合包含上述三个定向用例，不与它们相加。

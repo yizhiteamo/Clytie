@@ -275,7 +275,9 @@ async def receive_ready(child, clock):
             return
 
 
-@pytest.mark.parametrize("eof_stage", ["memory_blocked", "before_memory"])
+@pytest.mark.parametrize(
+    "eof_stage", ["memory_blocked", "before_memory", "memory_before_eof_observed"]
+)
 async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start(
     tmp_path, eof_stage
 ):
@@ -289,11 +291,31 @@ async def test_real_sync_migration_heartbeats_and_eof_waits_without_plugin_start
     entered = tmp_path / "memory-entered"
     completed = tmp_path / "memory-completed"
     allow_memory = tmp_path / "allow-memory"
+    eof_read = tmp_path / "eof-read"
+    eof_observed = tmp_path / "eof-observed"
+    allow_eof = tmp_path / "allow-eof"
     code = """
 import asyncio, sys, threading
 from pathlib import Path
 import clytie.supervisor.entry as entry
 import clytie.supervisor.heartbeat as heartbeat
+OriginalLines = entry.Lines
+class ObservedLines(OriginalLines):
+    def __init__(self, stream, on_message=None):
+        def observed(message):
+            if message is None:
+                Path(sys.argv[6]).write_text("eof-read", encoding="utf-8")
+                if sys.argv[9] == "memory_before_eof_observed":
+                    # Force the losing side of the parent's close/open race.
+                    while not Path(sys.argv[8]).exists():
+                        threading.Event().wait(0.01)
+            if on_message:
+                on_message(message)
+            if message is None:
+                # Acknowledges the real callback, not merely parent pipe close.
+                Path(sys.argv[7]).write_text("eof-observed", encoding="utf-8")
+        super().__init__(stream, observed)
+entry.Lines = ObservedLines
 class ObservedHeartbeat(heartbeat.Heartbeat):
     def __init__(self, clock, emit):
         def observed(kind, **fields):
@@ -339,6 +361,10 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
             str(entered),
             str(completed),
             str(allow_memory),
+            str(eof_read),
+            str(eof_observed),
+            str(allow_eof),
+            eof_stage,
         ],
         env=env,
         stdin=subprocess.PIPE,
@@ -348,6 +374,15 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
     )
     child = Child(process, log)
     clock = SystemClock()
+
+    async def wait_signal(path):
+        async def observed():
+            while not path.exists():
+                assert process.poll() is None, (path.name, process.returncode)
+                await clock.sleep(0.01)
+
+        await timed(observed(), clock, 12)
+
     try:
         frame(process.stdin, dict(type="boot", seq=0))
         migrating = 0
@@ -359,28 +394,34 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
         if eof_stage == "memory_blocked":
             allow_memory.write_text("continue", encoding="utf-8")
 
-            async def wait_entered():
-                while not entered.exists():
-                    assert process.poll() is None
-                    await clock.sleep(0.01)
-
-            await timed(wait_entered(), clock, 12)
-            # The independent heartbeat must continue while the event loop is blocked.
+            await wait_signal(entered)
+            # Heartbeats continue while synchronous memory startup is blocked.
             while True:
                 msg = await timed(child.receive(), clock, 12)
                 assert msg["type"] == "heartbeat" and msg["phase"] == "migrating"
                 if msg["test_memory_entered"]:
                     break
         process.stdin.close()
-        if eof_stage == "memory_blocked":
+        if eof_stage == "memory_before_eof_observed":
+            await wait_signal(eof_read)
+            assert not eof_observed.exists()
+            allow_memory.write_text("continue", encoding="utf-8")
+            await wait_signal(entered)
+            assert not eof_observed.exists()
+            allow_eof.write_text("continue", encoding="utf-8")
+        await wait_signal(eof_observed)
+        if eof_stage != "before_memory":
             await clock.sleep(6)
             assert process.poll() is None
             assert not completed.exists()
             release.write_text("continue", encoding="utf-8")
         else:
+            # The original test only closed stdin before allowing memory open;
+            # that does not order the child's EOF observation before startup.
+            assert not entered.exists()
             allow_memory.write_text("continue", encoding="utf-8")
         assert await timed(child.wait(), clock, 12) == 0
-        assert entered.exists() == completed.exists() == (eof_stage == "memory_blocked")
+        assert entered.exists() == completed.exists() == (eof_stage != "before_memory")
         assert not (home / "companions/companion_a/plugin-versions.json").exists()
         while True:
             msg = await timed(child.receive(), clock, 5)
@@ -390,5 +431,6 @@ raise SystemExit(asyncio.run(entry.companion_main(Path(sys.argv[1]), "companion_
     finally:
         release.write_text("continue", encoding="utf-8")
         allow_memory.write_text("continue", encoding="utf-8")
+        allow_eof.write_text("continue", encoding="utf-8")
         await child.kill()
         child.close()
