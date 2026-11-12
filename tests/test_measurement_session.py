@@ -59,7 +59,19 @@ async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encrypt
         while error.__context__ is not None:
             error = error.__context__
         raise error
-    assert result["result"] == "pass"
+    journal = json.loads(
+        (root / "home/supervisor/backup-operations" / ("f" * 32 + ".json")).read_bytes()
+    )
+    requests = [
+        json.loads(line) for line in (root / "raw/requests.jsonl").read_bytes().splitlines()
+    ]
+    assert result["result"] == "pass", {
+        "phase": journal["phase"],
+        "reason": journal.get("reason"),
+        "creation": journal.get("result", {}).get("creation"),
+        "missing_count": journal.get("result", {}).get("missing_count"),
+        "failed_requests": [(r["kind"], r["outcome"]) for r in requests if r["outcome"] != "ok"],
+    }
     database = root / "home/companions/companion_a/memory/memory.sqlite3"
     db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
     try:
