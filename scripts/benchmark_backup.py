@@ -182,7 +182,7 @@ def frame_locations(frame):
     return result
 
 
-async def setup(directory, scale, *, core_assets=False, record_payload=False):
+async def setup(directory, scale, *, core_assets=False, record_payload=False, seed=SEED):
     home = directory / "home"
     shutil.copytree(ROOT / "examples/home", home)
     plugin_path = home / "plugins/benchmark-snapshot"
@@ -238,7 +238,7 @@ async def setup(directory, scale, *, core_assets=False, record_payload=False):
         if applied["failed"]:
             raise RuntimeError("fictional_provider_enable_failed")
         rows, files, size = scale
-        rng = random.Random(SEED)
+        rng = random.Random(seed)
 
         def seed_database():
             with store.transaction():

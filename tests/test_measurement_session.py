@@ -1,5 +1,7 @@
 import asyncio
 import json
+import random
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -21,6 +23,16 @@ for name in (
 session = load_tool("measurement_session")
 
 
+def local_fixture(path):
+    run = fixture_files(path)
+    run.update(
+        platform=session.platform.system(),
+        python=session.platform.python_version(),
+        sqlite=session.sqlite3.sqlite_version,
+    )
+    return run
+
+
 async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encryption_schema(
     tmp_path,
     monkeypatch,
@@ -36,7 +48,7 @@ async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encrypt
             raise
 
     monkeypatch.setattr(session, "capture_request", tracked)
-    run = fixture_files(tmp_path / "expected")
+    run = local_fixture(tmp_path / "expected")
     run["load"] = dict(
         window_seconds=0.25, interval_seconds=0.025, request_count=10, maximum_seconds=30
     )
@@ -48,6 +60,15 @@ async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encrypt
             error = error.__context__
         raise error
     assert result["result"] == "pass"
+    database = root / "home/companions/companion_a/memory/memory.sqlite3"
+    db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        record = json.loads(
+            db.execute("SELECT data FROM records WHERE id=?", (f"{1:032x}",)).fetchone()[0]
+        )
+        assert record["content"] == random.Random(run["seed"]).randbytes(2048).hex()
+    finally:
+        db.close()
     contents = {name: (root / "raw" / name).read_bytes() for name in evidence.FILES}
     evidence.validate_files(contents, result)
     stages = [json.loads(row) for row in contents["storage-phases.jsonl"].splitlines()]
@@ -60,7 +81,7 @@ async def test_tiny_recording_fixture_combines_live_owner_real_child_and_encrypt
 
 
 async def test_unfrozen_mechanism_cannot_run_through_fixture_entry(tmp_path):
-    run = fixture_files(tmp_path / "expected")
+    run = local_fixture(tmp_path / "expected")
     run.update(phase="mechanism", method="a43_bounded_io_v1")
     with pytest.raises(ValueError, match="launcher_not_frozen"):
         await session.run_fixture(tmp_path / "must_not_exist", run, scale=(8, 1, 32))
@@ -88,7 +109,7 @@ async def test_sampler_failure_preserves_failed_raw_and_closes_owner(tmp_path, m
         return original_rss(identity)
 
     monkeypatch.setattr(session, "rss_bytes", failing_sample)
-    run = fixture_files(tmp_path / "expected")
+    run = local_fixture(tmp_path / "expected")
     run["load"] = dict(
         window_seconds=0.05, interval_seconds=0.025, request_count=2, maximum_seconds=30
     )
@@ -118,7 +139,7 @@ async def test_fixture_cancel_waits_for_actual_child_and_view_exit(tmp_path, mon
         return await original(owner, *args, **kwargs)
 
     monkeypatch.setattr(session, "capture_request", track)
-    run = fixture_files(tmp_path / "expected")
+    run = local_fixture(tmp_path / "expected")
     run["load"] = dict(
         window_seconds=2, interval_seconds=0.025, request_count=80, maximum_seconds=30
     )
@@ -167,3 +188,21 @@ async def test_setup_seed_failure_closes_actual_owner(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="fictional_seed_failure"):
         await session.benchmark.setup(tmp_path, (2, 1, 16), record_payload=True)
     assert started and not started[0]._thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("arm", "original"),
+        ("platform", "Linux" if session.platform.system() == "Windows" else "Windows"),
+        ("python", "0.0.0"),
+        ("sqlite", "0.0.0"),
+    ],
+)
+async def test_fixture_rejects_inaccurate_runtime_identity(tmp_path, field, value):
+    run = local_fixture(tmp_path / "expected")
+    run[field] = value
+    root = tmp_path / "must_not_exist"
+    with pytest.raises(ValueError, match="identity_mismatch"):
+        await session.run_fixture(root, run, scale=(2, 1, 16))
+    assert not root.exists()

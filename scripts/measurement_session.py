@@ -6,6 +6,8 @@ launcher must supply the approved run identity before this can be used as eviden
 
 import asyncio
 import json
+import platform
+import sqlite3
 from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter  # noqa: TID251 -- offline measurement driver
@@ -76,6 +78,13 @@ async def run_fixture(directory, run, *, scale):
     evidence.validate_run(run)
     if run["phase"] != "fixture" or run["method"] != "encryption_fixture_v1":
         raise ValueError("measurement_launcher_not_frozen")
+    if (
+        run["arm"] != "candidate"
+        or run["platform"] != platform.system()
+        or run["python"] != platform.python_version()
+        or run["sqlite"] != sqlite3.sqlite_version
+    ):
+        raise ValueError("measurement_fixture_identity_mismatch")
     if scale[0] > 128 or scale[1] > 8 or scale[2] > 1024:
         raise ValueError("measurement_fixture_too_large")
     root = Path(directory).absolute()
@@ -114,7 +123,7 @@ async def run_fixture(directory, run, *, scale):
 
     with observation.install(), views.install(), ExitStack() as instruments:
         try:
-            owner, _ = await benchmark.setup(root, scale, record_payload=True)
+            owner, _ = await benchmark.setup(root, scale, record_payload=True, seed=run["seed"])
             instruments.enter_context(observation.observe_owner(owner.storage_owner))
             last_tick = perf_counter()
             tick()
