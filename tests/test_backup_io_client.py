@@ -106,3 +106,46 @@ def test_outside_backup_scope_is_not_a_global_io_hook():
     io_write(target, b"fictional")
     target.seek(0)
     assert io_read(target, -1) == b"fictional"
+
+
+def test_nested_identical_checks_run_once_per_checkpoint_and_restore_on_error():
+    from clytie.backup.io_client import checkpoint, io_checks
+
+    calls = []
+
+    def first():
+        calls.append("first")
+
+    def second():
+        calls.append("second")
+
+    with io_checks(first):
+        with pytest.raises(ValueError, match="fictional failure"):
+            with io_checks(first), io_checks(second), io_checks(first):
+                checkpoint()
+                assert calls == ["first", "second"]
+                raise ValueError("fictional failure")
+        checkpoint()
+        assert calls == ["first", "second", "first"]
+    checkpoint()
+    assert calls == ["first", "second", "first"]
+
+
+def test_equal_but_distinct_checks_are_not_merged():
+    from clytie.backup.io_client import checkpoint, io_checks
+
+    calls = []
+
+    class Check:
+        def __init__(self, name):
+            self.name = name
+
+        def __eq__(self, other):
+            pytest.fail("check identity must not invoke equality")
+
+        def __call__(self):
+            calls.append(self.name)
+
+    with io_checks(Check("first")), io_checks(Check("second")):
+        checkpoint()
+    assert calls == ["first", "second"]

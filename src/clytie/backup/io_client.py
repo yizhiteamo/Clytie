@@ -19,7 +19,14 @@ _checks = ContextVar("backup_io_checks", default=())
 
 @contextmanager
 def io_checks(check):
-    binding = _checks.set((*_checks.get(), check))
+    checks = _checks.get()
+    # Nested helpers often receive the same trusted cancellation/space callback.
+    # Keep every checkpoint and every distinct check, without repeating one
+    # callback merely because the call stack has more helper layers.
+    if any(existing is check for existing in checks):
+        yield
+        return
+    binding = _checks.set((*checks, check))
     try:
         yield
     finally:
