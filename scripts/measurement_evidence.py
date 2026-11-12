@@ -468,7 +468,29 @@ def _strings(value):
             yield from _strings(child)
 
 
-def validate_files(contents, expected):
+def _lines(raw):
+    """Match historical str.splitlines without retaining the whole decoded file."""
+    endings = ("\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+    pending = ""
+    # Universal newline decoding also preserves CR/CRLF legacy line numbering.
+    with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", newline=None) as stream:
+        while chunk := stream.read(MAX_LINE + 1):
+            pieces = (pending + chunk).splitlines(keepends=True)
+            pending = ""
+            for piece in pieces:
+                complete = piece.endswith(endings)
+                line = piece[:-1] if complete else piece
+                if len(line.encode("utf-8")) > MAX_LINE:
+                    raise EvidenceError("line_size_limit")
+                if complete:
+                    yield line
+                else:
+                    pending = line
+        if pending:
+            yield pending
+
+
+def validate_files(contents, expected, *, report_format=None):
     if set(contents) != set(FILES):
         raise EvidenceError("unexpected_file_set")
     try:
@@ -480,31 +502,35 @@ def validate_files(contents, expected):
             raise EvidenceError("file_size_limit")
         run = _json(manifest_raw)
         validate_run(run)
+        if report_format is None:
+            report_format = 2 if run["format"] == 3 else 1
+        if (
+            type(report_format) is not int
+            or report_format not in {1, 2}
+            or (report_format == 2 and run["format"] != 3)
+        ):
+            raise EvidenceError("unsupported_report_format")
         file_limit = MAX_FILE if run["format"] == 3 else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
             if not raw or len(raw) > file_limit:
                 raise EvidenceError("file_size_limit")
-            text = raw.decode("utf-8")
-            lines = text.splitlines()
-            if any(len(line.encode("utf-8")) > MAX_LINE for line in lines):
-                raise EvidenceError("line_size_limit")
             if name == "run-manifest.json":
-                values = [run]
-            else:
-                values = [_json(line) for line in lines]
-                for row in values:
-                    validate_record(name, row, format_version=run["format"])
-            # Only actual numeric JSON tokens may use the numerical exception.
-            # Strict schemas prevent unknown strings from hiding behind that exception.
-            for value in values:
-                if any(scan(token) for token in _strings(value)):
+                if any(scan(token) for token in _strings(run)):
                     raise EvidenceError("sensitive_string")
-            for number, line in enumerate(lines, 1):
+            summary = None
+            for number, line in enumerate(_lines(raw), 1):
+                if name != "run-manifest.json":
+                    row = _json(line)
+                    validate_record(name, row, format_version=run["format"])
+                    # Only numeric tokens may use the numerical exception. Every
+                    # row and string is checked before counting its scan result.
+                    if any(scan(token) for token in _strings(row)):
+                        raise EvidenceError("sensitive_string")
                 categories = scan(line)
                 if categories - {"possible-account-number"}:
                     raise EvidenceError("unapproved_scan_category")
-                if categories:
+                if categories and report_format == 1:
                     exceptions.append(
                         {
                             "file": name,
@@ -512,6 +538,19 @@ def validate_files(contents, expected):
                             "category": "schema_validated_fictional_numeric",
                         }
                     )
+                elif categories:
+                    if summary is None:
+                        summary = {
+                            "file": name,
+                            "category": "schema_validated_fictional_numeric",
+                            "count": 0,
+                            "first_line": number,
+                            "last_line": number,
+                        }
+                    summary["count"] += 1
+                    summary["last_line"] = number
+            if summary is not None:
+                exceptions.append(summary)
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
         # V2/V3 freeze every approved field except measured outcomes. In particular,
@@ -606,7 +645,7 @@ def seal(source, target, recipient, expected):
     exceptions = validate_files(contents, expected)
     public_fingerprint = fingerprint(recipient)
     manifest = {
-        "format": 1,
+        "format": 2 if expected["format"] == 3 else 1,
         "tool": "pyrage",
         "version": version("pyrage"),
         "recipient_sha256": public_fingerprint,
@@ -691,7 +730,9 @@ def _archive(plain, ident, expected):
         ),
     )
     if (
-        manifest["format"] != 1
+        type(manifest["format"]) is not int
+        or manifest["format"] not in {1, 2}
+        or (manifest["format"] == 2 and expected["format"] != 3)
         or manifest["tool"] != "pyrage"
         or manifest["version"] != "1.4.0"
         or manifest["private_scan"] != "not_run_in_ci"
@@ -704,7 +745,7 @@ def _archive(plain, ident, expected):
     }
     if manifest["files"] != expected_files:
         raise EvidenceError("file_digest_mismatch")
-    exceptions = validate_files(contents, expected)
+    exceptions = validate_files(contents, expected, report_format=manifest["format"])
     if exceptions != manifest["generic_exceptions"]:
         raise EvidenceError("scan_evidence_mismatch")
     return contents, manifest
