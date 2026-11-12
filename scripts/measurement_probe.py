@@ -182,7 +182,7 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
     return dict(
         mode=mode,
         scale=scale,
-        fixture_version="legal_memory_v1",
+        fixture_version=fixture.FIXTURE_VERSION,
         metrics=metrics,
         requests_completed=3,
         complete_backup=backup is not None,

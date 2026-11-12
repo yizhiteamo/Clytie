@@ -33,6 +33,7 @@ SCALES = {
 VERSION_MODES = ("legacy", "original", "candidate")
 LEDGER_TABLES = ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit")
 CONTENT_BYTES = 4096
+FIXTURE_VERSION = "legal_memory_v2"
 PROVIDER = """
 import asyncio
 from clytie.sdk import BackupTicket, BackupView
@@ -194,6 +195,12 @@ async def setup(directory, scale_name, version_mode, seed, *, tiny=False, produc
 
         def seed_database():
             with store.transaction():
+                # Construction only: _save deletes previous keyword postings by
+                # record_id. Its production index starts with token, otherwise
+                # seeding many fresh records repeatedly scans the growing table.
+                # Keep _save/transactions unchanged and remove this index before
+                # returning a usable fixture. All three versions use this adapter.
+                store.db.execute("CREATE INDEX measurement_seed_lookup ON keywords(record_id)")
                 store.set_meta("companion_uid", "a" * 32)
                 for index in range(rows):
                     store._save(
@@ -212,6 +219,10 @@ async def setup(directory, scale_name, version_mode, seed, *, tiny=False, produc
                         ),
                         operator="fixture",
                     )
+                store.db.execute("DROP INDEX measurement_seed_lookup")
+            # Fix the construction layout before any warmup or timed request;
+            # no auxiliary index or free-page cost is left in the measured input.
+            store.db.execute("VACUUM")
             store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         await run_sync(store, seed_database)
