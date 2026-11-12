@@ -1,7 +1,11 @@
+import asyncio
+import gc
 import json
 import os
 import sqlite3
 import threading
+import weakref
+from types import SimpleNamespace
 
 import pytest
 from tests.test_measurement_evidence import load_tool
@@ -187,3 +191,89 @@ async def test_owner_evidence_cannot_close_while_real_command_is_still_running(t
             await command.result()
         finally:
             await owner.close()
+
+
+async def test_completed_owner_commands_are_not_retained_for_the_observation_window(tmp_path):
+    from tests.test_storage_owner import create
+
+    owner, _ = await create(tmp_path)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    futures = []
+    try:
+        with observer.observe_owner(owner):
+            for identifier in range(128):
+                with observation.request_scope(identifier):
+                    command = owner.submit(lambda *_: None)
+                    futures.append(weakref.ref(command._future))
+                    await command.result()
+            del command
+            # The real owner may hold its latest command while waiting for work.
+            # A sentinel displaces it without closing the observation window.
+            await owner.execute(lambda *_: None)
+            loop = asyncio.get_running_loop()
+            callbacks_ran = loop.create_future()
+            loop.call_soon(callbacks_ran.set_result, None)
+            await callbacks_ran
+            gc.collect()
+            assert all(reference() is None for reference in futures)
+            assert len(rows(recorder)) == 2 * (128 + 1)
+    finally:
+        await owner.close()
+
+
+@pytest.mark.parametrize("outcome", ["ok", "cancelled", "failed"])
+async def test_exit_settles_done_future_before_its_callback_is_scheduled(tmp_path, outcome):
+    loop = asyncio.get_running_loop()
+
+    def submit(function, **kwargs):
+        future = loop.create_future()
+        if outcome == "cancelled":
+            future.cancel()
+        elif outcome == "failed":
+            future.set_exception(ValueError("fictional_failure"))
+        else:
+            future.set_result(None)
+        return SimpleNamespace(_future=future)
+
+    owner = SimpleNamespace(submit=submit)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    with observer.observe_owner(owner), observation.request_scope(17):
+        command = owner.submit(lambda *_: None)
+        assert command._future.done()
+        assert rows(recorder) == []
+    result = rows(recorder)
+    assert len(result) == 1
+    assert result[0]["request_id"] == 17
+    assert result[0]["phase"] == "queue"
+    assert result[0]["outcome"] == outcome
+    callbacks_ran = loop.create_future()
+    loop.call_soon(callbacks_ran.set_result, None)
+    await callbacks_ran
+    assert rows(recorder) == result
+
+
+async def test_invalidated_recorder_still_releases_completed_future_references(tmp_path):
+    loop = asyncio.get_running_loop()
+
+    def submit(function, **kwargs):
+        future = loop.create_future()
+        future.set_result(None)
+        return SimpleNamespace(_future=future)
+
+    owner = SimpleNamespace(submit=submit)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    with observer.observe_owner(owner):
+        command = owner.submit(lambda *_: None)
+        reference = weakref.ref(command._future)
+        recorder.failed = True
+        del command
+        callbacks_ran = loop.create_future()
+        loop.call_soon(callbacks_ran.set_result, None)
+        await callbacks_ran
+        gc.collect()
+        assert reference() is None
+        assert rows(recorder) == []
+    assert recorder.failed

@@ -96,7 +96,7 @@ class Observation:
     def observe_owner(self, owner):
         """Observe the real command boundary; do not replace queues or execution."""
         original = owner.submit
-        pending = []
+        pending = {}
 
         def submit(function, **kwargs):
             queued, request = self.now(), _request.get()
@@ -123,24 +123,29 @@ class Observation:
                 if recorded:
                     return
                 recorded = True
-                if self.recorder.failed:
-                    return
-                if entered:
-                    return
-                # A queued cancellation may never enter the function. Keep its
-                # queue residence instead of silently losing that slow sample.
-                error = None if future.cancelled() else future.exception()
-                outcome = (
-                    "cancelled"
-                    if future.cancelled() or getattr(error, "code", None) == "cancelled"
-                    else "failed"
-                    if error
-                    else "ok"
-                )
-                self.record(phase, queued, self.now(), outcome, request=request)
+                try:
+                    if self.recorder.failed:
+                        return
+                    if entered:
+                        return
+                    # A queued cancellation may never enter the function. Keep its
+                    # queue residence instead of silently losing that slow sample.
+                    error = None if future.cancelled() else future.exception()
+                    outcome = (
+                        "cancelled"
+                        if future.cancelled() or getattr(error, "code", None) == "cancelled"
+                        else "failed"
+                        if error
+                        else "ok"
+                    )
+                    self.record(phase, queued, self.now(), outcome, request=request)
+                finally:
+                    # Retain only unsettled commands, not every Future and callback
+                    # from the full window. Invalidated recordings also release them.
+                    pending.pop(future, None)
 
+            pending[command._future] = completed
             command._future.add_done_callback(completed)
-            pending.append((command._future, completed))
             return command
 
         with patch.object(owner, "submit", submit):
@@ -150,7 +155,7 @@ class Observation:
                 # An already-done Future can return before its scheduled callbacks
                 # run. Settle evidence synchronously; no artificial loop sleep or
                 # deadline extension. Pending execution cannot become a complete log.
-                for future, completed in pending:
+                for future, completed in tuple(pending.items()):
                     if not future.done():
                         self.recorder.failed = True
                         raise ValueError("measurement_owner_unsettled")
