@@ -94,3 +94,96 @@ def test_readonly_uri_keeps_readonly_policy(tmp_path):
                 db.execute("INSERT INTO fixture VALUES ('forbidden')")
         finally:
             db.close()
+
+
+async def test_storage_command_timing_keeps_request_context_on_owner_thread(tmp_path):
+    from tests.test_storage_owner import create
+
+    owner, _ = await create(tmp_path)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    try:
+        with observer.observe_owner(owner), observation.request_scope(7):
+            assert await owner.execute(lambda *_: 3) == 3
+        result = rows(recorder)
+        assert [r["phase"] for r in result] == ["queue", "execute"]
+        assert all(r["request_id"] == 7 and r["outcome"] == "ok" for r in result)
+    finally:
+        await owner.close()
+
+
+async def test_storage_queue_rejection_and_finalizer_are_not_dropped(tmp_path):
+    from tests.test_storage_owner import create
+
+    from clytie.storage.owner import StorageBusy
+
+    owner, _ = await create(tmp_path, ordinary=1)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    release = threading.Event()
+    token = owner.reserve_finalizer()
+    try:
+        with observer.observe_owner(owner), observation.request_scope(9):
+            first = owner.submit(lambda *_: release.wait(3))
+            with pytest.raises(StorageBusy):
+                owner.submit(lambda *_: None)
+            final = owner.submit(lambda *_: 4, finalizer=token)
+            release.set()
+            await first.result()
+            assert await final.result() == 4
+        result = rows(recorder)
+        assert any(r["phase"] == "queue" and r["outcome"] == "busy" for r in result)
+        assert any(r["phase"] == "finalizer" and r["outcome"] == "ok" for r in result)
+    finally:
+        release.set()
+        owner.release_finalizer(token, executor_finished=True, obligations_complete=True)
+        await owner.close()
+
+
+async def test_cancelled_queued_storage_command_has_a_row_without_executing(tmp_path):
+    from tests.test_storage_owner import create
+
+    from clytie.storage.owner import StorageCancelled
+
+    owner, _ = await create(tmp_path)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    release = threading.Event()
+    called = []
+    try:
+        with observer.observe_owner(owner):
+            first = owner.submit(lambda *_: release.wait(3))
+            with observation.request_scope(11):
+                cancelled = owner.submit(lambda *_: called.append(True))
+            assert cancelled.cancel()
+            release.set()
+            await first.result()
+            with pytest.raises(StorageCancelled):
+                await cancelled.result()
+        result = [row for row in rows(recorder) if row["request_id"] == 11]
+        assert not called
+        assert len(result) == 1 and result[0]["phase"] == "queue"
+        assert result[0]["outcome"] == "cancelled"
+    finally:
+        release.set()
+        await owner.close()
+
+
+async def test_owner_evidence_cannot_close_while_real_command_is_still_running(tmp_path):
+    from tests.test_storage_owner import create
+
+    owner, _ = await create(tmp_path)
+    recorder = recording.Recorder()
+    observer = observation.Observation(tmp_path, recorder, origin=0, timer=lambda: 1)
+    release = threading.Event()
+    try:
+        with pytest.raises(ValueError, match="owner_unsettled"):
+            with observer.observe_owner(owner):
+                command = owner.submit(lambda *_: release.wait(3))
+        assert recorder.failed
+    finally:
+        release.set()
+        try:
+            await command.result()
+        finally:
+            await owner.close()

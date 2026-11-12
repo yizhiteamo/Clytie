@@ -40,6 +40,10 @@ class Observation:
         return max(0, self.timer() - self.origin)
 
     def record(self, phase, start, finish, outcome, *, request=None):
+        # Once explicitly invalidated, no evidence can be sealed. Do not turn
+        # the cleanup of already accepted business into another observer error.
+        if self.recorder.failed:
+            return
         with self.guard:
             self.sequence += 1
             identifier = self.sequence
@@ -87,6 +91,70 @@ class Observation:
                 candidate.exists() and getattr(candidate.lstat(), "st_file_attributes", 0) & 0x400
             ):
                 raise ValueError("observation_database_link")
+
+    @contextmanager
+    def observe_owner(self, owner):
+        """Observe the real command boundary; do not replace queues or execution."""
+        original = owner.submit
+        pending = []
+
+        def submit(function, **kwargs):
+            queued, request = self.now(), _request.get()
+            entered = False
+            recorded = False
+            phase = "finalizer" if kwargs.get("finalizer") is not None else "queue"
+
+            def measured(resources, command):
+                nonlocal entered
+                entered = True
+                self.record(phase, queued, self.now(), "ok", request=request)
+                with request_scope(request):
+                    return self.call("execute", function, resources, command)
+
+            try:
+                command = original(measured, **kwargs)
+            except BaseException as exc:
+                outcome = "busy" if getattr(exc, "code", None) == "storage_busy" else "failed"
+                self.record(phase, queued, self.now(), outcome, request=request)
+                raise
+
+            def completed(future):
+                nonlocal recorded
+                if recorded:
+                    return
+                recorded = True
+                if self.recorder.failed:
+                    return
+                if entered:
+                    return
+                # A queued cancellation may never enter the function. Keep its
+                # queue residence instead of silently losing that slow sample.
+                error = None if future.cancelled() else future.exception()
+                outcome = (
+                    "cancelled"
+                    if future.cancelled() or getattr(error, "code", None) == "cancelled"
+                    else "failed"
+                    if error
+                    else "ok"
+                )
+                self.record(phase, queued, self.now(), outcome, request=request)
+
+            command._future.add_done_callback(completed)
+            pending.append((command._future, completed))
+            return command
+
+        with patch.object(owner, "submit", submit):
+            try:
+                yield
+            finally:
+                # An already-done Future can return before its scheduled callbacks
+                # run. Settle evidence synchronously; no artificial loop sleep or
+                # deadline extension. Pending execution cannot become a complete log.
+                for future, completed in pending:
+                    if not future.done():
+                        self.recorder.failed = True
+                        raise ValueError("measurement_owner_unsettled")
+                    completed(future)
 
     @contextmanager
     def install(self):
