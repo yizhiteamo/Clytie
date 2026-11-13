@@ -3,6 +3,13 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_preparation_generate": ("measurement_preparation_transport",),
+    "measurement_preparation_transport": (
+        "measurement_launch",
+        "measurement_preparation_evidence",
+        "measurement_transport",
+        "measurement_version",
+    ),
     "measurement_preparation_evidence": ("measurement_plan",),
     "measurement_cancel_validation": ("measurement_cancel", "measurement_sample_validation"),
     "measurement_observation": (
