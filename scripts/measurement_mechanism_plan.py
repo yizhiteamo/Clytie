@@ -92,7 +92,7 @@ def _check_materials(frozen, source_inventory, tools):
 
 
 def prepare_manifest(frozen, execution_id, *, source_inventory, tools, runtime, workflow):
-    """Pure plan-to-format-five conversion; no caller-supplied manifest accepted.
+    """Pure plan-to-format-six conversion; no caller-supplied manifest accepted.
 
     ``runtime`` is exactly {environment, python, sqlite}; its canonical digest
     must match the selected platform's frozen environment hash. Missing other
@@ -117,7 +117,7 @@ def prepare_manifest(frozen, execution_id, *, source_inventory, tools, runtime, 
     # claims of observations from this execution; result remains incomplete.
     metrics["backup_bytes"] = 0
     manifest = dict(
-        format=5,
+        format=6,
         source="generated_fictional_only",
         method="legal_storage_v1",
         candidate=expected["candidate"],
