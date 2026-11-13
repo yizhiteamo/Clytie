@@ -35,6 +35,7 @@ FILES = (
 )
 LEGACY_MAX_FILE = 64 * 1024 * 1024
 MAX_FILE = 256 * 1024 * 1024
+STORAGE_MAX_FILE = 1024**3
 MAX_TOTAL = len(FILES) * MAX_FILE + 1024 * 1024
 MAX_LINE = 16 * 1024
 IDENTITY_FIELDS = (
@@ -123,6 +124,17 @@ PARAMETERS = {
 
 class EvidenceError(ValueError):
     """Only fixed codes; never embed input text, paths or key material."""
+
+
+def file_limit(name, format_version=None):
+    """Transport may not know format yet; validation always checks it again."""
+    if name not in FILES and name != "archive-manifest.json":
+        raise EvidenceError("unexpected_file_set")
+    if format_version in {1, 2}:
+        return LEGACY_MAX_FILE
+    if name == "storage-phases.jsonl" and format_version in {None, 6}:
+        return STORAGE_MAX_FILE
+    return MAX_FILE
 
 
 def native_identity():
@@ -790,6 +802,8 @@ def validate_files(contents, expected, *, report_format=None):
     """
     if set(contents) != set(FILES):
         raise EvidenceError("unexpected_file_set")
+    if sum(len(raw) for raw in contents.values()) > MAX_TOTAL:
+        raise EvidenceError("archive_size_limit")
     try:
         scan = public_scanner()
         validate_run(expected)
@@ -839,10 +853,9 @@ def validate_files(contents, expected, *, report_format=None):
             or (run["format"] in {4, 5, 6} and report_format != 2)
         ):
             raise EvidenceError("unsupported_report_format")
-        file_limit = MAX_FILE if run["format"] in {3, 4, 5, 6} else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
-            if not raw or len(raw) > file_limit:
+            if not raw or len(raw) > file_limit(name, run["format"]):
                 raise EvidenceError("file_size_limit")
             if name == "run-manifest.json":
                 if any(scan(token) for token in _strings(run)):
@@ -987,16 +1000,21 @@ def _safe_path(path):
     return path
 
 
-def _read_sources(source):
+def _read_sources(source, *, format_version=None):
     source = _safe_path(source)
     if not source.is_dir() or {p.name for p in source.iterdir()} != set(FILES):
         raise EvidenceError("unexpected_file_set")
     contents = {}
+    total = 0
     for name in FILES:
         path = _safe_path(source / name)
         before = path.stat()
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_FILE:
+        limit = file_limit(name, format_version)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
             raise EvidenceError("invalid_source_file")
+        total += before.st_size
+        if total > MAX_TOTAL:
+            raise EvidenceError("archive_size_limit")
         with path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
             if (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size) != (
@@ -1006,7 +1024,7 @@ def _read_sources(source):
                 opened.st_size,
             ) or opened.st_nlink != 1:
                 raise EvidenceError("source_changed_or_linked")
-            raw = stream.read(MAX_FILE + 1)
+            raw = stream.read(limit + 1)
             after = os.fstat(stream.fileno())
         if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
             after.st_dev,
@@ -1046,7 +1064,7 @@ def seal(source, target, recipient, expected):
     target = _new_directory(target)
     if version("pyrage") != "1.4.0":
         raise EvidenceError("tool_version_mismatch")
-    contents = _read_sources(source)
+    contents = _read_sources(source, format_version=expected["format"])
     exceptions = validate_files(contents, expected)
     public_fingerprint = fingerprint(recipient)
     manifest = {
@@ -1067,6 +1085,8 @@ def seal(source, target, recipient, expected):
             for name, raw in contents.items():
                 archive.writestr(name, raw)
             archive.writestr("archive-manifest.json", json.dumps(manifest).encode())
+        if plain.tell() > MAX_TOTAL:
+            raise EvidenceError("archive_size_limit")
         plain.seek(0)
         with partial.open("xb") as output:
             pyrage.encrypt_io(plain, output, [recipient_type().from_str(recipient)])
@@ -1116,7 +1136,7 @@ def _archive(plain, ident, expected):
                 or entry.compress_type != zipfile.ZIP_STORED
                 or stat.S_IFMT(mode) not in {0, stat.S_IFREG}
                 or entry.flag_bits & 1
-                or entry.file_size > MAX_FILE
+                or entry.file_size > file_limit(entry.filename, expected["format"])
                 or entry.compress_size != entry.file_size
             ):
                 raise EvidenceError("invalid_archive_entry")

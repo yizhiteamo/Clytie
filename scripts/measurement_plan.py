@@ -203,7 +203,7 @@ def derive_window(geometry, profile):
     full-chain profile owns coverage of production stages; native internal bytes
     stay unknown. No initial burst discount is used. All timed estimates except
     backlog fall inside the business arrival window, including real exit. One
-    extra arrival puts the last scheduled request after the estimated finish.
+    extra arrival puts the last scheduled request no earlier than the estimate.
     """
     _fields(profile, ("basis", "phases", "reserves", "backup_start_seconds", "warmup_requests"))
     _basis(profile["basis"])

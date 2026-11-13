@@ -8,6 +8,7 @@ it is not durable archival until the authorized encryption/local verification fl
 import hashlib
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -24,8 +25,13 @@ class Recorder:
         ):
             raise evidence.EvidenceError("unsupported_format")
         self.format_version = format_version
-        self.limit = evidence.MAX_FILE if max_file_bytes is None else max_file_bytes
-        if type(self.limit) is not int or not 0 < self.limit <= evidence.MAX_FILE:
+        maximum = (
+            evidence.MAX_FILE
+            if format_version is None
+            else evidence.file_limit("storage-phases.jsonl", format_version)
+        )
+        self.limit = maximum if max_file_bytes is None else max_file_bytes
+        if type(self.limit) is not int or not 0 < self.limit <= maximum:
             raise evidence.EvidenceError("recording_invalid_limit")
         self.rows = {name: bytearray() for name in evidence.FILES[:-1]}
         self.lock = threading.Lock()
@@ -42,7 +48,12 @@ class Recorder:
                     raise evidence.EvidenceError("unknown_file")
                 evidence.validate_record(name, row, format_version=self.format_version)
                 raw = (json.dumps(row, separators=(",", ":"), allow_nan=False) + "\n").encode()
-                if len(raw) > evidence.MAX_LINE or len(self.rows[name]) + len(raw) > self.limit:
+                limit = min(self.limit, evidence.file_limit(name, self.format_version))
+                if (
+                    len(raw) > evidence.MAX_LINE
+                    or len(self.rows[name]) + len(raw) > limit
+                    or sum(map(len, self.rows.values())) + len(raw) > evidence.MAX_TOTAL
+                ):
                     raise evidence.EvidenceError("recording_capacity")
                 self.rows[name].extend(raw)
             except Exception:
@@ -90,9 +101,16 @@ class Recorder:
                     raise evidence.EvidenceError("unknown_file")
                 if type(raw) is not bytes or not raw or not raw.endswith(b"\n"):
                     raise evidence.EvidenceError("child_recording_incomplete")
-                if len(self.rows[name]) + len(raw) > self.limit:
+                limit = min(self.limit, evidence.file_limit(name, self.format_version))
+                if (
+                    len(self.rows[name]) + len(raw) > limit
+                    or sum(map(len, self.rows.values())) + len(raw) > evidence.MAX_TOTAL
+                ):
                     raise evidence.EvidenceError("recording_capacity")
-                for line in raw.splitlines(keepends=True):
+                # Preserve CR, LF and CRLF source bytes without materializing a
+                # second whole-stream list of per-row byte strings.
+                for match in re.finditer(rb"[^\r\n]*(?:\r\n|\r|\n)", raw):
+                    line = match.group()
                     if len(line) > evidence.MAX_LINE:
                         raise evidence.EvidenceError("line_size_limit")
                     evidence.validate_record(

@@ -44,12 +44,11 @@ def stat_identity(info):
 
 
 @contextmanager
-def safe_stream(path):
+def safe_stream(path, *, limit=None):
+    limit = evidence.MAX_FILE if limit is None else limit
     path = evidence._safe_path(path)
     before = path.stat()
-    require(
-        stat.S_ISREG(before.st_mode) and before.st_size <= evidence.MAX_FILE, "invalid_source_file"
-    )
+    require(stat.S_ISREG(before.st_mode) and before.st_size <= limit, "invalid_source_file")
     with path.open("rb") as stream:
         opened = os.fstat(stream.fileno())
         require(
@@ -66,16 +65,17 @@ def safe_stream(path):
         )
 
 
-def lines(path, digest):
+def lines(path, digest, *, limit=None):
+    limit = evidence.MAX_FILE if limit is None else limit
     total = 0
-    with safe_stream(path) as stream:
+    with safe_stream(path, limit=limit) as stream:
         while True:
             raw = stream.readline(evidence.MAX_LINE + 1)
             if not raw:
                 return
             digest.update(raw)
             total += len(raw)
-            require(total <= evidence.MAX_FILE, "file_limit")
+            require(total <= limit, "file_limit")
             require(len(raw) <= evidence.MAX_LINE, "line_limit")
             require(raw.strip(), "blank_line")
             yield decode(raw)
@@ -289,6 +289,10 @@ class Index:
             name: stat_identity(evidence._safe_path(self.source / name).stat())
             for name in evidence.FILES
         }
+        require(
+            sum(identity[2] for identity in original_stats.values()) <= evidence.MAX_TOTAL,
+            "archive_size_limit",
+        )
         target = analysis_target(self.source, target)
         target.mkdir(parents=True, exist_ok=False)
         self.db = sqlite3.connect(target / "analysis.sqlite")
@@ -319,7 +323,8 @@ class Index:
             if name == "run-manifest.json":
                 continue
             digest, count = hashlib.sha256(), 0
-            for count, row in enumerate(lines(self.source / name, digest), 1):
+            limit = evidence.file_limit(name, self.run["format"])
+            for count, row in enumerate(lines(self.source / name, digest, limit=limit), 1):
                 evidence.validate_record(name, row, format_version=6)
                 if name == "storage-phases.jsonl":
                     sequence = (row["id"] >> 40) - 1
