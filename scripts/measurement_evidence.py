@@ -1,7 +1,7 @@
 """A4.3 only: structured fictional evidence -> age -> local mandatory private scan.
 
 No uploader, model, instance lookup, environment dump or product encryption keys.
-Raw files are never rewritten. A failed run cannot yield an upload receipt.
+Raw files are never rewritten. Invalid archival data cannot yield an upload receipt.
 """
 
 from __future__ import annotations
@@ -689,6 +689,13 @@ def validate_files(contents, expected, *, report_format=None):
         native = NativeEvents() if run["format"] in {4, 5} and run["result"] == "pass" else None
         native_observed = False
         io_events = io_tools().IoEvents(run) if run["format"] == 5 else None
+        request_plan = None
+        if run["format"] == 5 and run["method"] == "legal_storage_v1" and run["result"] == "pass":
+            try:
+                from .measurement_sample_validation import RequestPlan
+            except ImportError:
+                from measurement_sample_validation import RequestPlan
+            request_plan = RequestPlan(run)
         process_exit_s = None
         business_start = business_finish = backup_finish = None
         if report_format is None:
@@ -713,6 +720,8 @@ def validate_files(contents, expected, *, report_format=None):
                 if name != "run-manifest.json":
                     row = _json(line)
                     validate_record(name, row, format_version=run["format"])
+                    if request_plan is not None and name == "requests.jsonl":
+                        request_plan.add(row)
                     if io_events is not None and name == "storage-phases.jsonl":
                         io_events.add(row)
                     if (
@@ -798,6 +807,8 @@ def validate_files(contents, expected, *, report_format=None):
                     )
                 ):
                     raise EvidenceError("native_business_window_uncovered")
+        if request_plan is not None:
+            request_plan.complete()
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
         # V2/V3 freeze every approved field except measured outcomes. In particular,
