@@ -26,6 +26,8 @@ TOOL_FILES = (
     "pyproject.toml",
     "uv.lock",
     "scripts/measurement_evidence.py",
+    "scripts/measurement_analysis_index.py",
+    "scripts/measurement_mechanism_validation.py",
     "scripts/measurement_cancel.py",
     "scripts/measurement_cancel_validation.py",
     "scripts/measurement_fixture.py",
