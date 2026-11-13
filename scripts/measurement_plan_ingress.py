@@ -13,15 +13,26 @@ import tarfile
 from decimal import Decimal
 from pathlib import Path
 
-from scripts import measurement_evidence as evidence
-from scripts import measurement_launch as launch
-from scripts import measurement_mechanism_plan as mechanism
-from scripts import measurement_plan as plan
-from scripts import measurement_preparation_evidence as prep
-from scripts import measurement_preparation_request as request_gate
-from scripts import measurement_preparation_transport as preparation
-from scripts import measurement_transport as base
-from scripts import measurement_version as versions
+if __package__:
+    from . import measurement_evidence as evidence
+    from . import measurement_launch as launch
+    from . import measurement_mechanism_plan as mechanism
+    from . import measurement_plan as plan
+    from . import measurement_preparation_evidence as prep
+    from . import measurement_preparation_request as request_gate
+    from . import measurement_preparation_transport as preparation
+    from . import measurement_transport as base
+    from . import measurement_version as versions
+else:
+    import measurement_evidence as evidence
+    import measurement_launch as launch
+    import measurement_mechanism_plan as mechanism
+    import measurement_plan as plan
+    import measurement_preparation_evidence as prep
+    import measurement_preparation_request as request_gate
+    import measurement_preparation_transport as preparation
+    import measurement_transport as base
+    import measurement_version as versions
 
 Error = evidence.EvidenceError
 PURPOSE = "non_sensitive_mechanism_plan"

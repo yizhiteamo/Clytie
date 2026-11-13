@@ -9,16 +9,28 @@ import stat
 import subprocess
 from pathlib import Path
 
-from scripts import measurement_evidence as evidence
-from scripts import measurement_launch as launch
-from scripts import measurement_mechanism_launch as runner
-from scripts import measurement_mechanism_plan as mechanism
-from scripts import measurement_plan as plan
-from scripts import measurement_plan_ingress as ingress
-from scripts import measurement_preparation_evidence as prep
-from scripts import measurement_preparation_transport as preparation
-from scripts import measurement_transport as transport
-from scripts import measurement_version as versions
+if __package__:
+    from . import measurement_evidence as evidence
+    from . import measurement_launch as launch
+    from . import measurement_mechanism_launch as runner
+    from . import measurement_mechanism_plan as mechanism
+    from . import measurement_plan as plan
+    from . import measurement_plan_ingress as ingress
+    from . import measurement_preparation_evidence as prep
+    from . import measurement_preparation_transport as preparation
+    from . import measurement_transport as transport
+    from . import measurement_version as versions
+else:
+    import measurement_evidence as evidence
+    import measurement_launch as launch
+    import measurement_mechanism_launch as runner
+    import measurement_mechanism_plan as mechanism
+    import measurement_plan as plan
+    import measurement_plan_ingress as ingress
+    import measurement_preparation_evidence as prep
+    import measurement_preparation_transport as preparation
+    import measurement_transport as transport
+    import measurement_version as versions
 
 ROOT = transport.ROOT
 Error = evidence.EvidenceError
