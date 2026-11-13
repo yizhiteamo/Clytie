@@ -37,6 +37,9 @@ def test_disk_backed_existing_semantics(tmp_path):
     assert pressure["native_internal_read_bytes"] is None
     assert pressure["requirements"]["pressure_owner_identity"]["status"] == "unverified"
     assert pressure["requirements"]["token_16_4_mibps_512kib_model"]["status"] == "unverified"
+    batches = result["batch_reservations"]
+    assert batches["mechanism_acceptance"] == "not_evaluated"
+    assert all(item["status"] == "unverified" for item in batches["requirements"].values())
 
 
 @pytest.mark.parametrize(

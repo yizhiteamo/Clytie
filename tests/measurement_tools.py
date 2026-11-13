@@ -8,6 +8,7 @@ DEPENDENCIES = {
         "measurement_preparation_generate",
     ),
     "measurement_budget_observation": ("measurement_io_observation",),
+    "measurement_batch_observation": ("measurement_io_observation",),
     "measurement_preparation_request": ("measurement_preparation_transport",),
     "measurement_analysis_index": (
         "measurement_evidence",
@@ -17,6 +18,7 @@ DEPENDENCIES = {
         "measurement_pressure_observation",
     ),
     "measurement_mechanism_validation": (
+        "measurement_batch_validation",
         "measurement_pressure_validation",
         "measurement_analysis_index",
         "measurement_sample_validation",
@@ -33,6 +35,7 @@ DEPENDENCIES = {
     "measurement_preparation_evidence": ("measurement_plan",),
     "measurement_cancel_validation": ("measurement_cancel", "measurement_sample_validation"),
     "measurement_observation": (
+        "measurement_batch_observation",
         "measurement_budget_observation",
         "measurement_control_observation",
         "measurement_io_observation",
