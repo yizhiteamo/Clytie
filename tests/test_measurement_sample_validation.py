@@ -96,6 +96,39 @@ def test_backlog_is_retained_without_retiming_arrivals():
     check(run, rows)
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "unplanned",
+        "duplicate_start",
+        "missing_start",
+        "duplicate_exit",
+        "early_exit",
+        "still_alive",
+    ],
+)
+def test_process_exit_must_bind_frozen_child_with_acquisition(damage):
+    events = samples.ProcessExits(dict(observer_sequences=[0, 1]))
+    start = dict(id=1, resource="process", event="acquired", at_s=1)
+    end = dict(id=1, resource="process", event="exit_verified", at_s=2)
+    with pytest.raises(samples.SampleError):
+        if damage == "unplanned":
+            events.add({**start, "id": 2})
+        elif damage == "missing_start":
+            events.add(end)
+        else:
+            events.add(start)
+            if damage == "duplicate_start":
+                events.add(start)
+            elif damage == "early_exit":
+                events.add({**end, "at_s": 0})
+            elif damage == "duplicate_exit":
+                events.add(end)
+                events.add(end)
+            else:
+                events.complete()
+
+
 def test_formal_archive_pass_requires_complete_plan_through_real_validator(tmp_path):
     from tests.test_measurement_io_observation import observer_for, run_v5
     from tests.test_measurement_manifest import contents, save_manifest

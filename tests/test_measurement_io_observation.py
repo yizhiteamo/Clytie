@@ -641,9 +641,12 @@ def test_other_child_exit_cannot_confirm_format5_legacy_unknown_close(tmp_path, 
         )
         encoded.extend((json.dumps(row) + "\n").encode())
     (source / "storage-phases.jsonl").write_bytes(encoded)
-    # Existing release rows cannot bind this observed exit to a particular child.
+    # Only child two exits; the native connection belongs to child one.
     (source / "release-events.jsonl").write_text(
-        json.dumps(dict(id=1, at_s=2, resource="process", event="exit_verified")) + "\n",
+        "".join(
+            json.dumps(dict(id=2, at_s=at, resource="process", event=event)) + "\n"
+            for at, event in ((0, "acquired"), (2, "exit_verified"))
+        ),
         encoding="utf-8",
     )
     if version == 4:
@@ -651,6 +654,12 @@ def test_other_child_exit_cannot_confirm_format5_legacy_unknown_close(tmp_path, 
     else:
         with pytest.raises(evidence.EvidenceError, match="native_release_unconfirmed"):
             evidence.validate_files(contents(source), run)
+        with (source / "release-events.jsonl").open("a", encoding="utf-8") as stream:
+            for at, event in ((0, "acquired"), (2, "exit_verified")):
+                stream.write(
+                    json.dumps(dict(id=1, at_s=at, resource="process", event=event)) + "\n"
+                )
+        evidence.validate_files(contents(source), run)
         run["result"] = "incomplete"
         save_manifest(source, run)
         evidence.validate_files(contents(source), run)

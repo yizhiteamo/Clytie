@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 from tests.measurement_tools import load
 
 evidence = load("measurement_evidence")
@@ -26,7 +27,8 @@ def test_explicit_tool_inventory_contains_every_runtime_adapter_and_scanner():
     assert len(inventory["files"]) == len(launch.TOOL_FILES)
 
 
-def test_real_fresh_process_four_arms_preserve_samples_and_production_identity():
+@pytest.mark.parametrize("format_version", [4, 5])
+def test_real_fresh_process_four_arms_preserve_samples_and_production_identity(format_version):
     parent = Path(tempfile.mkdtemp(prefix="cl-")).resolve()
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
     values = []
@@ -51,6 +53,8 @@ def test_real_fresh_process_four_arms_preserve_samples_and_production_identity()
                 arm,
                 "--scale",
                 "small_text",
+                "--observation-format",
+                str(format_version),
             ],
             cwd=version / "source",
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"},
@@ -66,6 +70,7 @@ def test_real_fresh_process_four_arms_preserve_samples_and_production_identity()
         contents = {name: (output / "raw" / name).read_bytes() for name in evidence.FILES}
         evidence.validate_files(contents, expected)
         actual = json.loads(contents["run-manifest.json"])
+        assert actual["format"] == format_version
         assert actual["source_commit"] == inventory["source_commit"]
         assert actual["candidate"] == candidate
         assert actual["tool_sha256"] == launch.tool_inventory()["sha256"]
@@ -95,6 +100,23 @@ def test_real_fresh_process_four_arms_preserve_samples_and_production_identity()
         # A tiny functional fixture may exceed its preset observation window;
         # retain that failure rather than asserting CI throughput or retiming it.
         assert actual["result"] in {"pass", "fail"}
+        if format_version == 5:
+            phases = [json.loads(row) for row in contents["storage-phases.jsonl"].splitlines()]
+            io_events = evidence.io_tools().IoEvents({**actual, "result": "pass"})
+            native = evidence.NativeEvents()
+            samples = load("measurement_sample_validation")
+            exits = samples.ProcessExits(actual)
+            for row in contents["release-events.jsonl"].splitlines():
+                exits.add(json.loads(row))
+            exits.complete()
+            for row in phases:
+                io_events.add(row)
+                if row["phase"] == "native_validation":
+                    native.add(row)
+            io_events.complete()
+            native.complete(process_exits=exits.exited)
+            assert not native.failed
+            assert set(exits.exited) == set(actual["observer_sequences"]) - {0}
         values.append(actual["metrics"]["logical"])
         versions.verify(version)
     assert all(value == values[0] for value in values)
