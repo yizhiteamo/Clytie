@@ -854,7 +854,8 @@
         "message",
         "source_stopped",
         "key",
-        "space_estimates"
+        "space_estimates",
+        "heavy_io"
       ],
       "properties": {
         "storage_categories": {
@@ -1015,6 +1016,9 @@
         },
         "space_estimates": {
           "$ref": "#/$defs/space_estimates"
+        },
+        "heavy_io": {
+          "$ref": "#/$defs/heavy_io"
         }
       }
     },
@@ -1595,6 +1599,116 @@
           }
         }
       ]
+    },
+    "heavy_io": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "blockers",
+        "executions",
+        "observed_at"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "pending",
+            "ready",
+            "blocked"
+          ]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "role",
+              "reason",
+              "check"
+            ],
+            "properties": {
+              "operation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "operation",
+                      "recovery",
+                      "capture",
+                      "startup_recovery"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "executor_active",
+                  "executor_unverified",
+                  "journal_unverified",
+                  "journal_executor_changed",
+                  "coordination_busy",
+                  "responsibility_evidence_unverified"
+                ]
+              },
+              "check": {
+                "enum": [
+                  "verify_executor_identity",
+                  "inspect_responsibility_evidence"
+                ]
+              }
+            }
+          }
+        },
+        "executions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "role",
+              "state",
+              "data_recovery"
+            ],
+            "properties": {
+              "operation": {
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "operation",
+                  "recovery",
+                  "capture",
+                  "startup_recovery"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "reserved",
+                  "active",
+                  "ended"
+                ]
+              },
+              "data_recovery": {
+                "const": "not_checked"
+              }
+            }
+          }
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
     }
   },
   "$ref": "#/$defs/operation"
