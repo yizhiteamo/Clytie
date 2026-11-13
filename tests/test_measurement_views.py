@@ -52,3 +52,31 @@ async def test_real_view_and_thread_release_are_recorded_after_actual_completion
         assert all(not worker.thread.is_alive() for worker in observer.workers)
     finally:
         source.close()
+
+
+async def test_failed_recorder_does_not_interrupt_real_snapshot_release(tmp_path):
+    path = tmp_path / "fictional.db"
+    source = sqlite3.connect(path)
+    source.execute("PRAGMA journal_mode=WAL")
+    source.execute("CREATE TABLE fixture(value)")
+    source.commit()
+    recorder = views.Recorder()
+    observer = views.Views(recorder, now=lambda: 0)
+    try:
+        with observer.install():
+            group = await capture_group(
+                {"memory": path},
+                CaptureCoordinator(tmp_path / "capture.lock", MockClock()),
+                epoch="fictional",
+            )
+            recorder.failed = True
+            await group.close()
+            observer.verify_released()
+            assert not group._worker.thread.is_alive()
+            assert observer.pending == 0
+            assert recorder.failed
+            with pytest.raises(ValueError, match="recording_invalid"):
+                recorder.finish(tmp_path / "must_not_publish", {})
+            assert not (tmp_path / "must_not_publish").exists()
+    finally:
+        source.close()

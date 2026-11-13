@@ -56,6 +56,8 @@ DEPENDENCIES = {
     ),
     "measurement_launch": (
         "measurement_version",
+        "measurement_batch_observation",
+        "measurement_budget_observation",
         "measurement_control_observation",
         "measurement_io_observation",
         "measurement_pressure_observation",

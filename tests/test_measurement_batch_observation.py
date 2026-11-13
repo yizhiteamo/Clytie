@@ -345,6 +345,16 @@ class Tests(unittest.IsolatedAsyncioTestCase):
                     format_version=version,
                 )
 
+    def test_historical_sqlite_without_budget_module_remains_unbound(self):
+        self.io.client = None
+        assert self.batch.scope()["scope_state"] == "unbound"
+        self.batch.safe(lambda: self.batch.sqlite_link((1 << 40) + 500, (1 << 40) + 501))
+        assert not self.recorder.failed
+        link = self.recorder.rows[-1]
+        assert link["scope_state"] == "unbound"
+        assert link["read_charge_id"] is None
+        assert link["write_charge_id"] is None
+
     async def test_sqlite_cancel_after_first_step_keeps_observed_partial_progress(self):
         checks = 0
 
