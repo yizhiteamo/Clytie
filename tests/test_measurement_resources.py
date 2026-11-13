@@ -48,3 +48,54 @@ def test_tree_sample_handles_only_removed_directory(tmp_path, monkeypatch, error
             resources.file_bytes(tmp_path, suffix="-wal")
     else:
         assert resources.file_bytes(tmp_path, suffix="-wal") == len(b"fictional")
+
+
+@pytest.mark.parametrize("removed", [True, False])
+def test_tree_sample_rechecks_denied_path_without_hiding_permissions(
+    tmp_path, monkeypatch, removed
+):
+    import errno
+
+    moving = tmp_path / "moving"
+    moving.mkdir()
+    (tmp_path / "source-wal").write_bytes(b"fictional")
+    original = resources.os.scandir
+
+    def scan(path):
+        if resources.Path(path) == moving:
+            if removed:
+                moving.rmdir()  # precisely this empty fictional directory
+            raise PermissionError(errno.EACCES, "fictional traversal race", str(moving))
+        return original(path)
+
+    monkeypatch.setattr(resources.os, "scandir", scan)
+    if removed:
+        assert resources.file_bytes(tmp_path, suffix="-wal") == len(b"fictional")
+    else:
+        with pytest.raises(PermissionError):
+            resources.file_bytes(tmp_path, suffix="-wal")
+
+
+def test_tree_sample_denied_path_with_unknown_identity_stays_failure(tmp_path, monkeypatch):
+    import errno
+
+    original = resources.os.scandir
+    moving = tmp_path / "moving"
+    moving.mkdir()
+
+    def scan(path):
+        if resources.Path(path) == moving:
+            raise PermissionError(errno.EACCES, "fictional", str(moving))
+        return original(path)
+
+    original_stat = resources.Path.lstat
+
+    def denied(path, *args, **kwargs):
+        if path == moving:
+            raise PermissionError("fictional inaccessible path")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(resources.os, "scandir", scan)
+    monkeypatch.setattr(resources.Path, "lstat", denied)
+    with pytest.raises(PermissionError):
+        resources.file_bytes(tmp_path)
