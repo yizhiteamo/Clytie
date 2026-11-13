@@ -27,11 +27,17 @@ class Io:
     def __init__(self):
         self.sequence = 1 << 40
         self.rows = []
+        self.budgets = {}
         self.observer = SimpleNamespace(recorder=SimpleNamespace(failed=False), now=lambda: 1.0)
 
     def identifier(self):
         self.sequence += 1
         return self.sequence
+
+    def budget_identifier(self, budget):
+        if budget not in self.budgets:
+            self.budgets[budget] = self.identifier()
+        return self.budgets[budget]
 
     def stage(self):
         return "a" * 64
@@ -443,6 +449,7 @@ async def test_real_snapshot_copy_wal_binding_and_actual_thread_release(
 async def test_real_owner_control_budget_preserves_pressure_and_exits_thread(tmp_path):
     import threading
 
+    from clytie.backup.io_budget import StageKey
     from clytie.sdk.testing import MockClock
     from clytie.storage.owner import StorageOwner
 
@@ -480,6 +487,8 @@ async def test_real_owner_control_budget_preserves_pressure_and_exits_thread(tmp
             assert sample["ready_wait_seconds"] == pytest.approx(0.025)
             assert sample["finalizer_wait_seconds"] == pytest.approx(0.025)
             assert control.budget._normal is False
+            stage = await control.budget.acquire(StageKey("fictional", "operation", "a" * 32))
+            control.budget.release(stage)
             release.set()
             await active.result()
             await waiting.result()
@@ -500,6 +509,10 @@ async def test_real_owner_control_budget_preserves_pressure_and_exits_thread(tmp
     assert budgets[0]["waiting_s"] == sample["ready_wait_seconds"]
     assert budgets[0]["finalizer_wait"] is True
     assert budgets[0]["accepted"] is True
+    slots = recorded(recorder, phase="io_slot")
+    assert [row["event"] for row in slots] == ["granted", "released"]
+    assert {row["budget_id"] for row in slots} == {budgets[0]["pressure_budget_id"]}
+    assert all(row["pressure_budget_id"] == slots[0]["budget_id"] for row in controls)
     assert not recorder.failed
 
 
