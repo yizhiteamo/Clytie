@@ -424,7 +424,7 @@ class PressureObservation:
         self.modes[budget] = state
         self.event(
             "budget_mode",
-            pressure_budget_id=self.identifier(budget),
+            pressure_budget_id=self.io.budget_identifier(budget),
             updated_monotonic_s=budget._updated,
             normal=budget._normal,
             low_since_monotonic_s=budget._low_since,
@@ -554,7 +554,7 @@ class PressureObservation:
                     value = raw_sample(sample)
                     self.event(
                         "control_pressure",
-                        pressure_budget_id=self.identifier(control.budget),
+                        pressure_budget_id=self.io.budget_identifier(control.budget),
                         owner_hash=hashlib.sha256(session.encode()).hexdigest(),
                         receipt_id=receipt,
                         event=event,
@@ -598,7 +598,7 @@ class PressureObservation:
                         signal = budget._signals.get(owner)
                         self.event(
                             "budget_pressure",
-                            pressure_budget_id=self.identifier(budget),
+                            pressure_budget_id=self.io.budget_identifier(budget),
                             owner_hash=hashlib.sha256(owner.encode()).hexdigest(),
                             receipt_id=_receipt.get(),
                             waiting_s=waiting,

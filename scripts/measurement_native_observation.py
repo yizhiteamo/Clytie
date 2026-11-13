@@ -2,14 +2,17 @@
 
 import asyncio
 import functools
+import hashlib
 import importlib
 import sys
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from unittest.mock import patch
 
 _validation = ContextVar("measurement_native_validation", default=None)
 _stage = ContextVar("measurement_native_stage", default=None)
+_cleanup_source = ContextVar("measurement_native_cleanup_source", default="unknown")
 
 
 def _is_cancelled(error):
@@ -89,6 +92,65 @@ class NativeObservation:
 
         return Cursor()
 
+    def scope_snapshot(self):
+        """Observe context, never infer an exemption from an absent client/stage."""
+        io = self.observer.io
+        module = io.client if io is not None else None
+        held = module._stage.get() if module is not None else None
+        client = module.current_client() if module is not None else None
+        return dict(
+            stage_id=hashlib.sha256(held["id"].encode()).hexdigest() if held else None,
+            io_scope_state=(
+                "unbound"
+                if held is None
+                else "disabled"
+                if client is None
+                else "active"
+                if client is held["client"]
+                else "mismatch"
+            ),
+            stage_thread_matches=(held["thread"] == threading.get_ident()) if held else None,
+            # A witnessed call source is NOT proof that every nested I/O is exempt.
+            cleanup_source=_cleanup_source.get(),
+        )
+
+    def install_cleanup_sources(self, stack):
+        """Exact production entries; no product arguments or policy are replaced."""
+        slot_module = importlib.import_module("clytie.backup.operation_slot")
+        restore_module = importlib.import_module("clytie.backup.restore")
+        worker_module = importlib.import_module("clytie.backup.worker")
+        original_borrow = slot_module.OperationSlot.borrow
+
+        @contextmanager
+        def borrow(slot, binding, *, cleanup=False):
+            with original_borrow(slot, binding, cleanup=cleanup):
+                token = _cleanup_source.set("management_cleanup_borrow") if cleanup else None
+                try:
+                    yield
+                finally:
+                    if token is not None:
+                        _cleanup_source.reset(token)
+
+        stack.enter_context(patch.object(slot_module.OperationSlot, "borrow", borrow))
+        for owner, name, label in (
+            (restore_module.RestoreManager, "_finish_committed", "restore_finish_committed"),
+            (worker_module, "verify_previous", "backup_verify_previous"),
+        ):
+            original = getattr(owner, name)
+
+            def wrap(function, source):
+                @functools.wraps(function)
+                def observed(*args, **kwargs):
+                    token = _cleanup_source.set(source)
+                    try:
+                        return function(*args, **kwargs)
+                    finally:
+                        _cleanup_source.reset(token)
+
+                return observed
+
+            stack.enter_context(patch.object(owner, name, wrap(original, label)))
+
     def event(self, state, event, *, connection=0, outcome=None, at=None):
         observer = self.observer
         if observer.recorder.failed:
@@ -109,6 +171,7 @@ class NativeObservation:
                 outcome=state["outcome"] if outcome is None else outcome,
                 internal_read_bytes=None,
                 boundary=state["boundary"],
+                **state.get("io_context", {}),
             ),
         )
 
@@ -129,6 +192,8 @@ class NativeObservation:
             stage_ended=False,
             finished=False,
         )
+        if self.observer.recorder.format_version == 6:
+            state["io_context"] = self.scope_snapshot()
         self.pending[identifier] = state
         if state["stage"] is not None:
             state["stage"].append(state)
@@ -223,6 +288,8 @@ class NativeObservation:
                 raise
             helper = None
         replacements = []
+        if helper is not None and self.observer.recorder.format_version == 6:
+            self.install_cleanup_sources(stack)
         if helper is not None:
             original_checks, original_stage = helper.native_checks, helper.validation_stage
 

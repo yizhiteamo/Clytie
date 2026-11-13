@@ -473,7 +473,7 @@ def validate_record(name, row, *, format_version=None):
     ):
         if format_version not in {None, 4, 5, 6}:
             raise EvidenceError("unsupported_native_event")
-        _validate_native_event(row)
+        _validate_native_event(row, format_version=format_version)
         return
     if name == "requests.jsonl":
         _fields(row, ("id", "kind", "scheduled_s", "started_s", "finished_s", "outcome"))
@@ -562,8 +562,39 @@ NATIVE_EVENTS = {
 }
 
 
-def _validate_native_event(row):
-    _fields(row, NATIVE_FIELDS)
+NATIVE_CONTEXT_FIELDS = ("stage_id", "io_scope_state", "stage_thread_matches", "cleanup_source")
+
+
+def _validate_native_event(row, *, format_version=None):
+    # Earlier v6 archives have no context extension. Keep their exact shape
+    # readable; absence is unknown evidence, never proof of a controlled stage.
+    context_present = any(field in row for field in NATIVE_CONTEXT_FIELDS)
+    if context_present and format_version != 6:
+        raise EvidenceError("unsupported_native_context")
+    _fields(row, NATIVE_FIELDS + NATIVE_CONTEXT_FIELDS if context_present else NATIVE_FIELDS)
+    if context_present:
+        if row["stage_id"] is not None:
+            _pattern(row["stage_id"], r"[a-f0-9]{64}")
+        _enum(row["io_scope_state"], {"active", "disabled", "unbound", "mismatch"})
+        _enum(
+            row["cleanup_source"],
+            {
+                "unknown",
+                "management_cleanup_borrow",
+                "restore_finish_committed",
+                "backup_verify_previous",
+            },
+        )
+        if (
+            row["stage_thread_matches"] is not None
+            and type(row["stage_thread_matches"]) is not bool
+        ):
+            raise EvidenceError("native_thread_context_invalid")
+        if row["stage_id"] is None:
+            if row["io_scope_state"] != "unbound" or row["stage_thread_matches"] is not None:
+                raise EvidenceError("native_stage_context_invalid")
+        elif row["io_scope_state"] == "unbound" or row["stage_thread_matches"] is None:
+            raise EvidenceError("native_stage_context_invalid")
     _enum(row["phase"], {"native_validation"})
     _enum(row["event"], NATIVE_EVENTS)
     _enum(row["boundary"], {"native_checks", "legacy_validation"})
@@ -609,6 +640,7 @@ class NativeEvents:
                 unknown=set(),
                 boundary=row["boundary"],
                 request=row["request_id"],
+                io_context=tuple(row.get(field) for field in NATIVE_CONTEXT_FIELDS),
             )
             return
         state = self.active.get(identifier)
@@ -616,6 +648,7 @@ class NativeEvents:
             state is None
             or at < state["last"]
             or (row["boundary"], row["request_id"]) != (state["boundary"], state["request"])
+            or tuple(row.get(field) for field in NATIVE_CONTEXT_FIELDS) != state["io_context"]
         ):
             raise EvidenceError("native_event_sequence_invalid")
         state["last"] = at

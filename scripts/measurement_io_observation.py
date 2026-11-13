@@ -389,6 +389,17 @@ class IoObservation:
         finally:
             self.event("sqlite_batch", **fields, **empty, event="finished", outcome=_outcome(error))
 
+    def budget_identifier(self, budget):
+        # Pressure may be observed before the first grant. Both streams bind to
+        # this exact object; no timestamp matching or alternate ID namespace.
+        state = self.budgets.get(budget)
+        if state is None:
+            if budget._active is not None:
+                self.observer.recorder.failed = True
+            state = {"id": self.identifier(), "active": None}
+            self.budgets[budget] = state
+        return state["id"]
+
     def sync_budget(self, budget):
         state = self.budgets.get(budget)
         if state is None:
@@ -438,10 +449,7 @@ class IoObservation:
             original_grant, original_finish, original_charge = cls._grant, cls._finish, cls._charge
 
             def grant(budget):
-                if budget not in self.budgets:
-                    if budget._active is not None:
-                        self.observer.recorder.failed = True
-                    self.budgets[budget] = {"id": self.identifier(), "active": None}
+                self.budget_identifier(budget)
                 result = original_grant(budget)
                 self.sync_budget(budget)
                 return result
