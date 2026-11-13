@@ -620,16 +620,19 @@ class NativeEvents:
                 raise EvidenceError("native_release_unconfirmed")
             self.active.pop(identifier)
 
-    def complete(self, *, process_exit_s=None):
+    def complete(self, *, process_exit_s=None, process_exits=None):
         for identifier, state in self.active.items():
+            exit_at = process_exit_s
+            if process_exits is not None:
+                exit_at = process_exits.get((identifier >> 40) - 1)
             if (
                 state["boundary"] != "legacy_validation"
                 or state["end"] is None
                 or state["attached"] != state["closed"] | state["unknown"]
                 or not state["unknown"]
                 or identifier < 1 << 40
-                or process_exit_s is None
-                or process_exit_s < state["last"]
+                or exit_at is None
+                or exit_at < state["last"]
             ):
                 raise EvidenceError("native_release_unconfirmed")
 
@@ -689,6 +692,13 @@ def validate_files(contents, expected, *, report_format=None):
         native = NativeEvents() if run["format"] in {4, 5} and run["result"] == "pass" else None
         native_observed = False
         io_events = io_tools().IoEvents(run) if run["format"] == 5 else None
+        child_exits = None
+        if run["format"] == 5 and run["result"] == "pass":
+            try:
+                from .measurement_sample_validation import ProcessExits
+            except ImportError:
+                from measurement_sample_validation import ProcessExits
+            child_exits = ProcessExits(run)
         request_plan = None
         if run["format"] == 5 and run["method"] == "legal_storage_v1" and run["result"] == "pass":
             try:
@@ -722,6 +732,8 @@ def validate_files(contents, expected, *, report_format=None):
                     validate_record(name, row, format_version=run["format"])
                     if request_plan is not None and name == "requests.jsonl":
                         request_plan.add(row)
+                    if child_exits is not None and name == "release-events.jsonl":
+                        child_exits.add(row)
                     if io_events is not None and name == "storage-phases.jsonl":
                         io_events.add(row)
                     if (
@@ -786,9 +798,12 @@ def validate_files(contents, expected, *, report_format=None):
                 and not native_observed
             ):
                 raise EvidenceError("native_validation_missing")
-            # V5 has disjoint child namespaces. A historical unbound process
-            # exit cannot confirm which child's legacy connections were closed.
-            native.complete(process_exit_s=None if run["format"] == 5 else process_exit_s)
+            # V5 binds each wait to its frozen child ordinal. Another child's
+            # exit cannot confirm this child's legacy connection teardown.
+            native.complete(
+                process_exit_s=process_exit_s,
+                process_exits=child_exits.exited if child_exits is not None else None,
+            )
             if run["result"] == "pass" and native.failed:
                 raise EvidenceError("native_failure_with_success")
             if (
@@ -809,6 +824,8 @@ def validate_files(contents, expected, *, report_format=None):
                     raise EvidenceError("native_business_window_uncovered")
         if request_plan is not None:
             request_plan.complete()
+        if child_exits is not None:
+            child_exits.complete()
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
         # V2/V3 freeze every approved field except measured outcomes. In particular,

@@ -135,6 +135,11 @@ class IoEvents:
         self.seen.add(row["id"])
         phase = row["phase"]
         if phase not in evidence.IO_PHASES:
+            if phase == "native_validation":
+                for name in ("validation_id", "connection_id"):
+                    value = row[name]
+                    if value and (value >> 40) - 1 != sequence:
+                        raise evidence.EvidenceError("io_namespace_invalid")
             return
         if row["process_sequence"] != sequence:
             raise evidence.EvidenceError("io_namespace_invalid")

@@ -7,6 +7,37 @@ class SampleError(ValueError):
     pass
 
 
+class ProcessExits:
+    """Frozen child ordinals; only an observed wait can emit exit_verified."""
+
+    def __init__(self, run):
+        self.expected = set(run["observer_sequences"]) - {0}
+        self.acquired, self.exited = {}, {}
+
+    def add(self, row):
+        if row["resource"] != "process":
+            return
+        identifier = row["id"]
+        if identifier not in self.expected:
+            raise SampleError("measurement_process_not_planned")
+        if row["event"] == "acquired":
+            if identifier in self.acquired:
+                raise SampleError("measurement_process_duplicated")
+            self.acquired[identifier] = row["at_s"]
+        elif row["event"] == "exit_verified":
+            if (
+                identifier not in self.acquired
+                or identifier in self.exited
+                or row["at_s"] < self.acquired[identifier]
+            ):
+                raise SampleError("measurement_process_exit_unbound")
+            self.exited[identifier] = row["at_s"]
+
+    def complete(self):
+        if set(self.exited) != self.expected:
+            raise SampleError("measurement_process_exit_missing")
+
+
 class RequestPlan:
     def __init__(self, run):
         self.load, self.arm = run["load"], run["arm"]

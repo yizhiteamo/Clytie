@@ -171,7 +171,7 @@ async def run(directory, run, product_root, tiny=False):
     evidence.validate_run(run)
     if (
         tiny is not True
-        or run["format"] != 4
+        or run["format"] not in {4, 5}
         or run["phase"] != "fixture"
         or run["method"] != "legal_fixture_comparison_v1"
     ):
@@ -196,7 +196,12 @@ async def run(directory, run, product_root, tiny=False):
         raise ValueError("measurement_destination_exists")
     root.parent.mkdir(parents=True, exist_ok=True)
     recorder, origin = Recorder(format_version=run["format"]), perf_counter()
-    observation = Observation(root.parent, recorder, origin=origin)
+    observation = Observation(
+        root.parent,
+        recorder,
+        origin=origin,
+        process_sequence=0 if run["format"] == 5 else None,
+    )
     mode, backup_enabled = MODES[run["arm"]], run["arm"] in {"original", "candidate"}
     views = Views(recorder, now=observation.now) if mode != "legacy" else None
     owner = workers = control = session = sampling = deadline = None
@@ -251,6 +256,17 @@ async def run(directory, run, product_root, tiny=False):
                 json.dumps(dict(format=1, source="generated_fictional_only")),
                 encoding="utf-8",
             )
+            if run["format"] == 5:
+                (root / "measurement-observers.json").write_text(
+                    json.dumps(
+                        dict(
+                            format=1,
+                            execution_id=run["execution_id"],
+                            observer_sequences=run["observer_sequences"],
+                        )
+                    ),
+                    encoding="utf-8",
+                )
             if owner.storage_owner is not None:
                 instruments.enter_context(observation.observe_owner(owner.storage_owner))
                 release(1, "thread", "acquired")
@@ -315,6 +331,12 @@ async def run(directory, run, product_root, tiny=False):
                         or Path(args[3]).resolve() != owner.home.resolve()
                     ):
                         raise ValueError("measurement_unexpected_child")
+                    child_number = len(processes) + 1
+                    extra = ()
+                    if run["format"] == 5:
+                        if child_number not in run["observer_sequences"]:
+                            raise ValueError("measurement_unplanned_child")
+                        extra = (str(child_number), run["execution_id"])
                     child = await native_spawn(
                         args[0],
                         str(wrapper),
@@ -322,10 +344,10 @@ async def run(directory, run, product_root, tiny=False):
                         args[4],
                         str(origin),
                         str(run["format"]),
+                        *extra,
                         **kwargs,
                     )
                     processes.append(child)
-                    child_number = len(processes)
                     release(child_number, "process", "acquired")
                     original_wait = child.wait
 
@@ -610,10 +632,13 @@ async def run(directory, run, product_root, tiny=False):
             separators=(",", ":"),
         )
     try:
-        if processes:
-            recorder.append_bytes(
-                "storage-phases.jsonl", (root / "child-storage-phases.jsonl").read_bytes()
+        for index, _ in enumerate(processes, 1):
+            name = (
+                f"child-storage-phases-{index}.jsonl"
+                if run["format"] == 5
+                else "child-storage-phases.jsonl"
             )
+            recorder.append_bytes("storage-phases.jsonl", (root / name).read_bytes())
         verify(product_root.parent)
         verify_imports(product_root)
         recorder.finish(root / "raw", manifest)

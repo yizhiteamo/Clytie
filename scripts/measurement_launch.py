@@ -65,7 +65,9 @@ def environment():
     )
 
 
-def tiny_manifest(inventory, tools, arm, scale):
+def tiny_manifest(inventory, tools, arm, scale, *, format_version=4):
+    if format_version not in {4, 5}:
+        raise ValueError("measurement_format_invalid")
     ledger = dict.fromkeys(
         ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit"), 0
     )
@@ -99,7 +101,7 @@ def tiny_manifest(inventory, tools, arm, scale):
         warmup_requests=2,
     )
     run = dict(
-        format=4,
+        format=format_version,
         source="generated_fictional_only",
         method="legal_fixture_comparison_v1",
         candidate=inventory["candidate"],
@@ -147,6 +149,22 @@ def tiny_manifest(inventory, tools, arm, scale):
         ),
         result="incomplete",
     )
+    if format_version == 5:
+        run.update(
+            observer_sequences=[0, 1] if arm in {"candidate", "original"} else [0],
+            scenario="normal",
+            execution_id=hashlib.sha256(
+                canonical(
+                    dict(
+                        candidate=inventory["candidate"],
+                        arm=arm,
+                        scale=scale,
+                        recipe=recipe,
+                        tool=tools["sha256"],
+                    )
+                )
+            ).hexdigest(),
+        )
     evidence.validate_run(run)
     return run, recipe
 
@@ -159,10 +177,13 @@ def main(arguments=None):
         "--arm", choices=("baseline", "none", "original", "candidate"), required=True
     )
     parser.add_argument("--scale", choices=("small_text", "large_asset"), required=True)
+    parser.add_argument("--observation-format", type=int, choices=(4, 5), default=4)
     args = parser.parse_args(arguments)
     source, inventory = activate(args.version_directory)
     tools = tool_inventory()
-    run, recipe = tiny_manifest(inventory, tools, args.arm, args.scale)
+    run, recipe = tiny_manifest(
+        inventory, tools, args.arm, args.scale, format_version=args.observation_format
+    )
     from measurement_trial import run as trial
 
     # These pre-call files remain even when the child, observation or cleanup fails.
