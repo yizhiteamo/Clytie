@@ -269,6 +269,23 @@ class PredicateTests(unittest.TestCase):
         rows[1]["charged_bytes"] = CHUNK + 1
         self.assertEqual(self.status(rows, "charge_success_bytes_and_chunk"), "failed")
 
+    def test_causal_binding_report_points_to_separate_batch_checks(self):
+        index = Index([])
+        try:
+            report = Predicates(index).report()
+            for key, reference in (
+                ("file_charge_causal_binding", "host_file_batch_reservations"),
+                ("sqlite_charge_causal_binding", "sqlite_logical_progress_reservations"),
+            ):
+                item = report["requirements"][key]
+                self.assertEqual(item["status"], "unverified")
+                self.assertIn(
+                    "checked_separately_in_batch_reservations_" + reference, item["reasons"]
+                )
+            self.assertEqual(report["mechanism_acceptance"], "not_evaluated")
+        finally:
+            index.db.close()
+
     def test_same_stage_totals_do_not_prove_file_charge_causality(self):
         self.assertEqual(self.status([], "file_charge_causal_binding"), "unverified")
 
