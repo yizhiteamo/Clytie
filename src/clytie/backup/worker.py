@@ -393,7 +393,7 @@ def execute(home, operation_id, *, stream, emit, clock=None, recover_only=False)
                 return journal.public()
             journal.phase(
                 "preparing" if not recover_only else "verifying",
-                executor=process_identity(),
+                **({} if recover_only else {"executor": process_identity()}),
                 delivery="waiting",
             )
             controls = Controls(journal, stream, verification_only=recover_only, emit=emit)
@@ -406,7 +406,11 @@ def execute(home, operation_id, *, stream, emit, clock=None, recover_only=False)
                     reason="delivery_cancelled",
                 )
                 return journal.public()
-            journal.phase(journal.value["phase"], delivery="received")
+            journal.phase(
+                journal.value["phase"],
+                delivery="received",
+                **({"recovery_executor": process_identity()} if recover_only else {}),
+            )
             emit(dict(type="started", id=operation_id))
             try:
                 if recover_only:

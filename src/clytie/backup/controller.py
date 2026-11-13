@@ -117,12 +117,16 @@ class CaptureBridge:
             cid = identifier(args["companion_id"])
             if cid not in supervisor.children:
                 raise ValueError("snapshot_unavailable")
-            supervisor.authorize_backup_capture(cid, operation_id)
+
+            async def authorize(child):
+                await supervisor.authorize_backup_capture(cid, operation_id, child=child)
+
             return await supervisor.request(
                 cid,
                 "backup_capture",
                 {**args, "scope": journal.value["arguments"].get("scope", "instance")},
                 timeout=None,
+                before_send=authorize,
             )
         if op == "audit":
             from .logs import RotatingLogWriter

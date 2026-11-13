@@ -1,6 +1,7 @@
 """只管理进程与无内容健康状态，不访问账本。"""
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Protocol
 
@@ -65,7 +66,7 @@ class Supervisor:
         self.suspended = set()
         self.request_stop = None
         self.startup_cancelled = lambda: False
-        self.backup_io = IoControl(clock)
+        self.backup_io = IoControl(clock, home=home)
         self.backup_io_sessions = {}
 
     def setting(self, group, key, default):
@@ -80,6 +81,9 @@ class Supervisor:
         with startup_gate(self.home):
             self.update_lock = self.lock.__enter__()
         try:
+            # This only projects heavy-I/O admission. Unrelated companions may
+            # still boot and serve ordinary conversation while evidence is blocked.
+            await self.backup_io.recheck()
             if prepare:
                 await prepare()
         except BaseException:
@@ -114,8 +118,13 @@ class Supervisor:
         await child.send(dict(type=kind, seq=self.seq, **fields))
         return self.seq
 
-    def authorize_backup_capture(self, cid, operation_id):
-        self.backup_io.authorize(self.backup_io_sessions[cid], operation_id)
+    async def authorize_backup_capture(self, cid, operation_id, *, child=None):
+        child = self.children[cid] if child is None else child
+        session = self.backup_io_sessions[cid]
+        identity = await asyncio.to_thread(child.identity)
+        if self.children.get(cid) is not child or self.backup_io_sessions.get(cid) != session:
+            raise IoBudgetError("backup_io_executor_lost")
+        await self.backup_io.authorize_execution(session, operation_id, identity, role="capture")
 
     async def _backup_io_reply(self, child, response):
         await self.command(
@@ -124,10 +133,26 @@ class Supervisor:
             **{key: value for key, value in response.items() if key != "type"},
         )
 
-    async def _backup_io_exit_confirmed(self, cid):
-        session = self.backup_io_sessions.pop(cid, None)
-        if session is not None:
+    async def _backup_io_exit_confirmed(self, cid, *, session=None):
+        session = self.backup_io_sessions.get(cid) if session is None else session
+        if session is None:
+            return True
+        try:
             await self.backup_io.ended(session, confirmed=True)
+            return True
+        except IoBudgetError as exc:
+            # Actual process exit is already known. A failed durable release is
+            # separate evidence; never turn it into a second kill or abandon the
+            # other companions and daemon resources during shutdown.
+            self.rows[cid]["last_heavy_io_release"] = {"state": "unverified", "reason": exc.code}
+            self.log.warning(
+                "supervisor.backup_io_release_unverified", companion_id=cid, reason=exc.code
+            )
+            self.audit.append("backup_io_release_unverified", cid, result="failed", reason=exc.code)
+            return False
+        finally:
+            if self.backup_io_sessions.get(cid) == session:
+                self.backup_io_sessions.pop(cid)
 
     async def monitor(self, cid):
         row = self.rows[cid]
@@ -147,7 +172,12 @@ class Supervisor:
                 # Only parent-selected existing management journals are authorized.
                 # A new launch/session never regains the prior executor's stage.
                 for operation in getattr(child, "recovery_operations", ()):
-                    self.backup_io.authorize(io_session, operation)
+                    await self.backup_io.authorize_execution(
+                        io_session,
+                        operation,
+                        await asyncio.to_thread(child.identity),
+                        role="recovery",
+                    )
                 while True:
                     now = self.clock.monotonic()
                     if row["phase"] == "starting" and ready is None:
@@ -305,6 +335,16 @@ class Supervisor:
                         pending.set_exception(APIError("companion_unavailable", 409))
             except asyncio.CancelledError:
                 raise
+            except IoBudgetError as exc:
+                code = 1
+                reason = exc.code
+                fatal = "management_recovery_blocked"
+                row["heavy_io_reason"] = exc.code
+                child = self.children.get(cid)
+                if child:
+                    await child.kill()
+                    await child.wait()
+                    exit_confirmed = True
             except Exception:
                 code = 1
                 reason = "process_failure"
@@ -317,9 +357,7 @@ class Supervisor:
                 if io_session is not None:
                     self.backup_io.disconnect(io_session)
                     if exit_confirmed:
-                        await self.backup_io.ended(io_session, confirmed=True)
-                        if self.backup_io_sessions.get(cid) == io_session:
-                            self.backup_io_sessions.pop(cid)
+                        await self._backup_io_exit_confirmed(cid, session=io_session)
             if self.stopping or cid in self.suspended:
                 return
             if fatal:
@@ -473,7 +511,7 @@ class Supervisor:
         )
         return dict(results)
 
-    async def request(self, cid, op, args, *, timeout=30, before_send=None):
+    async def request(self, cid, op, args, *, timeout=30, before_send=None, after_receive=None):
         from uuid import uuid4
 
         from clytie.api.auth import APIError, RequestNotDelivered
@@ -484,7 +522,9 @@ class Supervisor:
         if child is None:
             raise RequestNotDelivered("companion_busy", 409)
         if before_send is not None:
-            before_send(child)
+            prepared = before_send(child)
+            if inspect.isawaitable(prepared):
+                await prepared
         key = uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self.requests[cid, key] = future
@@ -498,6 +538,10 @@ class Supervisor:
                 )
             except TimeoutError:
                 raise APIError("companion_timeout", 504) from None
+            if after_receive is not None:
+                settled = after_receive()
+                if inspect.isawaitable(settled):
+                    await settled
             if not result["ok"]:
                 error = result["error"]
                 raise APIError(error["code"], error.get("status", 400))

@@ -15,6 +15,7 @@ from clytie.plugin_host.snapshots import contained
 from clytie.plugin_host.support import finish_cleanup, timed
 from clytie.supervisor.processes import python_process
 
+from .io_budget import IoBudgetError
 from .io_control import IoControl
 from .journal import TERMINAL, BackupJournal
 
@@ -68,13 +69,15 @@ class BackupWorkers:
 
         self.capture_handler = capture_handler or CaptureBridge()
         supervisor = getattr(self.capture_handler, "supervisor", None)
-        self.io_control = supervisor.backup_io if supervisor is not None else IoControl(clock)
+        self.io_control = (
+            supervisor.backup_io if supervisor is not None else IoControl(clock, home=home)
+        )
 
     @property
     def still_finishing(self):
         return (
             self.cancel_since is not None
-            and bool(self.tasks)
+            and (bool(self.tasks) or any(not item.done() for item in self._admissions))
             and self.clock.monotonic() - self.cancel_since >= self.timeout
         )
 
@@ -170,6 +173,9 @@ class BackupWorkers:
             valid_arguments = True
         if not valid_arguments:
             raise WorkerError("arguments_invalid")
+        await self.io_control.ensure_ready()
+        session = self.io_control.register()
+        reserved, accepted = False, False
         try:
             with self._gate():
                 if self.stopping and not shutdown:
@@ -184,14 +190,27 @@ class BackupWorkers:
                         arguments["plan_id"],
                         operation_id,
                     )
+                await self.io_control.reserve(session, operation_id)
+                reserved = True
                 journal, fresh = BackupJournal.accept(
                     self.home, self.clock, operation_id, operation, arguments
                 )
                 if not fresh:
                     return journal.public()
+                journal.io_session = session
                 started = self._track(journal)
+                accepted = True
         except OperationBusy:
             raise WorkerError("backup_busy") from None
+        finally:
+            if not accepted:
+
+                async def release_unstarted():
+                    if reserved:
+                        await self.io_control.retire_operation(operation_id)
+                    await self.io_control.ended(session, confirmed=True)
+
+                await finish_cleanup(release_unstarted())
         try:
             await timed(asyncio.shield(started), self.clock, self.startup_timeout)
         except TimeoutError:
@@ -201,7 +220,8 @@ class BackupWorkers:
 
     async def _run(self, journal, started, *, recover_only):
         key, process = journal.value["id"], None
-        session, exit_confirmed = None, False
+        session, exit_confirmed = getattr(journal, "io_session", None), False
+        registered = session is not None
         bridges = set()
 
         async def send(reply):
@@ -227,6 +247,13 @@ class BackupWorkers:
                 self.io_control.disconnect(session)
 
         try:
+            if session is None:
+                await self.io_control.ensure_ready()
+                session = self.io_control.register()
+                await self.io_control.reserve(
+                    session, key, role="recovery" if recover_only else "operation"
+                )
+                registered = True
             executable, env = python_process()
             env.pop("CLYTIE_HOME", None)
             kwargs = (
@@ -234,23 +261,25 @@ class BackupWorkers:
                 if sys.platform == "win32"
                 else {"start_new_session": True}
             )
-            process = await asyncio.create_subprocess_exec(
-                executable,
-                "-m",
-                "clytie.backup.worker",
-                str(self.home),
-                key,
-                *(["recover-only"] if recover_only else []),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-                limit=128 * 1024,
-                **kwargs,
+            process, cancelled = await finish_cleanup(
+                asyncio.create_subprocess_exec(
+                    executable,
+                    "-m",
+                    "clytie.backup.worker",
+                    str(self.home),
+                    key,
+                    *(["recover-only"] if recover_only else []),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                    limit=128 * 1024,
+                    **kwargs,
+                )
             )
             self.processes[key] = process
-            session = self.io_control.register()
-            self.io_control.authorize(session, key)
+            if cancelled:
+                raise asyncio.CancelledError
 
             def control():
                 if process.returncode is None and not process.stdin.is_closing():
@@ -271,15 +300,24 @@ class BackupWorkers:
                     continue
                 if response.get("type") == "ready" and response.get("id") == key:
                     fresh = BackupJournal.load(journal.path, self.clock)
-                    child = process_identity(process.pid)
-                    if fresh.value.get("executor") != child:
+                    child = await asyncio.to_thread(process_identity, process.pid)
+                    if not recover_only and fresh.value.get("executor") != child:
                         control()
                         continue
+                    await self.io_control.bind_execution(session, key, child)
+                    registered = True
                     process.stdin.write(b"start\n")
                     await process.stdin.drain()
                 elif response.get("type") == "started" and response.get("id") == key:
                     fresh = BackupJournal.load(journal.path, self.clock)
-                    if fresh.value.get("delivery") == "received" and not started.done():
+                    verified = not recover_only or fresh.value.get(
+                        "recovery_executor"
+                    ) == await asyncio.to_thread(process_identity, process.pid)
+                    if (
+                        verified
+                        and fresh.value.get("delivery") == "received"
+                        and not started.done()
+                    ):
                         started.set_result(True)
                 elif response.get("type") == "bridge":
                     if len(bridges) >= 8:
@@ -303,6 +341,9 @@ class BackupWorkers:
             self.io_control.disconnect(session)
             await process.wait()
             exit_confirmed = True
+        except IoBudgetError as exc:
+            if not started.done():
+                started.set_exception(exc)
         except (OSError, ValueError, RuntimeError):
             if process is None:
                 try:
@@ -335,24 +376,30 @@ class BackupWorkers:
                             await process.wait()
                             exit_confirmed = True
                 finally:
-                    if session is not None and exit_confirmed:
-                        await self.io_control.ended(session, confirmed=True)
-                    # A companion's capture may outlive the worker pipe. Retain its
-                    # actual completion responsibility before retiring the operation.
-                    await asyncio.gather(*tuple(bridges), return_exceptions=True)
-                    if exit_confirmed:
-                        self.io_control.finish_operation(key)
-                    if process is not None and process.stdin is not None:
-                        process.stdin.close()
+                    try:
                         try:
-                            await process.stdin.wait_closed()
-                        except (OSError, RuntimeError):
-                            pass
-                    if not started.done():
-                        started.set_result(False)
-                    self.controls.pop(key, None)
-                    self.processes.pop(key, None)
-                    self.tasks.pop(key, None)
+                            if session is not None and (exit_confirmed or process is None):
+                                await self.io_control.ended(session, confirmed=True)
+                        finally:
+                            # Even a failed durable release must wait for captures.
+                            # Keep its responsibility and propagate the error.
+                            await asyncio.gather(*tuple(bridges), return_exceptions=True)
+                        if registered and (exit_confirmed or process is None):
+                            await self.io_control.retire_operation(key)
+                    finally:
+                        try:
+                            if process is not None and process.stdin is not None:
+                                process.stdin.close()
+                                try:
+                                    await process.stdin.wait_closed()
+                                except (OSError, RuntimeError):
+                                    pass
+                        finally:
+                            if not started.done():
+                                started.set_result(False)
+                            self.controls.pop(key, None)
+                            self.processes.pop(key, None)
+                            self.tasks.pop(key, None)
 
             _, cancelled = await finish_cleanup(finish())
             if cancelled:

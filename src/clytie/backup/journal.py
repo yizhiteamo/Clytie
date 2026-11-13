@@ -114,6 +114,7 @@ class BackupJournal:
             raise JournalError("phase_invalid")
         if set(evidence) - {
             "executor",
+            "recovery_executor",
             "artifacts",
             "reason",
             "envelope",

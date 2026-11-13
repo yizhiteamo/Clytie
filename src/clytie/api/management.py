@@ -5,11 +5,12 @@ import hashlib
 import re
 from datetime import datetime
 
+from clytie.backup.io_budget import IoBudgetError
 from clytie.config import load_home, thaw
 from clytie.kernel.query import local_task
 from clytie.plugin_host.locking import OperationBusy, file_lock, process_identity
 from clytie.plugin_host.snapshots import identifier
-from clytie.plugin_host.support import timed
+from clytie.plugin_host.support import finish_cleanup, timed
 from clytie.supervisor.common import read, write
 
 from .auth import APIError, RequestNotDelivered
@@ -134,7 +135,7 @@ class Management:
                     raise APIError("invalid_request")
                 args = {"plan_id": data["plan_id"]}
             return await self.backup_workers.execute(operation, args, data.get("operation_id"))
-        except (WorkerError, PreviewError, RepositoryError, RestoreError) as exc:
+        except (IoBudgetError, WorkerError, PreviewError, RepositoryError, RestoreError) as exc:
             raise APIError(exc.code, 409) from None
         except (OSError, ValueError, KeyError, TypeError):
             raise APIError("backup_request_unavailable", 409) from None
@@ -601,6 +602,7 @@ class Management:
                 space_estimates = {"state": "unavailable", "reason": "space_evidence_unverified"}
             return {
                 "space_estimates": space_estimates,
+                "heavy_io": await self.svc.backup_io.recheck(),
                 "key": await asyncio.to_thread(
                     BackupKeys(self.home, self.clock, repository=repository_root()).status
                 ),
@@ -629,6 +631,7 @@ class Management:
                 if self.svc.rows[c].get("restart_count", 0) == generation
             }
             return {
+                "heavy_io": await self.svc.backup_io.recheck(),
                 "mode": "maintenance" if getattr(self.svc, "maintenance", False) else "normal",
                 "configuration": self.configuration_status(),
                 "companions": self.svc.rows,
@@ -771,16 +774,36 @@ class Management:
                     raise APIError("companion_running", 409)
 
                 async def online(journal, arguments, control):
-                    def dispatch(child):
+                    async def unstarted():
                         try:
-                            identity = child.identity()
+                            await asyncio.to_thread(journal.phase, "failed")
+                        finally:
+                            await self.svc.backup_io.retire_operation(journal.value["id"])
+
+                    async def settled():
+                        # Both successful and failed replies certify that the
+                        # companion's managed executor and file commands settled.
+                        await self.svc.backup_io.retire_operation(journal.value["id"])
+
+                    async def dispatch(child):
+                        try:
+                            identity = await asyncio.to_thread(child.identity)
+                            # Finish durable metadata before handling cancellation:
+                            # a late save must never overwrite unstarted failure.
+                            journal.value["executor"] = identity
+                            _, cancelled = await finish_cleanup(asyncio.to_thread(journal.save))
+                            if cancelled:
+                                raise asyncio.CancelledError
+                            await self.svc.backup_io.bind_execution(
+                                journal.io_session, journal.value["id"], identity
+                            )
+                        except asyncio.CancelledError:
+                            await finish_cleanup(unstarted())
+                            raise
+                        except IoBudgetError as exc:
+                            raise RequestNotDelivered(exc.code, 409) from None
                         except OSError:
-                            raise RequestNotDelivered("companion_busy", 409) from None
-                        # Persist the intended receiver before transport. An uncertain
-                        # send must not leave the still-live daemon recorded as writer.
-                        journal.value["executor"] = identity
-                        journal.save()
-                        self.svc.authorize_backup_capture(cid, journal.value["id"])
+                            raise RequestNotDelivered("management_worker_failed", 409) from None
 
                     def cancel():
                         child = self.svc.children.get(cid)
@@ -802,17 +825,21 @@ class Management:
                             {"operation_id": journal.value["id"], "arguments": arguments},
                             timeout=None,
                             before_send=dispatch,
+                            after_receive=settled,
                         )
-                        # The owning process replies only after its managed executor
-                        # and file commands settle. An uncertain transport failure
-                        # cannot retire an operation that may still own native I/O.
-                        self.svc.backup_io.finish_operation(journal.value["id"])
                         return result
                     except RequestNotDelivered:
-                        journal.phase("failed")
+                        await finish_cleanup(unstarted())
                         raise
 
-                return await self.memory_workers.execute(cid, op, data, key, runner=online)
+                return await self.memory_workers.execute(
+                    cid,
+                    op,
+                    data,
+                    key,
+                    runner=online,
+                    io_session=self.svc.backup_io_sessions[cid],
+                )
             if self.svc.rows[cid]["state"] in {"starting", "stopping", "backoff"}:
                 raise APIError("companion_busy", 409)
             return await self.memory_workers.execute(cid, op, data, key)

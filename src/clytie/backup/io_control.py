@@ -5,6 +5,8 @@ import math
 from dataclasses import dataclass, field
 from uuid import uuid4
 
+from clytie.plugin_host.support import finish_cleanup
+
 from .io_budget import IoBudget, IoBudgetError
 from .io_protocol import BudgetEndpoint
 
@@ -15,14 +17,107 @@ class _Session:
     endpoints: dict = field(default_factory=dict)
     tasks: set = field(default_factory=set)
     disconnected: bool = False
+    reserved: set = field(default_factory=set)
+    persisted: set = field(default_factory=set)
+    closed_operations: set = field(default_factory=set)
 
 
 class IoControl:
-    def __init__(self, clock):
+    def __init__(self, clock, *, home=None):
         self.budget = IoBudget(clock)
+        self.controller = uuid4().hex
+        self.responsibilities = None
+        if home is not None:
+            from .io_responsibility import Responsibilities
+
+            self.responsibilities = Responsibilities(home, clock)
         self.sessions = {}
         self.retiring = set()
+        self._release_pending = set()
+        self._metadata_lock = asyncio.Lock()
+        self.admission_state = {"state": "pending", "blockers": []}
         self._owners()
+
+    async def recheck(self):
+        if self.responsibilities is None:
+            return {
+                "state": "ready",
+                "blockers": [],
+                "executions": [],
+                "observed_at": self.budget.clock.now().isoformat(),
+            }
+        result, cancelled = await self._metadata("check", self.controller)
+        self.admission_state = result
+        if cancelled:
+            raise asyncio.CancelledError()
+        return result
+
+    async def _metadata(self, method, *args, **kwargs):
+        # This controller must not race its own short durable bookkeeping.
+        # Other controllers still coordinate through the stable OS file lock.
+        # Await outside Owner/transactions/latches; retain the gate until the
+        # actual file worker settles, even if its awaiting task is cancelled.
+        async with self._metadata_lock:
+            return await finish_cleanup(
+                asyncio.to_thread(getattr(self.responsibilities, method), *args, **kwargs)
+            )
+
+    async def ensure_ready(self):
+        if (await self.recheck())["state"] != "ready":
+            raise IoBudgetError("backup_io_recheck_required")
+
+    def _session(self, session, operation):
+        state = self.sessions[session]
+        if state.disconnected or operation in state.closed_operations or operation in self.retiring:
+            raise IoBudgetError("backup_io_operation_not_authorized")
+        return state
+
+    async def _registration(self, method, session, operation, *args):
+        state = self._session(session, operation)
+        if self.responsibilities is None:
+            return state
+        _, cancelled = await self._metadata(method, self.controller, session, operation, *args)
+        state.persisted.add(operation)
+        if cancelled or state.disconnected:
+            # The caller has not received an execution authorization. Settle the
+            # durable write, then revoke this unexecuted intent before returning.
+            state.closed_operations.add(operation)
+            await self._metadata("release", self.controller, session, operation, confirmed=True)
+            if cancelled:
+                raise asyncio.CancelledError()
+            raise IoBudgetError("backup_io_executor_lost")
+        return state
+
+    async def reserve(self, session, operation, *, role="operation"):
+        state = await self._registration("reserve", session, operation, role)
+        state.reserved.add(operation)
+
+    async def bind_execution(self, session, operation, identity):
+        state = self._session(session, operation)
+        if operation not in state.reserved:
+            raise IoBudgetError("backup_io_operation_not_authorized")
+        await self._registration("bind", session, operation, identity)
+        self.authorize(session, operation)
+
+    async def authorize_execution(self, session, operation, identity, *, role="operation"):
+        await self._registration("register", session, operation, identity, role)
+        self.authorize(session, operation)
+
+    async def retire_operation(self, operation):
+        ended = self.finish_operation(operation)
+        if self.responsibilities is not None:
+            # Tombstones/endpoints are revoked before persisting trustworthy
+            # release. A failed write leaves durable responsibility intact.
+            for session, key in tuple(self._release_pending):
+                if key != operation:
+                    continue
+                _, cancelled = await self._metadata(
+                    "release", self.controller, session, key, confirmed=True
+                )
+                self._release_pending.discard((session, key))
+                if cancelled:
+                    raise asyncio.CancelledError()
+        return ended
 
     def _owners(self):
         self.budget.set_owners({key for key, value in self.sessions.items() if value.storage_owner})
@@ -35,9 +130,9 @@ class IoControl:
         return key
 
     def authorize(self, session, operation):
-        state = self.sessions[session]
-        if state.disconnected or operation in self.retiring:
-            raise IoBudgetError("backup_io_executor_lost")
+        state = self._session(session, operation)
+        if self.responsibilities is not None and operation not in state.persisted:
+            raise IoBudgetError("backup_io_operation_not_authorized")
         if operation not in state.endpoints:
             state.endpoints[operation] = BudgetEndpoint(
                 self.budget, executor=session, operation=operation
@@ -95,8 +190,11 @@ class IoControl:
                 self.budget.forget_operation(operation)
             except IoBudgetError:
                 continue
-            for state in self.sessions.values():
+            for session, state in self.sessions.items():
                 state.endpoints.pop(operation, None)
+                state.closed_operations.add(operation)
+                if operation in state.persisted:
+                    self._release_pending.add((session, operation))
             self.retiring.remove(operation)
 
     def pressure(self, session, sample):
@@ -142,6 +240,19 @@ class IoControl:
         for task in tuple(state.tasks):
             task.cancel()
         await asyncio.gather(*tuple(state.tasks), return_exceptions=True)
-        self.sessions.pop(session, None)
-        self._reap()
-        self._owners()
+        try:
+            if self.responsibilities is not None and state.persisted:
+                _, cancelled = await self._metadata("ended", self.controller, session)
+                self._release_pending = {
+                    item for item in self._release_pending if item[0] != session
+                }
+                if cancelled:
+                    # The persistent result is real; cancellation still propagates.
+                    raise asyncio.CancelledError()
+        finally:
+            # The executor was actually waited above; it cannot submit work again.
+            # A metadata failure still propagates and leaves durable responsibility
+            # untouched for recheck, but must not retain a dead pressure source.
+            self.sessions.pop(session, None)
+            self._reap()
+            self._owners()
