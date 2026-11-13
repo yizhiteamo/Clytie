@@ -352,7 +352,9 @@ async def test_online_management_uncertain_send_keeps_evidence_and_no_second_wri
     child = launcher.children[0][1]
     original = child.send
     received = []
-    intended = {"pid": 7, "started_at": "fictional creation identity"}
+    from clytie.plugin_host.locking import process_identity
+
+    intended = process_identity()
     child.identity = lambda: intended
 
     async def uncertain(message):

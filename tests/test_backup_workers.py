@@ -331,6 +331,10 @@ async def test_killed_worker_verifies_registered_artifacts_without_replay(
         await SystemClock().sleep(0.01)
     workers = BackupWorkers(manager.home, MockClock())
     await workers.recover_pending()
+    verified = BackupJournal.load(journal.path, MockClock()).value
+    assert verified["executor"] == value["executor"]
+    assert verified["recovery_executor"] != verified["executor"]
+    assert executor_alive(verified["recovery_executor"]) is False
     result = workers.query(op)
     if hook == "restore_copying":
         assert result["phase"] == "recovery_blocked"
@@ -546,6 +550,7 @@ async def test_startup_handshake_wait_is_bounded_and_queryable(tmp_path, monkeyp
 
 
 async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypatch):
+    from clytie.backup.io_budget import IoBudgetError
     from clytie.backup.workers import executor_alive, worker_locked
 
     manager, package, key, target, workspace = configured_package(
@@ -578,6 +583,12 @@ async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypat
         response = await timed(asyncio.to_thread(worker_message, process), SystemClock(), 15)
         assert response["type"] == "result"
         assert response["result"]["phase"] == "committed"
+        replacement = BackupWorkers(manager.home, clock)
+        with pytest.raises(IoBudgetError, match="backup_io_recheck_required"):
+            await replacement.io_control.ensure_ready()
+        with pytest.raises(IoBudgetError, match="backup_io_recheck_required"):
+            await replacement.execute("verify", {"backup_id": "b" * 32}, "c" * 32)
+        assert not BackupJournal.path_for(manager.home, "c" * 32).exists()
         # 固定最后一次轮询先于真实退出；机器快慢不能改变此顺序。
         await clock.advance_and_drain(1)
         assert process.poll() is None
@@ -588,6 +599,7 @@ async def test_stop_reminder_never_kills_publishing_executor(tmp_path, monkeypat
         value = BackupJournal.load(BackupJournal.path_for(manager.home, op), clock).value
         assert executor_alive(value["executor"]) is False
         assert not worker_locked(manager.home)
+        assert (await replacement.io_control.recheck())["state"] == "ready"
         await clock.drain()
         assert not stopping.done()
         assert clock.pending_sleep_count == 1

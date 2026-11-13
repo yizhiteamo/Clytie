@@ -267,7 +267,10 @@ async def test_new_recovery_process_authorizes_each_old_journal_without_replay(t
         journal.database(path)
         from clytie.plugin_host.locking import process_identity
 
-        journal.value["executor"] = {**process_identity(), "started_at": "fictional-prior-start"}
+        journal.value["executor"] = {
+            **process_identity(),
+            "started_at": "2000-01-01T00:00:00+00:00",
+        }
         journal.phase("transaction")
         journals.append(journal)
     workers = Workers(tmp_path, clock)

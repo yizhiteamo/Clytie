@@ -22,6 +22,25 @@ def validator(kind):
     return Draft202012Validator(value, format_checker=FormatChecker())
 
 
+async def test_real_heavy_io_status_schema_preserves_unknown_and_rejects_private_details(tmp_path):
+    from clytie.backup.io_control import IoControl
+
+    control = IoControl(MockClock(), home=tmp_path)
+    ready = await control.recheck()
+    validator("heavy_io").validate(ready)
+    control.responsibilities.index_path.write_text("{", encoding="utf-8")
+    blocked = await control.recheck()
+    validator("heavy_io").validate(blocked)
+    assert blocked["state"] == "blocked"
+    assert blocked["blockers"][0]["reason"] == "responsibility_evidence_unverified"
+    leaked = copy.deepcopy(blocked)
+    leaked["blockers"][0]["path"] = "fictional-private-location"
+    assert not validator("heavy_io").is_valid(leaked)
+    invented = copy.deepcopy(blocked)
+    invented["blockers"][0]["reason"] = "arbitrary_exception_text"
+    assert not validator("heavy_io").is_valid(invented)
+
+
 @pytest.mark.parametrize(
     "kind,body,valid",
     [

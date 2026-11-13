@@ -16,7 +16,7 @@ def attach_test_capture_channel(supervisor, runtime=None):
     control = supervisor.backup_io
     loop = asyncio.get_running_loop()
 
-    def authorize(cid, operation):
+    async def authorize(cid, operation, *, child=None):
         if cid not in sessions:
             sessions[cid] = control.register(storage_owner=True)
         control.authorize(sessions[cid], operation)
@@ -277,6 +277,8 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
 
     async def request(cid, op, args, **kwargs):
         calls.append(op)
+        if kwargs.get("before_send"):
+            await kwargs["before_send"](supervisor.children[cid])
         return await companion_operation(owner, op, args)
 
     supervisor = SimpleNamespace(

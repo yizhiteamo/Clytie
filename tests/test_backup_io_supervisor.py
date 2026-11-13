@@ -1,6 +1,11 @@
 import asyncio
+import json
 
 from tests.test_supervisor import make, spin
+
+from clytie.backup.io_budget import IoBudgetError
+from clytie.backup.io_control import IoControl
+from clytie.plugin_host.locking import file_lock, process_identity
 
 
 async def test_supervisor_routes_budget_without_blocking_health_or_stop(tmp_path):
@@ -9,7 +14,7 @@ async def test_supervisor_routes_budget_without_blocking_health_or_stop(tmp_path
     try:
         control = svc.backup_io
         worker = control.register()
-        control.authorize(worker, "backup_a")
+        await control.authorize_execution(worker, "a" * 32, process_identity())
 
         async def sink(reply):
             assert reply.get("result") == {}
@@ -19,18 +24,18 @@ async def test_supervisor_routes_budget_without_blocking_health_or_stop(tmp_path
             {
                 "type": "backup_io",
                 "id": "worker_acquire",
-                "operation_id": "backup_a",
+                "operation_id": "a" * 32,
                 "arguments": {"action": "acquire", "stage": "worker"},
             },
             sink,
         )
-        svc.authorize_backup_capture("companion_0", "backup_a")
+        await svc.authorize_backup_capture("companion_0", "a" * 32)
         await child.queue.put(
             {
                 "type": "backup_io",
                 "seq": 3,
                 "id": "companion_acquire",
-                "operation_id": "backup_a",
+                "operation_id": "a" * 32,
                 "arguments": {"action": "acquire", "stage": "capture"},
             }
         )
@@ -44,7 +49,7 @@ async def test_supervisor_routes_budget_without_blocking_health_or_stop(tmp_path
             {
                 "type": "backup_io",
                 "id": "worker_release",
-                "operation_id": "backup_a",
+                "operation_id": "a" * 32,
                 "arguments": {"action": "release", "stage": "worker"},
             },
             sink,
@@ -124,3 +129,57 @@ async def test_stop_kill_releases_budget_even_before_monitor_observes_exit(tmp_p
         assert not svc.backup_io.sessions
     finally:
         await svc.stop()
+
+
+async def test_durable_release_failure_does_not_skip_other_children_or_daemon_cleanup(
+    tmp_path, monkeypatch
+):
+    svc, launcher, clock = await make(tmp_path, count=2)
+    failed_session = svc.backup_io_sessions["companion_0"]
+    for index, cid in enumerate(svc.companions):
+        await svc.backup_io.authorize_execution(
+            svc.backup_io_sessions[cid], str(index + 1) * 32, process_identity()
+        )
+    original_ended = svc.backup_io.responsibilities.ended
+
+    def fail_one(controller, session):
+        if session == failed_session:
+            raise IoBudgetError("backup_io_coordination_busy")
+        return original_ended(controller, session)
+
+    monkeypatch.setattr(svc.backup_io.responsibilities, "ended", fail_one)
+    try:
+        await svc.stop("cancel")
+        assert all(child.exited.is_set() and not child.killed for _, child in launcher.children)
+        assert all(task.done() for task in svc.monitors.values())
+        assert svc.ticker.done() and svc.lock is None
+        assert svc.rows["companion_0"]["state"] == "stopped"
+        assert svc.rows["companion_0"]["last_heavy_io_release"] == {
+            "state": "unverified",
+            "reason": "backup_io_coordination_busy",
+        }
+        events = [json.loads(line) for line in svc.audit.path.read_text().splitlines()]
+        assert any(row["operation"] == "stop" for row in events)
+        assert any(
+            row["operation"] == "backup_io_release_unverified"
+            and row["reason"] == "backup_io_coordination_busy"
+            and row["result"] == "failed"
+            for row in events
+        )
+        with file_lock(
+            tmp_path / "run/supervisor.lock",
+            {**process_identity(), "operation": "fictional_lock_verification"},
+        ):
+            pass
+        assert (await IoControl(clock, home=tmp_path).recheck())["state"] == "blocked"
+    finally:
+        for _, child in launcher.children:
+            if not child.exited.is_set():
+                await child.kill()
+            await child.wait()
+        for task in (*svc.monitors.values(), svc.ticker):
+            task.cancel()
+        await asyncio.gather(*svc.monitors.values(), svc.ticker, return_exceptions=True)
+        if svc.lock is not None:
+            svc.lock.__exit__(None, None, None)
+            svc.lock = None
