@@ -3,6 +3,19 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_analysis_index": (
+        "measurement_evidence",
+        "measurement_cancel",
+        "measurement_control_observation",
+        "measurement_io_observation",
+        "measurement_pressure_observation",
+    ),
+    "measurement_mechanism_validation": (
+        "measurement_analysis_index",
+        "measurement_sample_validation",
+        "measurement_io_observation",
+        "measurement_pressure_observation",
+    ),
     "measurement_preparation_generate": ("measurement_preparation_transport",),
     "measurement_preparation_transport": (
         "measurement_launch",

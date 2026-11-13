@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_explicit_tool_inventory_contains_every_runtime_adapter_and_scanner():
     inventory = launch.tool_inventory()
     assert inventory["files"]["scripts/measurement_fixture.py"]
+    assert inventory["files"]["scripts/measurement_analysis_index.py"]
+    assert inventory["files"]["scripts/measurement_mechanism_validation.py"]
     assert inventory["files"]["scripts/measurement_trial.py"]
     assert inventory["files"]["scripts/measurement_cancel.py"]
     assert inventory["files"]["scripts/measurement_cancel_validation.py"]
