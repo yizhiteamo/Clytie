@@ -1,9 +1,8 @@
-"""Single tiny observed trial; formal launch remains deliberately unavailable.
+"""Observed tiny trials and registered frozen mechanism executions.
 
-The caller activates an inventoried product before calling run. Importing this
-module does not import that product. Tool/fixture hash verification remains the
-outer launcher's responsibility. No retry, matrix loop, upload or policy tuning.
-"""
+The existing run entry stays tiny-only. run_mechanism claims fixed registration
+before product activation. Neither entry grants cross-runner execution permission.
+No retry, matrix loop, upload or policy tuning."""
 
 import asyncio
 import hashlib
@@ -170,7 +169,6 @@ def _preserve_invalid(root, recorder, manifest):
 
 async def run(directory, run, product_root, tiny=False):
     evidence.validate_run(run)
-    scenario = run.get("scenario", "normal")
     if (
         tiny is not True
         or run["format"] not in {4, 5, 6}
@@ -178,6 +176,32 @@ async def run(directory, run, product_root, tiny=False):
         or run["method"] != "legal_fixture_comparison_v1"
     ):
         raise ValueError("measurement_launcher_not_frozen")
+    return await _execute(directory, run, product_root, tiny=True)
+
+
+async def run_mechanism(directory, frozen, execution_id, version_directory):
+    # No caller-supplied manifest or tiny override. Claim before activation/setup.
+    try:
+        from . import measurement_mechanism_launch as driver
+        from .measurement_version import activate
+    except ImportError:
+        import measurement_mechanism_launch as driver
+        from measurement_version import activate
+
+    manifest = driver.claim_started(frozen, execution_id, version_directory)
+    identity = driver.plan.digest(manifest)
+    product_root, _ = activate(version_directory)
+    try:
+        return await _execute(directory, manifest, product_root, tiny=False)
+    finally:
+        verify_imports(product_root)
+        after, _ = driver.checked(frozen, execution_id, version_directory)
+        if driver.plan.digest(after) != identity:
+            raise ValueError("measurement_material_changed")
+
+
+async def _execute(directory, run, product_root, *, tiny):
+    scenario = run.get("scenario", "normal")
     if scenario not in {"normal", "cancel"} or (
         scenario == "cancel"
         and (
@@ -260,7 +284,7 @@ async def run(directory, run, product_root, tiny=False):
                 run["scale"],
                 mode,
                 run["seed"],
-                tiny=True,
+                tiny=tiny,
                 product_root=product_root,
             )
             if run["fixture_version"] != fixture.FIXTURE_VERSION:

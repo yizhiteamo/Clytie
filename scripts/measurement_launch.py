@@ -49,6 +49,7 @@ TOOL_FILES = (
     "scripts/measurement_recording.py",
     "scripts/measurement_plan.py",
     "scripts/measurement_mechanism_plan.py",
+    "scripts/measurement_mechanism_launch.py",
     "scripts/measurement_sample_validation.py",
     "scripts/measurement_resources.py",
     "scripts/measurement_transport.py",
