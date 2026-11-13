@@ -250,6 +250,7 @@ class BackupController:
             self.supervisor.problems.pop(key, None)
 
     async def _submit(self, request, *, shutdown=False):
+        from .io_budget import IoBudgetError
         from .workers import WorkerError
 
         try:
@@ -265,7 +266,9 @@ class BackupController:
                 request.operation_id,
                 **({"shutdown": True} if shutdown else {}),
             )
-        except WorkerError:
+        except (WorkerError, IoBudgetError):
+            # Admission was refused before a worker accepted execution. Preserve the
+            # durable claim's ordinary failed-attempt/backoff rules, not a replay.
             await asyncio.to_thread(
                 self.scheduler.finish, request.operation_id, creation="failed", verified=False
             )
