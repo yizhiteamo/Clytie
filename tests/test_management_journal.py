@@ -261,10 +261,29 @@ async def test_real_worker_process_produces_plan_without_daemon_memory_access(tm
             + b"\n"
         )
         await process.stdin.drain()
-        response = json.loads(await timed(process.stdout.readline(), SystemClock(), 30))
+        from clytie.backup.io_control import IoControl
+
+        budget = IoControl(SystemClock())
+        session = budget.register()
+        budget.authorize(session, journal.value["id"])
+
+        async def send(value):
+            process.stdin.write(json.dumps(value).encode() + b"\n")
+            await process.stdin.drain()
+
+        async def result():
+            while True:
+                value = json.loads(await process.stdout.readline())
+                if value.get("type") == "backup_io":
+                    budget.dispatch(session, value, send)
+                else:
+                    return value
+
+        response = await timed(result(), SystemClock(), 30)
         assert response["ok"], response
         assert response["result"]["target_exists"] is False
         assert await timed(process.wait(), SystemClock(), 30) == 0
+        await budget.ended(session, confirmed=True)
         persisted = Journal.load(journal.path, clock)
         assert persisted.value["executor"]["pid"] == process.pid
         assert persisted.value["executor"]["started_at"]

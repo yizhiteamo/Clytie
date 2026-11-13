@@ -208,7 +208,7 @@ def test_mirror_copy_budget_finishes_before_publication_and_recovery(tmp_path, m
 def test_restore_verification_handoff_excludes_necessary_completion(tmp_path, monkeypatch):
     from tests.test_backup_restore import configured_package
 
-    from clytie.backup.io_client import current_client
+    from clytie.backup.io_client import _stage, current_client
 
     manager, package, key, target, workspace = configured_package(
         tmp_path, monkeypatch, missing_credentials=False
@@ -222,16 +222,24 @@ def test_restore_verification_handoff_excludes_necessary_completion(tmp_path, mo
 
     def verify_handoff(*args):
         assert current_client() is None
-        assert calls[-1]["action"] == "release"
+        held = _stage.get()
+        assert held is not None
+        assert calls[-1] == {"action": "acquire", "stage": held["id"]}
         entered.append(len(calls))
-        return finish(*args)
+        result = finish(*args)
+        # Necessary completion retains the unique slot, with no token wait or
+        # nested reacquire; only actual return may release its resources.
+        assert len(calls) == entered[-1]
+        assert _stage.get() is held
+        return result
 
     monkeypatch.setattr(manager, "_finish_committed", verify_handoff)
     calls.clear()
     with io_scope(budget_client(calls)):
         state = manager.apply(plan["id"])
     assert state["data_state"] == "ready_for_switch"
-    assert entered == [len(calls)]
+    assert entered == [len(calls) - 1]
+    assert calls[-1]["action"] == "release"
     calls.clear()
     with io_scope(budget_client(calls)):
         assert manager.recover(plan["id"])["data_state"] == "ready_for_switch"
