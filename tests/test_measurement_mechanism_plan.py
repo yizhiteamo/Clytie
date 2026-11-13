@@ -68,13 +68,13 @@ def arguments(data, index=0):
 
 
 @pytest.mark.parametrize("index", range(8))
-def test_all_frozen_platform_scale_scenarios_derive_format_five_without_defaults(index):
+def test_all_frozen_platform_scale_scenarios_derive_format_six_without_defaults(index):
     data = materials()
     frozen = data[0]
     row = frozen["runs"][index]
     saved = copy.deepcopy(data)
     manifest = mechanism.prepare_manifest(frozen, row["execution_id"], **arguments(data, index))
-    assert manifest["format"] == 5
+    assert manifest["format"] == 6
     assert manifest["phase"] == "mechanism"
     assert manifest["method"] == "legal_storage_v1"
     assert manifest["arm"] == "candidate"
