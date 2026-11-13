@@ -111,12 +111,28 @@ def _basis(value):
 
 
 def _validate_inputs(inventory, geometry):
+    # Legacy pure plans remain readable. Formal mechanism preparation requires
+    # this complete canonical source-inventory digest; it is not a commit alias.
+    source_fields = (
+        ("source_inventory_sha256",)
+        if isinstance(inventory, dict) and "source_inventory_sha256" in inventory
+        else ()
+    )
     _fields(
         inventory,
-        ("candidate", "fixture_sha256", "tool_sha256", "verification_sha256", "environments"),
+        (
+            "candidate",
+            "fixture_sha256",
+            "tool_sha256",
+            "verification_sha256",
+            "environments",
+            *source_fields,
+        ),
     )
     _hash(inventory["candidate"], 40)
     for key in ("fixture_sha256", "tool_sha256", "verification_sha256"):
+        _hash(inventory[key])
+    for key in source_fields:
         _hash(inventory[key])
     _fields(inventory["environments"], PLATFORMS)
     _fields(geometry, PLATFORMS)

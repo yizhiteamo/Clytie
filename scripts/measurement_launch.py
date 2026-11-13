@@ -30,10 +30,12 @@ TOOL_FILES = (
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_io_observation.py",
+    "scripts/measurement_pressure_observation.py",
     "scripts/measurement_observation.py",
     "scripts/measurement_native_observation.py",
     "scripts/measurement_recording.py",
     "scripts/measurement_plan.py",
+    "scripts/measurement_mechanism_plan.py",
     "scripts/measurement_sample_validation.py",
     "scripts/measurement_resources.py",
     "scripts/measurement_transport.py",
@@ -66,7 +68,7 @@ def environment():
 
 
 def tiny_manifest(inventory, tools, arm, scale, *, format_version=4):
-    if format_version not in {4, 5}:
+    if format_version not in {4, 5, 6}:
         raise ValueError("measurement_format_invalid")
     ledger = dict.fromkeys(
         ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit"), 0
@@ -149,7 +151,7 @@ def tiny_manifest(inventory, tools, arm, scale, *, format_version=4):
         ),
         result="incomplete",
     )
-    if format_version == 5:
+    if format_version in {5, 6}:
         run.update(
             observer_sequences=[0, 1] if arm in {"candidate", "original"} else [0],
             scenario="normal",
@@ -177,7 +179,7 @@ def main(arguments=None):
         "--arm", choices=("baseline", "none", "original", "candidate"), required=True
     )
     parser.add_argument("--scale", choices=("small_text", "large_asset"), required=True)
-    parser.add_argument("--observation-format", type=int, choices=(4, 5), default=4)
+    parser.add_argument("--observation-format", type=int, choices=(4, 5, 6), default=4)
     args = parser.parse_args(arguments)
     source, inventory = activate(args.version_directory)
     tools = tool_inventory()

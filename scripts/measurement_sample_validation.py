@@ -55,7 +55,7 @@ class ResourceReleases:
     }
 
     def __init__(self, run):
-        if run["format"] != 5:
+        if run["format"] not in {5, 6}:
             raise SampleError("measurement_resource_format_invalid")
         self.processes = set(run["observer_sequences"]) - {0}
         self.required = {("process", number) for number in self.processes}

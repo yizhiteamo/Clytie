@@ -351,6 +351,9 @@ class IoObservation:
             callback_present=progress is not None,
             internal_read_bytes=None,
         )
+        pressure = getattr(self, "pressure", None)
+        if pressure is not None:
+            pressure.safe(lambda: pressure.bind_backup(fields))
         empty = dict(status=None, remaining_pages=None, total_pages=None, copied_pages=None)
         self.event("sqlite_batch", **fields, **empty, event="started", outcome="unknown")
         previous = None

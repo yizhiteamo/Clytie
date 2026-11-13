@@ -214,7 +214,7 @@ def _pattern(value, pattern):
 
 
 def validate_run(run):
-    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3, 4, 5}:
+    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3, 4, 5, 6}:
         _validate_run_versioned(run)
     else:
         _validate_run_v1(run)
@@ -255,8 +255,8 @@ def _validate_run_v1(run):
 
 
 def _validate_run_versioned(run):
-    _fields(run, V5_FIELDS if run["format"] == 5 else V2_FIELDS)
-    if run["format"] == 5:
+    _fields(run, V5_FIELDS if run["format"] in {5, 6} else V2_FIELDS)
+    if run["format"] in {5, 6}:
         validate_observer_sequences(run["observer_sequences"])
         _enum(run["scenario"], {"normal", "cancel"})
         _pattern(run["execution_id"], r"[a-f0-9]{64}")
@@ -264,7 +264,7 @@ def _validate_run_versioned(run):
     _enum(run["method"], {"legal_storage_v1", "legal_fixture_comparison_v1"})
     _enum(
         run["fixture_version"],
-        {"legal_memory_v2" if run["format"] in {3, 4, 5} else "legal_memory_v1"},
+        {"legal_memory_v2" if run["format"] in {3, 4, 5, 6} else "legal_memory_v1"},
     )
     for field in ("candidate", "reference", "baseline_reference", "source_commit"):
         _pattern(run[field], r"[a-f0-9]{40}")
@@ -330,7 +330,7 @@ def _validate_run_versioned(run):
     execution = run["execution"]
     _fields(execution, ("order", "position", "warmup_requests"))
     order = execution["order"]
-    mechanism = run["format"] == 5 and run["phase"] == "mechanism"
+    mechanism = run["format"] in {5, 6} and run["phase"] == "mechanism"
     if mechanism and (run["arm"] != "candidate" or order != ["candidate"]):
         raise EvidenceError("invalid_order")
     if type(order) is not list or len(order) != (1 if mechanism else 4):
@@ -423,11 +423,33 @@ def io_tools():
 
 def validate_record(name, row, *, format_version=None):
     if format_version is not None and (
-        type(format_version) is not int or format_version not in {1, 2, 3, 4, 5}
+        type(format_version) is not int or format_version not in {1, 2, 3, 4, 5, 6}
     ):
         raise EvidenceError("unsupported_format")
+    if (
+        name == "storage-phases.jsonl"
+        and type(row) is dict
+        and row.get("phase")
+        in {
+            "owner_pressure",
+            "control_pressure",
+            "budget_pressure",
+            "budget_mode",
+            "wal_growth",
+            "wal_binding",
+            "sqlite_geometry",
+        }
+    ):
+        if format_version != 6:
+            raise EvidenceError("unsupported_pressure_event")
+        if __package__:
+            from . import measurement_pressure_observation as pressure_tools
+        else:
+            import measurement_pressure_observation as pressure_tools
+        pressure_tools.validate_record(row)
+        return
     if name == "storage-phases.jsonl" and type(row) is dict and row.get("phase") in IO_PHASES:
-        if format_version != 5:
+        if format_version not in {5, 6}:
             raise EvidenceError("unsupported_io_event")
         io_tools().validate_record(row)
         return
@@ -436,7 +458,7 @@ def validate_record(name, row, *, format_version=None):
         and type(row) is dict
         and row.get("phase") == "native_validation"
     ):
-        if format_version not in {None, 4, 5}:
+        if format_version not in {None, 4, 5, 6}:
             raise EvidenceError("unsupported_native_event")
         _validate_native_event(row)
         return
@@ -463,7 +485,7 @@ def validate_record(name, row, *, format_version=None):
     elif name == "resources.jsonl":
         fields = (
             RESOURCE_FIELDS_V3
-            if format_version in {3, 4, 5}
+            if format_version in {3, 4, 5, 6}
             or (
                 format_version is None and type(row) is dict and set(row) == set(RESOURCE_FIELDS_V3)
             )
@@ -689,11 +711,18 @@ def validate_files(contents, expected, *, report_format=None):
             raise EvidenceError("file_size_limit")
         run = _json(manifest_raw)
         validate_run(run)
-        native = NativeEvents() if run["format"] in {4, 5} and run["result"] == "pass" else None
+        native = NativeEvents() if run["format"] in {4, 5, 6} and run["result"] == "pass" else None
         native_observed = False
-        io_events = io_tools().IoEvents(run) if run["format"] == 5 else None
+        io_events = io_tools().IoEvents(run) if run["format"] in {5, 6} else None
+        wal_bindings = None
+        if run["format"] == 6 and run["result"] == "pass":
+            if __package__:
+                from .measurement_pressure_observation import WalBindings
+            else:
+                from measurement_pressure_observation import WalBindings
+            wal_bindings = WalBindings()
         child_exits = resource_releases = None
-        if run["format"] == 5 and run["result"] == "pass":
+        if run["format"] in {5, 6} and run["result"] == "pass":
             try:
                 from .measurement_sample_validation import ProcessExits, ResourceReleases
             except ImportError:
@@ -701,7 +730,11 @@ def validate_files(contents, expected, *, report_format=None):
             child_exits = ProcessExits(run)
             resource_releases = ResourceReleases(run)
         request_plan = None
-        if run["format"] == 5 and run["method"] == "legal_storage_v1" and run["result"] == "pass":
+        if (
+            run["format"] in {5, 6}
+            and run["method"] == "legal_storage_v1"
+            and run["result"] == "pass"
+        ):
             try:
                 from .measurement_sample_validation import RequestPlan
             except ImportError:
@@ -710,15 +743,15 @@ def validate_files(contents, expected, *, report_format=None):
         process_exit_s = None
         business_start = business_finish = backup_finish = None
         if report_format is None:
-            report_format = 2 if run["format"] in {3, 4, 5} else 1
+            report_format = 2 if run["format"] in {3, 4, 5, 6} else 1
         if (
             type(report_format) is not int
             or report_format not in {1, 2}
-            or (report_format == 2 and run["format"] not in {3, 4, 5})
-            or (run["format"] in {4, 5} and report_format != 2)
+            or (report_format == 2 and run["format"] not in {3, 4, 5, 6})
+            or (run["format"] in {4, 5, 6} and report_format != 2)
         ):
             raise EvidenceError("unsupported_report_format")
-        file_limit = MAX_FILE if run["format"] in {3, 4, 5} else LEGACY_MAX_FILE
+        file_limit = MAX_FILE if run["format"] in {3, 4, 5, 6} else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
             if not raw or len(raw) > file_limit:
@@ -731,6 +764,8 @@ def validate_files(contents, expected, *, report_format=None):
                 if name != "run-manifest.json":
                     row = _json(line)
                     validate_record(name, row, format_version=run["format"])
+                    if wal_bindings is not None:
+                        wal_bindings.add(name, row)
                     if request_plan is not None and name == "requests.jsonl":
                         request_plan.add(row)
                     if child_exits is not None and name == "release-events.jsonl":
@@ -792,6 +827,8 @@ def validate_files(contents, expected, *, report_format=None):
                 exceptions.append(summary)
         if io_events is not None:
             io_events.complete()
+        if wal_bindings is not None:
+            wal_bindings.complete()
         if native is not None:
             if (
                 run["method"] == "legal_storage_v1"
@@ -834,13 +871,13 @@ def validate_files(contents, expected, *, report_format=None):
         # V2/V3 freeze every approved field except measured outcomes. In particular,
         # a newer schema must never fall back to the smaller historical identity.
         identity_fields = (
-            set(V5_FIELDS if run["format"] == 5 else V2_FIELDS) - {"result", "metrics"}
-            if run["format"] in {2, 3, 4, 5}
+            set(V5_FIELDS if run["format"] in {5, 6} else V2_FIELDS) - {"result", "metrics"}
+            if run["format"] in {2, 3, 4, 5, 6}
             else IDENTITY_FIELDS
         )
         if any(run[key] != expected[key] for key in identity_fields):
             raise EvidenceError("run_identity_mismatch")
-        if run["format"] in {2, 3, 4, 5} and any(
+        if run["format"] in {2, 3, 4, 5, 6} and any(
             run["metrics"][key] != expected["metrics"][key] for key in ("logical", "ledger_rows")
         ):
             # Physical byte layouts/results are observations; the approved
@@ -925,7 +962,7 @@ def seal(source, target, recipient, expected):
     exceptions = validate_files(contents, expected)
     public_fingerprint = fingerprint(recipient)
     manifest = {
-        "format": 2 if expected["format"] in {3, 4, 5} else 1,
+        "format": 2 if expected["format"] in {3, 4, 5, 6} else 1,
         "tool": "pyrage",
         "version": version("pyrage"),
         "recipient_sha256": public_fingerprint,
@@ -1012,7 +1049,7 @@ def _archive(plain, ident, expected):
     if (
         type(manifest["format"]) is not int
         or manifest["format"] not in {1, 2}
-        or (manifest["format"] == 2 and expected["format"] not in {3, 4, 5})
+        or (manifest["format"] == 2 and expected["format"] not in {3, 4, 5, 6})
         or manifest["tool"] != "pyrage"
         or manifest["version"] != "1.4.0"
         or manifest["private_scan"] != "not_run_in_ci"

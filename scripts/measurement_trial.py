@@ -148,7 +148,7 @@ def _memory_lifecycle(recorder, observation):
 
     def closed(store):
         result = original_close(store)
-        if store in references and (recorder.format_version != 5 or store not in released):
+        if store in references and (recorder.format_version not in {5, 6} or store not in released):
             event(references[store], "released")
             released.add(store)
         return result
@@ -172,7 +172,7 @@ async def run(directory, run, product_root, tiny=False):
     evidence.validate_run(run)
     if (
         tiny is not True
-        or run["format"] not in {4, 5}
+        or run["format"] not in {4, 5, 6}
         or run["phase"] != "fixture"
         or run["method"] != "legal_fixture_comparison_v1"
     ):
@@ -201,11 +201,11 @@ async def run(directory, run, product_root, tiny=False):
         root.parent,
         recorder,
         origin=origin,
-        process_sequence=0 if run["format"] == 5 else None,
+        process_sequence=0 if run["format"] in {5, 6} else None,
     )
     mode, backup_enabled = MODES[run["arm"]], run["arm"] in {"original", "candidate"}
     views = (
-        Views(recorder, now=observation.now, first_id=2 if run["format"] == 5 else 1)
+        Views(recorder, now=observation.now, first_id=2 if run["format"] in {5, 6} else 1)
         if mode != "legacy"
         else None
     )
@@ -261,7 +261,7 @@ async def run(directory, run, product_root, tiny=False):
                 json.dumps(dict(format=1, source="generated_fictional_only")),
                 encoding="utf-8",
             )
-            if run["format"] == 5:
+            if run["format"] in {5, 6}:
                 (root / "measurement-observers.json").write_text(
                     json.dumps(
                         dict(
@@ -338,7 +338,7 @@ async def run(directory, run, product_root, tiny=False):
                         raise ValueError("measurement_unexpected_child")
                     child_number = len(processes) + 1
                     extra = ()
-                    if run["format"] == 5:
+                    if run["format"] in {5, 6}:
                         if child_number not in run["observer_sequences"]:
                             raise ValueError("measurement_unplanned_child")
                         extra = (str(child_number), run["execution_id"])
@@ -640,7 +640,7 @@ async def run(directory, run, product_root, tiny=False):
         for index, _ in enumerate(processes, 1):
             name = (
                 f"child-storage-phases-{index}.jsonl"
-                if run["format"] == 5
+                if run["format"] in {5, 6}
                 else "child-storage-phases.jsonl"
             )
             recorder.append_bytes("storage-phases.jsonl", (root / name).read_bytes())

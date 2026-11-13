@@ -53,6 +53,7 @@ class Views:
             original_init(worker, *args, **kwargs)
             with observer.guard:
                 observer.workers[worker] = len(observer.workers) + observer.first_id
+                worker._measurement_view_id = observer.workers[worker]
                 observer.event(worker, "thread", "acquired")
 
         def capture(worker):

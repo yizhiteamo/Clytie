@@ -36,14 +36,21 @@ class Observation:
         self.guard = threading.Lock()
         self.sequence = 0
         self.process_sequence = process_sequence
-        self.io = None
-        if recorder.format_version == 5:
+        self.io = self.pressure = None
+        if recorder.format_version in {5, 6}:
             try:
                 from .measurement_io_observation import IoObservation
             except ImportError:
                 from measurement_io_observation import IoObservation
             self.io = IoObservation(self, process_sequence)
             self.sequence = (process_sequence + 1) << 40
+        if recorder.format_version == 6:
+            try:
+                from .measurement_pressure_observation import PressureObservation
+            except ImportError:
+                from measurement_pressure_observation import PressureObservation
+            self.pressure = PressureObservation(self.io)
+            self.io.pressure = self.pressure
 
     def now(self):
         return max(0, self.timer() - self.origin)
@@ -180,7 +187,7 @@ class Observation:
         original_os_lock = locking._os_lock
         original_capture_lock = CaptureCoordinator._lock
         native = None
-        if self.recorder.format_version in {4, 5}:
+        if self.recorder.format_version in {4, 5, 6}:
             try:
                 from .measurement_native_observation import NativeObservation, _validation
             except ImportError:
@@ -209,7 +216,10 @@ class Observation:
                 finally:
                     if state is not None:
                         state["last_call"] = observer.now()
-                return native.cursor(cursor, state) if native is not None else cursor
+                cursor = native.cursor(cursor, state) if native is not None else cursor
+                if observer.pressure is not None:
+                    cursor = observer.pressure.cursor(self, sql, cursor)
+                return cursor
 
             def close(self):
                 state = getattr(self, "_measurement_implicit", None)
@@ -282,6 +292,8 @@ class Observation:
         with ExitStack() as stack:
             if self.io is not None:
                 self.io.install(stack)
+            if self.pressure is not None:
+                self.pressure.install(stack)
             stack.enter_context(patch.object(sqlite3, "connect", connect))
             stack.enter_context(patch.object(os, "fsync", fsync))
             stack.enter_context(patch.object(locking, "_os_lock", os_lock))
