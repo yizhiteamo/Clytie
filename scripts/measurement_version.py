@@ -21,12 +21,15 @@ def _git(repository, *arguments):
     return subprocess.check_output(["git", *arguments], cwd=repository)
 
 
-def prepare(repository, directory, *, mode, candidate):
+def prepare(repository, directory, *, mode, candidate, tool_commit=None):
     if mode not in {"legacy", "original", "candidate"}:
         raise ValueError("measurement_version_invalid")
     if len(candidate) != 40 or any(c not in "0123456789abcdef" for c in candidate):
         raise ValueError("measurement_candidate_invalid")
-    if _git(repository, "rev-parse", "HEAD").decode().strip() != candidate:
+    checkout = candidate if tool_commit is None else tool_commit
+    if len(checkout) != 40 or any(c not in "0123456789abcdef" for c in checkout):
+        raise ValueError("measurement_tool_commit_invalid")
+    if _git(repository, "rev-parse", "HEAD").decode().strip() != checkout:
         raise ValueError("measurement_candidate_changed")
     commit = {"legacy": LEGACY, "original": ORIGINAL, "candidate": candidate}[mode]
     archive = _git(repository, "archive", "--format=tar", commit)

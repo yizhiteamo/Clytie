@@ -50,7 +50,10 @@ def checked(frozen, execution_id, version_directory, *, environ=None):
     evidence._pattern(env.get("GITHUB_RUN_ID"), r"[1-9][0-9]{0,19}")
     evidence._pattern(env.get("GITHUB_JOB"), r"[a-z][a-z0-9_-]{0,60}")
     candidate = frozen["inputs"]["inventory"]["candidate"]
-    preparation.current(ROOT, candidate)
+    # Historical plans explicitly used one commit for both. New ingress requires
+    # tool_commit; never substitute the plan commit or a live branch HEAD.
+    tool_commit = frozen["inputs"]["inventory"].get("tool_commit", candidate)
+    preparation.current(ROOT, tool_commit)
     proof = prep_transport.material_identity(ROOT, version_directory, candidate)
     source, tools = mechanism.verify_materials(version_directory, ROOT)
     if (

@@ -118,6 +118,9 @@ def _validate_inputs(inventory, geometry):
         if isinstance(inventory, dict) and "source_inventory_sha256" in inventory
         else ()
     )
+    tool_fields = (
+        ("tool_commit",) if isinstance(inventory, dict) and "tool_commit" in inventory else ()
+    )
     _fields(
         inventory,
         (
@@ -127,9 +130,12 @@ def _validate_inputs(inventory, geometry):
             "verification_sha256",
             "environments",
             *source_fields,
+            *tool_fields,
         ),
     )
     _hash(inventory["candidate"], 40)
+    for key in tool_fields:
+        _hash(inventory[key], 40)
     for key in ("fixture_sha256", "tool_sha256", "verification_sha256"):
         _hash(inventory[key])
     for key in source_fields:
