@@ -29,6 +29,8 @@ TOOL_FILES = (
     "scripts/measurement_cancel.py",
     "scripts/measurement_cancel_validation.py",
     "scripts/measurement_fixture.py",
+    "scripts/measurement_geometry.py",
+    "scripts/measurement_preparation_evidence.py",
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_io_observation.py",
