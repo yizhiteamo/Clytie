@@ -27,7 +27,7 @@ def test_explicit_tool_inventory_contains_every_runtime_adapter_and_scanner():
     assert len(inventory["files"]) == len(launch.TOOL_FILES)
 
 
-@pytest.mark.parametrize("format_version", [4, 5])
+@pytest.mark.parametrize("format_version", [4, 5, 6])
 def test_real_fresh_process_four_arms_preserve_samples_and_production_identity(format_version):
     parent = Path(tempfile.mkdtemp(prefix="cl-")).resolve()
     candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip()
@@ -100,7 +100,7 @@ def test_real_fresh_process_four_arms_preserve_samples_and_production_identity(f
         # A tiny functional fixture may exceed its preset observation window;
         # retain that failure rather than asserting CI throughput or retiming it.
         assert actual["result"] in {"pass", "fail"}
-        if format_version == 5:
+        if format_version in {5, 6}:
             phases = [json.loads(row) for row in contents["storage-phases.jsonl"].splitlines()]
             io_events = evidence.io_tools().IoEvents({**actual, "result": "pass"})
             native = evidence.NativeEvents()

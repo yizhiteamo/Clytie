@@ -14,7 +14,13 @@ DEPENDENCIES = {
         "measurement_views",
         "measurement_fixture",
     ),
-    "measurement_launch": ("measurement_version",),
+    "measurement_launch": (
+        "measurement_version",
+        "measurement_io_observation",
+        "measurement_pressure_observation",
+        "measurement_sample_validation",
+    ),
+    "measurement_pressure_observation": ("measurement_io_observation",),
     "measurement_load": ("measurement_recording",),
     "measurement_views": ("measurement_recording",),
 }

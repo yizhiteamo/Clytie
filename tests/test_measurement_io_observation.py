@@ -18,6 +18,7 @@ from clytie.backup.io_budget import CHUNK, IoBudget, StageKey
 from clytie.sdk.testing import MockClock
 
 recording = load_tool("measurement_recording")
+load_tool("measurement_sample_validation")
 io_observation = load_tool("measurement_io_observation")
 load_tool("measurement_native_observation")
 observation = load_tool("measurement_observation")
