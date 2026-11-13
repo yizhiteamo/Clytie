@@ -1,6 +1,6 @@
 """伴侣运行连接工厂；创建、迁移及释放均由存储所有者线程执行。"""
 
-from clytie.api.management_journal import ManagementBusy, gate, recover_locked
+from clytie.api.management_journal import ManagementBusy, gate, pending, recover_locked
 from clytie.backup.coordination import companion_coordinator
 from clytie.kernel.ledger import Ledger, LedgerError
 from clytie.memory.errors import MemoryStartupError
@@ -16,7 +16,14 @@ class CompanionResources:
         self.memory = self.ledger = self.memory_lock = None
         try:
             with gate(host.home, runtime.cid):
-                recover_locked(host.home, runtime.cid, host.clock)
+                if getattr(runtime, "management_recovery_prepared", False):
+                    # Recovery ran before the Owner queue existed. A management
+                    # operation admitted in the gap must win admission normally;
+                    # never reacquire a heavy-I/O slot inside this factory.
+                    if pending(host.home, runtime.cid, host.clock):
+                        raise ManagementBusy()
+                else:
+                    recover_locked(host.home, runtime.cid, host.clock)
                 self.memory = host.memory_store(runtime.cid)
                 _, self.memory_lock = host.memory_resources[runtime.cid]
                 self.ledger = Ledger(

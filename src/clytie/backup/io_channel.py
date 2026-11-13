@@ -30,7 +30,14 @@ class IoChannel:
             return len(self._pending)
 
     def client(self, operation_id, *, check):
-        return IoClient(partial(self.call, operation_id, check=check))
+        return IoClient(
+            partial(self.call, operation_id, check=check), connected=self.check_connected
+        )
+
+    def check_connected(self):
+        with self._condition:
+            if self._disconnected:
+                raise IoBudgetError("backup_io_disconnected")
 
     def receive(self, value):
         if not isinstance(value, dict) or value.get("type") != "backup_io_reply":
@@ -81,6 +88,11 @@ class IoChannel:
                     response = self._pending[key]
                     if response is not None:
                         if "error" in response or response.get("result") != {}:
+                            if response.get("error") in {
+                                "backup_io_exit_unconfirmed",
+                                "backup_io_executor_lost",
+                            }:
+                                raise IoBudgetError(response["error"])
                             raise IoBudgetError("backup_io_remote_failure")
                         return response["result"]
                     # No time budget here: the controller's injected clock governs

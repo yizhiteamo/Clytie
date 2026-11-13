@@ -195,6 +195,10 @@ class ProcessLauncher:
         self.children = []
 
     async def launch(self, cid):
+        from clytie.clock import SystemClock
+        from clytie.storage.startup_recovery import recovery_operations
+
+        recovery = await asyncio.to_thread(recovery_operations, self.home, cid, SystemClock())
         directory = self.home / "companions" / cid / "logs"
         directory.mkdir(parents=True, exist_ok=True)
         log = None
@@ -210,6 +214,7 @@ class ProcessLauncher:
         try:
             self.job.assign(process)
             child = Child(process, log)
+            child.recovery_operations = recovery
             self.children.append(child)
             await child.send({"type": "boot", "seq": 0})
             return child

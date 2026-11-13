@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from importlib import metadata
 from pathlib import Path
@@ -106,12 +106,15 @@ def _snapshot(store, path, *, local_state=True):
         output.close()
 
 
-def open_database(data, home, companion_id, version=3):
+def open_database(data, home, companion_id, version=3, *, native=False):
+    from clytie.backup.native_sqlite import native_checks
+
     with temporary_database(home, companion_id, "import") as path:
         path.write_bytes(data)
         connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
         try:
-            _validate_database(connection, version)
+            with native_checks(connection) if native else nullcontext():
+                _validate_database(connection, version, close_on_error=not native)
             result = sqlite3.connect(":memory:")
             try:
                 connection.backup(result)
@@ -540,16 +543,17 @@ class Exports:
                     return result
                 await run_sync(self.store, self._prepare_export_audit, result)
                 await files.run(publish)
-                await run_sync(self.store, self._audit_export, result)
+                await run_sync(self.store, self._audit_export, result, _cleanup=True)
                 return await files.run(
                     lambda: {
                         "path": str(work["material"]["out"]),
                         "recovery_code": work["material"]["code"],
-                    }
+                    },
+                    _cleanup=True,
                 )
             except BaseException:
                 if "material" in work:
-                    await files.run(lambda: self._rollback_public(work["material"]))
+                    await files.run(lambda: self._rollback_public(work["material"]), _cleanup=True)
                 raise
             finally:
-                await files.run(cleanup)
+                await files.run(cleanup, _cleanup=True)

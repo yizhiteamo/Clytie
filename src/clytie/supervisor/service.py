@@ -144,6 +144,10 @@ class Supervisor:
                 self.children[cid] = child
                 io_session = self.backup_io.register(storage_owner=True)
                 self.backup_io_sessions[cid] = io_session
+                # Only parent-selected existing management journals are authorized.
+                # A new launch/session never regains the prior executor's stage.
+                for operation in getattr(child, "recovery_operations", ()):
+                    self.backup_io.authorize(io_session, operation)
                 while True:
                     now = self.clock.monotonic()
                     if row["phase"] == "starting" and ready is None:

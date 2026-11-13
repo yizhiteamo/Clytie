@@ -390,11 +390,27 @@ class Companion:
         return dict(state="not_stopped" if row["not_stopped"] else "stopped", reason=None, **row)
 
     async def _open_storage(self):
+        from clytie.api.management_journal import ManagementBusy, ManagementCancelled
         from clytie.storage.owner import StorageFailed, StorageOwner
         from clytie.storage.runtime import CompanionResources, bind_handles
+        from clytie.storage.startup_recovery import recover_before_owner
 
         if self.cid in self.host.memory_resources:
             raise RuntimeError("runtime_memory_already_open")
+        try:
+            await recover_before_owner(self)
+        except ManagementCancelled:
+            raise asyncio.CancelledError from None
+        except ManagementBusy:
+            reason = (
+                "management_recovery_blocked"
+                if (self.home / "companions" / self.cid / "management/blocked.json").exists()
+                else "lock_held"
+            )
+            raise StartupBlocked(reason) from None
+        self.runtime.management_recovery_prepared = True
+        if self.stop_requested():
+            raise asyncio.CancelledError
         failure = {}
         opening = asyncio.create_task(
             StorageOwner.start(

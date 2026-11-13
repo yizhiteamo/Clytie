@@ -149,6 +149,16 @@ class Workers:
             self.tasks.pop(key, None)
 
     async def _process(self, journal, args, control, *, recover_only=False):
+        # Prepare the trusted allow-list before launching a child. A damaged or
+        # blocked journal must not leave a process waiting for its initial input.
+        authorized = (
+            [
+                item.value["id"]
+                for item in pending(self.home, journal.value["companion_id"], self.clock)
+            ]
+            if recover_only
+            else [journal.value["id"]]
+        )
         executable, env = python_process()
         env.pop("CLYTIE_HOME", None)
         kwargs = (
@@ -179,7 +189,10 @@ class Workers:
                     journal.phase("failed")
             return {"ok": False, "code": "management_worker_failed"}
         session = self.io_control.register()
-        self.io_control.authorize(session, journal.value["id"])
+        # Recovery may cover several durable operations. Only the trusted parent
+        # authorizes those original IDs for this new process session.
+        for operation_id in authorized:
+            self.io_control.authorize(session, operation_id)
 
         async def send(reply):
             if process.stdin.is_closing():
@@ -248,7 +261,8 @@ class Workers:
             process.stdin.close()
             await settle(asyncio.create_task(process.wait()))
             await self.io_control.ended(session, confirmed=True)
-            self.io_control.finish_operation(journal.value["id"])
+            for operation_id in authorized:
+                self.io_control.finish_operation(operation_id)
 
     def escalate(self):
         if not self.stopping:

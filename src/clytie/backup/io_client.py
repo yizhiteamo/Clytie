@@ -57,9 +57,14 @@ def current_checks():
 
 
 class IoClient:
-    def __init__(self, request):
+    def __init__(self, request, *, connected=None):
         # request 与原操作/真实执行者绑定；不能携带客户端选择的其他执行者。
         self.request = request
+        self.connected = connected
+
+    def check_available(self):
+        if self.connected is not None:
+            self.connected()
 
     def _request(self, arguments):
         checkpoint()
@@ -79,7 +84,7 @@ class IoClient:
         if existing is not None:
             if existing["client"] is not self or existing["thread"] != threading.get_ident():
                 raise IoBudgetError("backup_io_stage_context_mismatch")
-            # 同一同步阶段内的小帮手共用槽位，不申请下一阶段并等待自己。
+            # 管理操作仅复用已明确交接的借用权；不得在 Owner 内重新准入。
             yield
             return
         key = uuid4().hex

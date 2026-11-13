@@ -15,6 +15,7 @@ from clytie.storage.owner import StorageBusy
 from .coordination import CaptureError
 from .io_client import current_client, io_checks, io_scope
 from .native_sqlite import native_checks, validation_stage
+from .operation_slot import current_slot
 from .sqlite_io import copy_database
 from .view_limits import MAX_VIEW_SECONDS, ViewLimits
 
@@ -35,6 +36,7 @@ class _SnapshotWorker:
     def __init__(self, paths, coordinator):
         self.paths, self.coordinator = dict(paths), coordinator
         self.io_client = current_client()
+        self.operation_slot = current_slot()
         self.started = coordinator.clock.monotonic()
         self.acquired = None
         self.cancelled = threading.Event()
@@ -150,7 +152,13 @@ class _SnapshotWorker:
             if self.cancelled.is_set():
                 raise CaptureError("cancelled")
 
-        with io_scope(self.io_client), io_checks(checkpoint), validation_stage():
+        slot = self.operation_slot
+        with (
+            io_scope(self.io_client),
+            io_checks(checkpoint),
+            slot.slot.borrow(slot) if slot else nullcontext(),
+            validation_stage(),
+        ):
             try:
                 return self._copy_checked(directory, pages, checkpoint)
             finally:

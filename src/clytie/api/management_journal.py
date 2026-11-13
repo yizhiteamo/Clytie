@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import nullcontext
 from contextvars import ContextVar
 from uuid import uuid4
 
@@ -408,22 +409,34 @@ class Journal:
         return self.public()
 
     def public(self):
-        return {
-            key: self.value[key]
-            for key in (
-                "id",
-                "companion_id",
-                "operation",
-                "state",
-                "committed",
-                "delivery",
-                "result",
-            )
-        } | {"reason": self.value.get("reason")}
+        return (
+            {
+                key: self.value[key]
+                for key in (
+                    "id",
+                    "companion_id",
+                    "operation",
+                    "state",
+                    "committed",
+                    "delivery",
+                    "result",
+                )
+            }
+            | {"reason": self.value.get("reason")}
+            | {
+                key: self.value[key]
+                for key in ("io_release_unconfirmed", "io_release_error")
+                if key in self.value
+            }
+        )
 
     def recover(self, store=None):
         """Called only while holding the companion's OS management/runtime locks."""
-        result = self._recover(store)
+        from clytie.backup.native_sqlite import validation_stage
+
+        needs_database = self.value.get("database") or self.value.get("file_audit")
+        with validation_stage() if needs_database else nullcontext():
+            result = self._recover(store)
         # Execution references survive response loss and the admission/journal gap.
         # Only verified terminal operations may release their own source protection.
         if self.value["state"] in TERMINAL and self.value["state"] != "recovery_blocked":
@@ -603,7 +616,7 @@ def executor_alive(identity):
         return None
 
 
-def recover_locked(home, cid, clock):
+def recover_locked(home, cid, clock, *, recover_one=None):
     from clytie.memory.transfer import runtime_lock
 
     with runtime_lock(home, cid, "management_recovery"):
@@ -616,11 +629,14 @@ def recover_locked(home, cid, clock):
             if alive is None:
                 journal.blocked("executor_unverified")
                 raise ManagementBusy()
-            journal.recover()
+            if recover_one is None:
+                journal.recover()
+            else:
+                recover_one(journal)
             if journal.value["state"] == "recovery_blocked":
                 raise ManagementBusy()
 
 
-def recover_pending(home, cid, clock):
+def recover_pending(home, cid, clock, *, recover_one=None):
     with gate(home, cid):
-        recover_locked(home, cid, clock)
+        recover_locked(home, cid, clock, recover_one=recover_one)

@@ -3,11 +3,12 @@
 import asyncio
 import threading
 from concurrent.futures import Future
-from contextlib import ExitStack, asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, nullcontext
 from queue import Queue
 from uuid import uuid4
 
 from clytie.backup.io_client import current_checks, current_client, io_checks, io_scope
+from clytie.backup.operation_slot import current_slot, verify_operation_binding
 from clytie.clock import SystemClock
 from clytie.storage.owner import _snapshot
 
@@ -36,25 +37,34 @@ class FileCommands:
 
     def _run(self):
         while True:
-            function, journal, client, checks, future = self._requests.get()
+            function, journal, client, checks, slot, cleanup, future = self._requests.get()
             if function is None:
                 future.set_result(None)
                 return
             binding = current.set(journal)
             try:
+                verify_operation_binding(slot, journal, client)
                 with ExitStack() as scope:
                     scope.enter_context(io_scope(client))
                     for check in checks:
                         scope.enter_context(io_checks(check))
+                    scope.enter_context(
+                        slot.slot.borrow(slot, cleanup=cleanup) if slot else nullcontext()
+                    )
                     result = _snapshot(function())
             except BaseException as exc:
-                future.set_exception(exc)
+                error = exc
             else:
-                future.set_result(result)
+                error = None
             finally:
                 current.reset(binding)
+            # Publish only after the borrow and every trusted context have exited.
+            if error is not None:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
 
-    async def run(self, function, *args, **kwargs):
+    async def run(self, function, *args, _cleanup=False, **kwargs):
         if self._active or self._closed:
             raise RuntimeError("management_file_command_busy")
         self._active = True
@@ -65,6 +75,8 @@ class FileCommands:
                 current.get(),
                 current_client(),
                 current_checks(),
+                current_slot(),
+                _cleanup,
                 result,
             )
         )
@@ -88,7 +100,7 @@ class FileCommands:
             raise RuntimeError("management_file_command_active")
         self._closed = True
         result = Future()
-        self._requests.put_nowait((None, None, None, (), result))
+        self._requests.put_nowait((None, None, None, (), None, False, result))
         await settle(asyncio.wrap_future(result))
         while self.thread.is_alive():
             await self.clock.sleep(0)
@@ -100,14 +112,14 @@ class FileCommands:
         await self.close()
 
 
-async def file_call(store, function, *args, **kwargs):
+async def file_call(store, function, *args, _cleanup=False, **kwargs):
     """仅文件阶段转交线程；活动及离线业务数据库仍属于原执行者。"""
     from clytie.storage.handle import StoreHandle
 
     if not isinstance(store, StoreHandle) and current_client() is None:
         return function(*args, **kwargs)
     async with FileCommands(store.clock if store is not None else SystemClock()) as worker:
-        return await worker.run(function, *args, **kwargs)
+        return await worker.run(function, *args, _cleanup=_cleanup, **kwargs)
 
 
 @asynccontextmanager
@@ -121,7 +133,7 @@ async def owned_snapshot(store, home, companion_id):
     coordinator = store.coordination or companion_coordinator(home, companion_id, store.clock)
     journal = current.get()
     group = await capture_group(
-        {"memory": store.path}, coordinator, epoch=uuid4().hex, owner=store._owner
+        {"memory": store.path}, coordinator, epoch=uuid4().hex, owner=getattr(store, "_owner", None)
     )
     try:
         paths = await group.materialize(directory, check=journal.checkpoint if journal else None)
@@ -137,19 +149,31 @@ async def owned_snapshot(store, home, companion_id):
             if directory.exists():
                 directory.rmdir()
 
-        await file_call(store, cleanup)
+        await file_call(store, cleanup, _cleanup=True)
 
 
-async def management_command(store, function, *args, **kwargs):
+async def management_command(store, function, *args, _cleanup=False, **kwargs):
     from clytie.backup.coordination import run_sync
     from clytie.storage.finalization import finalizer_scope
 
     journal = current.get()
     token = getattr(journal, "storage_finalizer", None) if journal is not None else None
+    slot = current_slot()
+    checks = current_checks()
+
+    def borrowed():
+        if slot is None:
+            return function(*args, **kwargs)
+        verify_operation_binding(slot, journal)
+        with ExitStack() as scope:
+            for check in checks:
+                scope.enter_context(io_checks(check))
+            scope.enter_context(slot.slot.borrow(slot, cleanup=_cleanup))
+            return function(*args, **kwargs)
 
     async def execute():
         with finalizer_scope(token):
-            return await run_sync(store, function, *args, **kwargs)
+            return await run_sync(store, borrowed)
 
     command = asyncio.create_task(execute())
     try:

@@ -4,7 +4,7 @@ import hashlib
 import inspect
 import json
 import os
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -399,7 +399,7 @@ class Transfers:
             return await self._plan(source, **options)
         except BaseException:
             if self.source_adapter is not None:
-                await file_call(self.store, self.source_adapter.failed_generation)
+                await file_call(self.store, self.source_adapter.failed_generation, _cleanup=True)
             raise
 
     async def _plan(
@@ -554,8 +554,13 @@ class Transfers:
             )
             if checked != raw:
                 raise ValueError("导入前快照校验失败")
-            db = open_database(checked, self.home, self.cid)
-            db.close()
+            from clytie.backup.native_sqlite import validation_stage
+            from clytie.backup.operation_slot import current_slot
+
+            native = self.source_adapter is not None and current_slot() is not None
+            with validation_stage() if native else nullcontext():
+                db = open_database(checked, self.home, self.cid, native=native)
+                db.close()
             from clytie.api.management_journal import current
 
             journal = current.get()
@@ -610,9 +615,12 @@ class Transfers:
                 importer=plan["importer"],
                 approve=plan["approve_proposals"],
             )
+            from clytie.backup.operation_slot import current_slot
             from clytie.storage.handle import StoreHandle
 
-            if isinstance(self.store, StoreHandle):
+            if isinstance(self.store, StoreHandle) or (
+                self.source_adapter is not None and current_slot() is not None
+            ):
                 from clytie.api.management_io import owned_snapshot
                 from clytie.memory.store import MemoryStore
 

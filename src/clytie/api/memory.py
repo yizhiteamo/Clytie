@@ -352,7 +352,7 @@ class MemoryAPI:
 
                 return await run_sync(store, content)
             finally:
-                await run_sync(store, reader.__exit__, None, None, None)
+                await run_sync(store, reader.__exit__, None, None, None, _cleanup=True)
 
     async def apply(self, plan_id, **options):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
@@ -407,7 +407,9 @@ class MemoryAPI:
                     accepted = await run_sync(store, accept)
                 result = await transfers.apply(plan_id, **options)
                 if adapter is not None:
-                    await self.file_command(plan["companion_id"], catalog.release, accepted)
+                    await self.file_command(
+                        plan["companion_id"], catalog.release, accepted, _cleanup=True
+                    )
                 return result
 
     def plan_kind(self, plan_id):
