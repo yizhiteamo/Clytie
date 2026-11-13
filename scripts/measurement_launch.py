@@ -31,6 +31,8 @@ TOOL_FILES = (
     "scripts/measurement_fixture.py",
     "scripts/measurement_geometry.py",
     "scripts/measurement_preparation_evidence.py",
+    "scripts/measurement_preparation_transport.py",
+    "scripts/measurement_preparation_generate.py",
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_io_observation.py",

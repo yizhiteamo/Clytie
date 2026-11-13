@@ -189,7 +189,13 @@ def retention(meta, *, run_id):
         raise evidence.EvidenceError("artifact_retention_unverified") from None
 
 
-def _download_archive(endpoint, target):
+def _download_archive(endpoint, target, *, max_bytes=None):
+    if max_bytes is None:
+        max_bytes = evidence.MAX_TOTAL + 2 * 1024 * 1024
+    evidence._number(max_bytes, integer=True, positive=True)
+    if max_bytes > evidence.MAX_TOTAL + 2 * 1024 * 1024:
+        raise evidence.EvidenceError("download_size_limit")
+    # Existing callers retain the original bound; preparation may only tighten it.
     with Path(target).open("xb") as output:
         process = subprocess.Popen(
             ["gh", "api", endpoint], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
@@ -198,7 +204,7 @@ def _download_archive(endpoint, target):
             total = 0
             while block := process.stdout.read(256 * 1024):
                 total += len(block)
-                if total > evidence.MAX_TOTAL + 2 * 1024 * 1024:
+                if total > max_bytes:
                     raise evidence.EvidenceError("download_size_limit")
                 output.write(block)
             if process.wait() != 0:
