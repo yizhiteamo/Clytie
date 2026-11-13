@@ -75,6 +75,7 @@ def test_real_isolated_versions_share_legal_fixture_and_production_business_and_
         assert row["owner_exited"] and row["views_released"] and row["processes_exited"]
         assert row["complete_backup"] == (mode != "legacy")
         assert row["process_count"] == (0 if mode == "legacy" else 1)
+        assert row["responsibility_verified"] == (mode == "candidate")
         assert row["observed_commits"] >= 3
         assert "benchmark_payload" not in row["metrics"]
         outcomes.append(row)

@@ -43,6 +43,7 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
 
     from clytie.backup.controller import CaptureBridge, capture_request
     from clytie.backup.workers import BackupWorkers
+    from clytie.plugin_host.locking import process_identity
     from clytie.supervisor.common import Audit
 
     owner, metrics = await fixture.setup(root, scale, mode, 73, tiny=True, product_root=product)
@@ -78,7 +79,7 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
                 from clytie.backup.io_channel import IoChannel
                 from clytie.backup.io_control import IoControl
 
-                control = IoControl(owner.clock)
+                control = IoControl(owner.clock, home=owner.home)
                 session = control.register(storage_owner=True)
 
                 async def reply(message):
@@ -94,6 +95,9 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
             async def request(cid, operation, arguments, **kwargs):
                 if cid != owner.cid or operation != "backup_capture":
                     raise ValueError("measurement_unexpected_operation")
+                before_send = kwargs.get("before_send")
+                if before_send is not None:
+                    await before_send(owner)
                 return await capture_request(owner, arguments)
 
             if mode != "legacy":
@@ -104,10 +108,16 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
                     request=request,
                 )
                 if mode == "candidate":
+
+                    async def authorize(cid, operation_id, *, child=None):
+                        if cid != owner.cid or child is not owner:
+                            raise ValueError("measurement_unexpected_executor")
+                        await control.authorize_execution(
+                            session, operation_id, process_identity(), role="capture"
+                        )
+
                     supervisor.backup_io = control
-                    supervisor.authorize_backup_capture = lambda cid, op: control.authorize(
-                        session, op
-                    )
+                    supervisor.authorize_backup_capture = authorize
                 workers = BackupWorkers(
                     owner.home, owner.clock, capture_handler=CaptureBridge(supervisor)
                 )
@@ -169,6 +179,16 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
         raise ValueError("measurement_worker_exit_unconfirmed")
     if errors:
         raise errors[0]
+    responsibility_verified = False
+    if mode == "candidate":
+        state = await control.recheck()
+        ledger = json.loads((owner.home / "supervisor/io-responsibility/index.json").read_bytes())
+        captures = [row for row in ledger["records"].values() if row["role"] == "capture"]
+        responsibility_verified = bool(captures) and all(
+            row["state"] == "ended" for row in captures
+        )
+        if state["state"] != "ready" or not responsibility_verified:
+            raise ValueError("measurement_responsibility_unsettled")
     if workers is not None:
         recorder.append_bytes(
             "storage-phases.jsonl", (root / "child-storage-phases.jsonl").read_bytes()
@@ -190,6 +210,7 @@ async def _probe(root, product, mode, scale, recorder, observation, origin):
         processes_exited=all(child.returncode == 0 for child in processes),
         views_released=views is None or views.pending == 0,
         owner_exited=owner.storage_owner is None or not owner.storage_owner._thread.is_alive(),
+        responsibility_verified=responsibility_verified,
         observed_commits=sum(row["phase"] == "commit" for row in phases),
     )
 
