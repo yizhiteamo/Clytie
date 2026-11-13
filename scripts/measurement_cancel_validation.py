@@ -25,16 +25,20 @@ def verify_cancel_evidence(contents, expected):
         and run["scale"] in {"large_database", "large_asset"}
     ):
         raise SampleError("measurement_planned_cancel_required")
-    requests = [json.loads(line) for line in contents["requests.jsonl"].splitlines()]
     plan = RequestPlan(run, expected_backup="cancelled")
-    for row in requests:
-        plan.add(row)
+    for line in evidence._lines(contents["requests.jsonl"]):
+        plan.add(json.loads(line))
     plan.complete()
     backup = plan.backups[0]
     if backup["finished_s"] > plan.start + run["load"]["window_seconds"]:
         raise SampleError("measurement_backup_window_uncovered")
-    phases = [json.loads(line) for line in contents["storage-phases.jsonl"].splitlines()]
-    cancellations = [row for row in phases if row["phase"] == "planned_cancel"]
+    cancellations = []
+    for line in evidence._lines(contents["storage-phases.jsonl"]):
+        row = json.loads(line)
+        if row["phase"] == "planned_cancel":
+            cancellations.append(row)
+            if len(cancellations) > 4:
+                raise SampleError("measurement_cancel_lifecycle_missing")
     if [row["event"] for row in cancellations] != [
         "triggered",
         "requested",
@@ -46,10 +50,15 @@ def verify_cancel_evidence(contents, expected):
     binding = ("trigger", "source_row_id", "source_at_s", "stage_id", "view_id")
     if any(any(row[key] != trigger[key] for key in binding) for row in cancellations):
         raise SampleError("measurement_cancel_binding_changed")
-    source = [row for row in phases if row["id"] == trigger["source_row_id"]]
-    if len(source) != 1:
+    source = None
+    for line in evidence._lines(contents["storage-phases.jsonl"]):
+        row = json.loads(line)
+        if row["id"] == trigger["source_row_id"]:
+            if source is not None:
+                raise SampleError("measurement_cancel_source_missing")
+            source = row
+    if source is None:
         raise SampleError("measurement_cancel_source_missing")
-    source = source[0]
     if (
         source.get("stage_id") != trigger["stage_id"]
         or source["at_s"] != trigger["source_at_s"]
@@ -88,21 +97,21 @@ def verify_cancel_evidence(contents, expected):
     ):
         raise SampleError("measurement_cancel_timing_or_terminal_invalid")
     resources = ResourceReleases(run)
-    released = [json.loads(line) for line in contents["release-events.jsonl"].splitlines()]
-    for row in released:
+    acquired_views = 0
+    for line in evidence._lines(contents["release-events.jsonl"]):
+        row = json.loads(line)
         resources.add(row)
-    resources.complete()
-    if database:
-        acquired = [
-            row
-            for row in released
-            if row["resource"] == "view"
+        if (
+            database
+            and row["resource"] == "view"
             and row["event"] == "acquired"
             and row["id"] == trigger["view_id"]
             and row["at_s"] <= source["at_s"]
-        ]
-        if len(acquired) != 1:
-            raise SampleError("measurement_cancel_view_missing")
+        ):
+            acquired_views += 1
+    resources.complete()
+    if database and acquired_views != 1:
+        raise SampleError("measurement_cancel_view_missing")
     return dict(
         planned_cancel_verified=True,
         business_schedule_verified=True,
