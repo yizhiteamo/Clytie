@@ -3,8 +3,14 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_observation": (
+        "measurement_io_observation",
+        "measurement_pressure_observation",
+        "measurement_native_observation",
+    ),
     "measurement_geometry": ("measurement_fixture",),
     "measurement_trial": (
+        "measurement_cancel",
         "measurement_recording",
         "measurement_load",
         "measurement_observation",
