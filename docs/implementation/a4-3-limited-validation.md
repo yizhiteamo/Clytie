@@ -1,5 +1,7 @@
 # A4.3 有限恢复检查点
 
+后续进展见 [第 2 轮修复与验证](a4-3-review-2-followup.md)。本页保留有限恢复结束时的候选、限制和轮次，不代表后续修复提交的当前状态。
+
 本页记录本次获准的工程核查和 Windows 本机验证，不是正式独立审查、性能验收或合并批准。PR：https://github.com/yizhiteamo/Clytie/pull/71 。Issue：https://github.com/yizhiteamo/Clytie/issues/72 。
 
 受检产品提交为 `b4dcd0611184e92c7d2da9fb751edbb3c832967a`，base 为 `cb8734fbf77707f5c8bf62e7d97f517848973aa4`。本检查点之后的提交仅补充当前状态和证据说明；代码、测试、锁文件、工作流及冻结计划没有改动。不能将历史候选结果直接改标为新提交通过。
