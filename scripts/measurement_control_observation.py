@@ -56,6 +56,18 @@ EVENTS = {
     "request_started",
     "request_finished",
 }
+BINDING_EVENTS = {
+    "authorization_revoked",
+    "snapshot_acquired",
+    "execution_bound",
+    "snapshot_thread_exited",
+    "execution_waited",
+    "snapshot_stage",
+    "snapshot_closed",
+}
+BINDING_FIELDS = ("binding_version", "resource_id", "view_id", "child_sequence")
+EVENTS |= BINDING_EVENTS
+
 SOURCES = {"runtime_object", "validated_ledger", "durable_save", "unknown"}
 
 
@@ -91,8 +103,23 @@ def outcome(error):
 
 
 def validate_record(row):
-    if set(row) != set(FIELDS) or row["phase"] != PHASE:
+    extended = row.get("event") in BINDING_EVENTS
+    expected = set(FIELDS) | (set(BINDING_FIELDS) if extended else set())
+    if set(row) != expected or row["phase"] != PHASE:
         raise BindingError("control_binding_fields_invalid")
+    if extended:
+        if type(row["binding_version"]) is not int or row["binding_version"] != 1:
+            raise BindingError("release_binding_version_invalid")
+        for key in ("resource_id", "view_id", "child_sequence"):
+            value = row[key]
+            if value is not None and (type(value) is not int or value < 1):
+                raise BindingError("release_binding_identity_invalid")
+        if row["child_sequence"] is not None and row["child_sequence"] >= 256:
+            raise BindingError("release_binding_child_invalid")
+        if row["resource_id"] is not None and (
+            (row["resource_id"] >> 40) - 1 != row["process_sequence"]
+        ):
+            raise BindingError("release_binding_resource_namespace_invalid")
     for field in ("id", "process_sequence"):
         if type(row[field]) is not int or row[field] < 0:
             raise BindingError("control_binding_namespace_invalid")
@@ -137,6 +164,8 @@ class ControlObservation:
         self.controls = WeakKeyDictionary()
         self.ledgers = WeakKeyDictionary()
         self.endpoints = WeakKeyDictionary()
+        self.clients, self.snapshots, self.executions = (WeakKeyDictionary() for _ in range(3))
+        self.waited, self.closed_snapshots = set(), set()
 
     def safe(self, function):
         try:
@@ -261,6 +290,141 @@ class ControlObservation:
             return {}
         return bound
 
+    def child_registered(self, child, child_sequence, operation, identity):
+        # Caller passes the identity it already read for this exact process.
+        context = dict(
+            execution_hash=identity_hash(identity),
+            operation_hash=token_hash(operation),
+            child_sequence=child_sequence,
+        )
+        prior = self.executions.get(child)
+        if prior is not None and prior != context:
+            raise BindingError("execution_binding_changed")
+        if prior is None:
+            self.executions[child] = context
+            self.binding_event("execution_bound", **context)
+
+    def child_waited(self, child):
+        # Invoke only after await original_wait() returns, never from returncode.
+        context = self.executions.get(child)
+        if context is None:
+            self.binding_event("execution_waited", outcome="unknown")
+        elif child not in self.waited:
+            self.waited.add(child)
+            self.binding_event("execution_waited", **context)
+
+    def binding_event(self, event, context=None, **fields):
+        extra = dict(
+            binding_version=1,
+            resource_id=None,
+            view_id=None,
+            child_sequence=None,
+            source="runtime_object",
+            outcome="ok",
+        )
+        extra.update(fields)
+        self.event(event, context, **extra)
+
+    def snapshot_event(self, worker, event, *, stage=False):
+        state = self.snapshots.get(worker)
+        if state is None:
+            state = dict(
+                resource_id=self.io.identifier(),
+                operation_hash=(
+                    self.clients.get(worker.io_client) if worker.io_client is not None else None
+                ),
+                stage_id=None,
+            )
+            self.snapshots[worker] = state
+        if stage:
+            current = self.io.stage()
+            if state["stage_id"] is not None and current != state["stage_id"]:
+                raise BindingError("snapshot_stage_changed")
+            state["stage_id"] = current
+        self.binding_event(event, **state, view_id=getattr(worker, "_measurement_view_id", None))
+
+    def install_release_bindings(self, stack, cls):
+        # Observe actual endpoint removal/tombstone, before durable release. A
+        # method return by itself is not proof: check the resulting live state.
+        original_reap = cls._reap
+
+        @functools.wraps(original_reap)
+        def reap(control):
+            before = [
+                (session, operation, endpoint)
+                for session, state in control.sessions.items()
+                for operation, endpoint in state.endpoints.items()
+            ]
+            result = original_reap(control)
+            for session, operation, endpoint in before:
+                state = control.sessions.get(session)
+                if (
+                    state is not None
+                    and operation not in state.endpoints
+                    and operation in state.closed_operations
+                ):
+                    self.safe(
+                        lambda endpoint=endpoint: self.binding_event(
+                            "authorization_revoked", self.request_context(endpoint)
+                        )
+                    )
+            return result
+
+        stack.enter_context(patch.object(cls, "_reap", reap))
+        try:
+            channel = importlib.import_module("clytie.backup.io_channel")
+            capture = importlib.import_module("clytie.backup.capture")
+        except ModuleNotFoundError as error:
+            if error.name not in {"clytie.backup.io_channel", "clytie.backup.capture"}:
+                raise
+            return
+        original_client = channel.IoChannel.client
+
+        @functools.wraps(original_client)
+        def client(instance, operation_id, **kwargs):
+            result = original_client(instance, operation_id, **kwargs)
+            self.safe(lambda: self.clients.__setitem__(result, token_hash(operation_id)))
+            return result
+
+        stack.enter_context(patch.object(channel.IoChannel, "client", client))
+        original_init = capture._SnapshotWorker.__init__
+        original_copy = capture._SnapshotWorker._copy_checked
+        original_close = capture._SnapshotWorker._close
+        original_join = capture.CapturedGroup._finish_close
+
+        @functools.wraps(original_init)
+        def created(worker, *args, **kwargs):
+            result = original_init(worker, *args, **kwargs)
+            self.safe(lambda: self.snapshot_event(worker, "snapshot_acquired"))
+            return result
+
+        @functools.wraps(original_copy)
+        def copying(worker, *args, **kwargs):
+            self.safe(lambda: self.snapshot_event(worker, "snapshot_stage", stage=True))
+            return original_copy(worker, *args, **kwargs)
+
+        @functools.wraps(original_close)
+        def closed(worker):
+            result = original_close(worker)
+            if not worker._connections and worker not in self.closed_snapshots:
+                self.closed_snapshots.add(worker)
+                self.safe(lambda: self.snapshot_event(worker, "snapshot_closed"))
+            return result
+
+        @functools.wraps(original_join)
+        async def joined(group):
+            try:
+                return await original_join(group)
+            finally:
+                worker = group._worker
+                if not worker.thread.is_alive() and not worker._connections:
+                    self.safe(lambda: self.snapshot_event(worker, "snapshot_thread_exited"))
+
+        stack.enter_context(patch.object(capture._SnapshotWorker, "__init__", created))
+        stack.enter_context(patch.object(capture._SnapshotWorker, "_copy_checked", copying))
+        stack.enter_context(patch.object(capture._SnapshotWorker, "_close", closed))
+        stack.enter_context(patch.object(capture.CapturedGroup, "_finish_close", joined))
+
     def install(self, stack):
         try:
             module = importlib.import_module("clytie.backup.io_control")
@@ -277,6 +441,7 @@ class ControlObservation:
             return
         self.event("observer_started", source="runtime_object", outcome="ok")
         cls, ledger_cls = module.IoControl, ledger_module.Responsibilities
+        self.install_release_bindings(stack, cls)
         original_init, original_register, original_authorize = (
             cls.__init__,
             cls.register,

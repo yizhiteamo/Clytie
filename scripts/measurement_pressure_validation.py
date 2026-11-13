@@ -194,7 +194,7 @@ class Predicates:
                 found += witness["outcome"] == "ok"
             if not found:
                 self.mark(name, "unverified", "actual_owner_sample_value_witness_missing")
-        # This verifies observed equal content only, NEVER Owner↔session identity.
+        # This verifies observed equal content only, NEVER Owner鈫攕ession identity.
         return count
 
     def busy(self, name):
@@ -448,11 +448,11 @@ class Predicates:
             ),
             (
                 "file_charge_causal_binding",
-                "file_batch_has_no_actual_client_charge_sequence_or_scope",
+                "checked_separately_in_batch_reservations_host_file_batch_reservations",
             ),
             (
                 "sqlite_charge_causal_binding",
-                "sqlite_copy_has_no_actual_reservation_request_sequence_binding",
+                "checked_separately_in_batch_reservations_sqlite_logical_progress_reservations",
             ),
             (
                 "all_heavy_io_coverage",

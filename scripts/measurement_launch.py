@@ -48,6 +48,7 @@ TOOL_FILES = (
     "scripts/measurement_batch_observation.py",
     "scripts/measurement_batch_validation.py",
     "scripts/measurement_pressure_validation.py",
+    "scripts/measurement_wal_validation.py",
     "scripts/measurement_pressure_observation.py",
     "scripts/measurement_observation.py",
     "scripts/measurement_native_observation.py",

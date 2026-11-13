@@ -403,6 +403,10 @@ async def _execute(directory, run, product_root, *, tiny):
 
                     async def observed_wait():
                         result = await original_wait()
+                        if observation.control is not None:
+                            observation.control.safe(
+                                lambda: observation.control.child_waited(child)
+                            )
                         if child_number not in child_exit_times:
                             child_exit_times[child_number] = perf_counter()
                             release(child_number, "process", "exit_verified")
@@ -411,6 +415,12 @@ async def _execute(directory, run, product_root, *, tiny):
                     child.wait = observed_wait
                     try:
                         register_child(sample_processes, identities, child, process_identity)
+                        if observation.control is not None:
+                            observation.control.safe(
+                                lambda: observation.control.child_registered(
+                                    child, child_number, args[4], identities[child.pid]
+                                )
+                            )
                     except BaseException:
                         # Observation failure must not orphan a child which has
                         # not yet been handed back to the production tracker.

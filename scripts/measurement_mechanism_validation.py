@@ -18,6 +18,7 @@ if __package__:
     from .measurement_batch_validation import BatchPredicates
     from .measurement_pressure_validation import Predicates
     from .measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
+    from .measurement_wal_validation import WalPredicates
 else:
     import measurement_evidence as evidence
     from measurement_analysis_index import (
@@ -32,6 +33,7 @@ else:
     from measurement_batch_validation import BatchPredicates
     from measurement_pressure_validation import Predicates
     from measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
+    from measurement_wal_validation import WalPredicates
 
 
 class MechanismValidation(Index):
@@ -585,6 +587,186 @@ class MechanismValidation(Index):
         if not slots:
             self.mark(name, "unverified", "no_slot_events")
 
+    def authorized_release_durable_end(self):
+        """Only observed stage authorization and durable metadata, not all resources."""
+        name = "authorized_release_durable_end"
+        immutable = (
+            "process_sequence",
+            "budget_id",
+            "instance_hash",
+            "controller_hash",
+            "session_hash",
+            "operation_hash",
+            "generation_hash",
+            "execution_hash",
+            "responsibility_controller_hash",
+            "role",
+        )
+        seen = False
+        for stage, budget, sequence, granted, released in self.db.execute(
+            "SELECT stage,budget,seq,start,end FROM slots"
+        ):
+            seen = True
+            acquire = self.one(
+                "phase='io_control_binding' AND event='request_started' AND "
+                "stage=? AND budget=? AND json_extract(j,'$.action')='acquire'",
+                (stage, budget),
+            )
+            if any(acquire.get(k) is None for k in immutable):
+                self.mark(name, "unverified", "release_authority_identity_missing")
+                continue
+            if released is None:
+                self.mark(name, "unverified", "slot_release_missing")
+                continue
+            starts = self.rows(
+                "phase='io_control_binding' AND event='request_started' AND "
+                "stage=? AND budget=? AND json_extract(j,'$.action')='release'",
+                (stage, budget),
+            )
+            start = next(starts, None)
+            if start is None:
+                # executor_ended can free the slot without a protocol release.
+                # Only an explicit wait/identity binding can prove that branch.
+                self.mark(name, "unverified", "trusted_release_or_bound_exit_missing")
+                continue
+            require(next(starts, None) is None, "release_request_ambiguous")
+            end = self.one(
+                "phase='io_control_binding' AND event='request_finished' AND "
+                "json_extract(j,'$.call_hash')=?",
+                (start["call_hash"],),
+            )
+            require(
+                all(start[k] == acquire[k] == end[k] for k in immutable)
+                and start["stage_id"] == end["stage_id"] == stage
+                and start["action"] == end["action"] == "release"
+                and start["source"] == end["source"] == "runtime_object"
+                and start["responsibility_state"] == end["responsibility_state"] == "active",
+                "release_authority_changed",
+            )
+            require(end["outcome"] == "ok", "release_request_failed")
+            require(granted <= start["at_s"] <= released <= end["at_s"], "release_order_invalid")
+            # Same generation must retain its complete durable identity. Never
+            # connect an ordinal or PID to an execution hash by proximity.
+            durable = None
+            for row in self.rows(
+                "phase='io_control_binding' AND event='responsibility_observed' AND "
+                "json_extract(j,'$.generation_hash')=?",
+                (acquire["generation_hash"],),
+                order="t,id",
+            ):
+                if row["responsibility_state"] != "ended":
+                    continue
+                require(
+                    all(row[k] == acquire[k] for k in immutable), "release_durable_identity_changed"
+                )
+                require(row["at_s"] >= end["at_s"], "responsibility_ended_before_release")
+                if row["source"] == "durable_save" and row["outcome"] == "ok":
+                    durable = row
+            if durable is None:
+                self.mark(name, "unverified", "durable_ended_missing")
+            if self.count(
+                "phase='io_control_binding' AND event='ledger_failed' AND budget=?",
+                (budget,),
+            ):
+                self.mark(name, "failed", "ledger_failure_observed")
+        if not seen:
+            self.mark(name, "unverified", "release_grant_missing")
+
+    def observed_snapshot_release_order(self):
+        name = "observed_snapshot_release_order"
+        identity = (
+            "instance_hash",
+            "controller_hash",
+            "budget_id",
+            "session_hash",
+            "operation_hash",
+            "generation_hash",
+            "execution_hash",
+            "responsibility_controller_hash",
+            "role",
+        )
+        total = 0
+        for acquired in self.rows("phase='io_control_binding' AND event='snapshot_acquired'"):
+            total += 1
+            key = acquired.get("resource_id")
+            if key is None or acquired.get("operation_hash") is None:
+                self.mark(name, "unverified", "snapshot_operation_binding_missing")
+                continue
+            associated = "phase='io_control_binding' AND json_extract(j,'$.resource_id')=?"
+            require(
+                self.count(associated + " AND event='snapshot_acquired'", (key,)) == 1,
+                "snapshot_acquisition_duplicate",
+            )
+            stage = self.one(associated + " AND event='snapshot_stage'", (key,))
+            closed = self.one(associated + " AND event='snapshot_closed'", (key,))
+            joined = self.one(associated + " AND event='snapshot_thread_exited'", (key,))
+            for row in (stage, closed, joined):
+                require(
+                    row["operation_hash"] == acquired["operation_hash"]
+                    and row["process_sequence"] == acquired["process_sequence"]
+                    and row["source"] == "runtime_object"
+                    and row["outcome"] == "ok",
+                    "snapshot_binding_changed",
+                )
+            if stage.get("stage_id") is None or stage.get("view_id") is None:
+                self.mark(name, "unverified", "snapshot_stage_or_view_binding_missing")
+                continue
+            require(
+                all(
+                    row["stage_id"] == stage["stage_id"] and row["view_id"] == stage["view_id"]
+                    for row in (closed, joined)
+                ),
+                "snapshot_stage_or_view_changed",
+            )
+            request = self.one(
+                "phase='io_control_binding' AND event='request_started' AND "
+                "stage=? AND json_extract(j,'$.action')='acquire'",
+                (stage["stage_id"],),
+            )
+            require(
+                request["operation_hash"] == acquired["operation_hash"],
+                "snapshot_authorized_operation_mismatch",
+            )
+            if any(request[k] is None for k in identity):
+                self.mark(name, "unverified", "snapshot_authority_missing")
+                continue
+            slot = self.db.execute(
+                "SELECT start,end FROM slots WHERE stage=?", (stage["stage_id"],)
+            ).fetchone()
+            if slot is None or slot[1] is None:
+                self.mark(name, "unverified", "snapshot_grant_missing")
+                continue
+            # Read view closes within the stage. The idle snapshot thread can
+            # exit after stage release, but must exit before durable retirement.
+            require(
+                acquired["at_s"] <= stage["at_s"] <= closed["at_s"] <= joined["at_s"]
+                and slot[0] <= stage["at_s"] <= closed["at_s"] <= slot[1],
+                "snapshot_release_order_invalid",
+            )
+            revoked = self.one(
+                "phase='io_control_binding' AND event='authorization_revoked' "
+                "AND json_extract(j,'$.generation_hash')=?",
+                (request["generation_hash"],),
+            )
+            ended = self.one(
+                "phase='io_control_binding' AND event='responsibility_observed' "
+                "AND json_extract(j,'$.generation_hash')=? "
+                "AND json_extract(j,'$.responsibility_state')='ended' "
+                "AND json_extract(j,'$.source')='durable_save'",
+                (request["generation_hash"],),
+            )
+            require(
+                all(row[k] == request[k] for row in (revoked, ended) for k in identity),
+                "snapshot_retirement_identity_changed",
+            )
+            require(
+                joined["at_s"] <= revoked["at_s"] <= ended["at_s"]
+                and revoked["outcome"] == ended["outcome"] == "ok",
+                "snapshot_retired_before_resource_exit",
+            )
+        if not total:
+            self.mark(name, "unverified", "snapshot_binding_events_missing")
+
     def native(self):
         name, count = "native_grant_containment", 0
         for (identifier,) in self.db.execute(
@@ -736,8 +918,9 @@ class MechanismValidation(Index):
             require(slot[0] <= start["at_s"] <= end["at_s"] <= slot[1], "batch_outside_grant")
             if phase == "io_charge":
                 require(start["budget_id"] == slot[2], "charge_budget_mismatch")
-            # No byte-matching claim: file and charge streams lack an explicit
-            # cross-stream transfer identity, and post-commit exception differs.
+            # This check proves only containment. Exact optional reservation
+            # identities are checked separately by BatchPredicates; their absence
+            # never becomes byte matching, and post-commit exceptions still differ.
         if not count:
             self.mark(name, "unverified", "no_batch_events")
 
@@ -752,6 +935,8 @@ class MechanismValidation(Index):
             ("planned_cancel_binding", self.planned_cancel),
             ("slot_intervals", self.slots),
             ("slot_control_identity", self.control),
+            ("authorized_release_durable_end", self.authorized_release_durable_end),
+            ("observed_snapshot_release_order", self.observed_snapshot_release_order),
             ("native_grant_containment", self.native),
             ("batch_grant_containment", self.batches),
         ):
@@ -761,7 +946,7 @@ class MechanismValidation(Index):
             ("pressure_chain", "partial_pressure_observations_are_not_complete_transition_history"),
             (
                 "snapshot_wal_limits",
-                "wal_generation_growth_limit_and_copy_geometry_proof_not_implemented",
+                "wal_growth_subpredicate_does_not_certify_limit_decision_or_release",
             ),
             (
                 "cancel_cross_flow_release_order",
@@ -804,6 +989,7 @@ class MechanismValidation(Index):
             "requirements": results,
             "pressure_and_accounting": Predicates(self).report(),
             "batch_reservations": BatchPredicates(self).report(),
+            "wal_growth": WalPredicates(self).report(),
             "coverage_exceptions": [
                 "native_sqlite_internal_bytes_unknown",
                 "plugin_io_bypassing_host_unobserved",
