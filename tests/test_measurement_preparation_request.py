@@ -300,3 +300,16 @@ def test_workflow_scope_and_permissions():
         ]
         assert "always" not in upload["if"]
         assert job["env"]["PREPARATION_PUBLIC"] == gate.PUBLIC_PATH
+
+
+@pytest.mark.parametrize("job_name", ["prepare_linux", "prepare_windows"])
+def test_runner_paths_are_only_resolved_at_step_scope(job_name):
+    # GitHub context availability excludes runner from jobs.<id>.env.
+    workflow = yaml.safe_load((ROOT / ".github/workflows/preparation.yml").read_text())
+    job = workflow["jobs"][job_name]
+    assert all("runner." not in str(value) for value in job["env"].values())
+    for step in job["steps"]:
+        command = step.get("run", "")
+        for key in ("PREPARATION_ROOT", "PREPARATION_SEALED"):
+            if "$" + key in command:
+                assert step["env"][key].startswith("${{ runner.temp }}/")
