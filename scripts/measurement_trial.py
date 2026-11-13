@@ -127,7 +127,7 @@ def _memory_lifecycle(recorder, observation):
     from clytie.memory.store import MemoryStore
 
     original_init, original_close = MemoryStore.__init__, MemoryStore.close
-    references = {}
+    references, released = {}, set()
 
     def event(identifier, name):
         if not recorder.failed:
@@ -148,8 +148,9 @@ def _memory_lifecycle(recorder, observation):
 
     def closed(store):
         result = original_close(store)
-        if store in references:
+        if store in references and (recorder.format_version != 5 or store not in released):
             event(references[store], "released")
+            released.add(store)
         return result
 
     with patch.object(MemoryStore, "__init__", opened), patch.object(MemoryStore, "close", closed):
@@ -203,7 +204,11 @@ async def run(directory, run, product_root, tiny=False):
         process_sequence=0 if run["format"] == 5 else None,
     )
     mode, backup_enabled = MODES[run["arm"]], run["arm"] in {"original", "candidate"}
-    views = Views(recorder, now=observation.now) if mode != "legacy" else None
+    views = (
+        Views(recorder, now=observation.now, first_id=2 if run["format"] == 5 else 1)
+        if mode != "legacy"
+        else None
+    )
     owner = workers = control = session = sampling = deadline = None
     operations, processes, sample_processes, identities, errors = [], [], [], {}, []
     child_exit_times = {}

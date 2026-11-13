@@ -692,13 +692,14 @@ def validate_files(contents, expected, *, report_format=None):
         native = NativeEvents() if run["format"] in {4, 5} and run["result"] == "pass" else None
         native_observed = False
         io_events = io_tools().IoEvents(run) if run["format"] == 5 else None
-        child_exits = None
+        child_exits = resource_releases = None
         if run["format"] == 5 and run["result"] == "pass":
             try:
-                from .measurement_sample_validation import ProcessExits
+                from .measurement_sample_validation import ProcessExits, ResourceReleases
             except ImportError:
-                from measurement_sample_validation import ProcessExits
+                from measurement_sample_validation import ProcessExits, ResourceReleases
             child_exits = ProcessExits(run)
+            resource_releases = ResourceReleases(run)
         request_plan = None
         if run["format"] == 5 and run["method"] == "legal_storage_v1" and run["result"] == "pass":
             try:
@@ -734,6 +735,7 @@ def validate_files(contents, expected, *, report_format=None):
                         request_plan.add(row)
                     if child_exits is not None and name == "release-events.jsonl":
                         child_exits.add(row)
+                        resource_releases.add(row)
                     if io_events is not None and name == "storage-phases.jsonl":
                         io_events.add(row)
                     if (
@@ -826,6 +828,7 @@ def validate_files(contents, expected, *, report_format=None):
             request_plan.complete()
         if child_exits is not None:
             child_exits.complete()
+            resource_releases.complete()
         if run["format"] != expected["format"]:
             raise EvidenceError("run_identity_mismatch")
         # V2/V3 freeze every approved field except measured outcomes. In particular,

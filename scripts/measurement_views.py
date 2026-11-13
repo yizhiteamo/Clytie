@@ -11,7 +11,10 @@ except ImportError:
 
 
 class Views:
-    def __init__(self, recorder, *, now):
+    def __init__(self, recorder, *, now, first_id=1):
+        if type(first_id) is not int or first_id < 1:
+            raise ValueError("measurement_view_id_invalid")
+        self.first_id = first_id
         self.recorder, self.now = recorder, now
         self.guard = threading.Lock()
         self.workers, self.open, self.exited = {}, set(), set()
@@ -49,7 +52,7 @@ class Views:
         def created(worker, *args, **kwargs):
             original_init(worker, *args, **kwargs)
             with observer.guard:
-                observer.workers[worker] = len(observer.workers) + 1
+                observer.workers[worker] = len(observer.workers) + observer.first_id
                 observer.event(worker, "thread", "acquired")
 
         def capture(worker):

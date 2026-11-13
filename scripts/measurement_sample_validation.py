@@ -38,6 +38,80 @@ class ProcessExits:
             raise SampleError("measurement_process_exit_missing")
 
 
+class ResourceReleases:
+    """V5 release stream, independent of native SQLite connection evidence.
+
+    Owner thread 1 and snapshot threads starting at 2 share a namespace. Views
+    bind to their snapshot thread, but references and slots have distinct keys.
+    Use explicitly for completion judgments, never to reject failed raw archives.
+    """
+
+    TERMINALS = {
+        "thread": "exit_verified",
+        "process": "exit_verified",
+        "view": "released",
+        "reference": "released",
+        "slot": "released",
+    }
+
+    def __init__(self, run):
+        if run["format"] != 5:
+            raise SampleError("measurement_resource_format_invalid")
+        self.processes = set(run["observer_sequences"]) - {0}
+        self.required = {("process", number) for number in self.processes}
+        if run["arm"] != "baseline":
+            self.required.add(("thread", 1))
+        self.states = {}
+
+    def add(self, row):
+        resource, identifier = row["resource"], row["id"]
+        event, at = row["event"], row["at_s"]
+        if (
+            resource not in self.TERMINALS
+            or type(identifier) is not int
+            or identifier < 1
+            or type(at) not in {int, float}
+            or not math.isfinite(at)
+            or at < 0
+        ):
+            raise SampleError("measurement_resource_identity_invalid")
+        key = resource, identifier
+        if resource == "process" and identifier not in self.processes:
+            raise SampleError("measurement_process_not_planned")
+        if resource == "view" and identifier < 2:
+            raise SampleError("measurement_view_owner_collision")
+        if event in {"unknown", "failed"}:
+            raise SampleError("measurement_resource_release_unconfirmed")
+        state = self.states.get(key)
+        if event == "acquired":
+            if state is not None:
+                raise SampleError("measurement_resource_duplicated")
+            if resource == "view":
+                thread = self.states.get(("thread", identifier))
+                if thread is None or thread["done"] or at < thread["last"]:
+                    raise SampleError("measurement_view_thread_unbound")
+            self.states[key] = dict(last=at, done=False, events={event})
+            return
+        if state is None or state["done"] or at < state["last"] or event in state["events"]:
+            raise SampleError("measurement_resource_event_unbound")
+        if event == self.TERMINALS[resource]:
+            if resource == "thread":
+                view = self.states.get(("view", identifier))
+                if view is not None and (not view["done"] or at < view["last"]):
+                    raise SampleError("measurement_view_release_unconfirmed")
+            state["done"] = True
+        elif event not in {"cancel_requested", "io_returned"}:
+            raise SampleError("measurement_resource_terminal_invalid")
+        state["last"] = at
+        state["events"].add(event)
+
+    def complete(self):
+        if not self.required.issubset(self.states) or any(
+            not state["done"] for state in self.states.values()
+        ):
+            raise SampleError("measurement_resource_release_missing")
+
+
 class RequestPlan:
     def __init__(self, run):
         self.load, self.arm = run["load"], run["arm"]
