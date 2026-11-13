@@ -46,7 +46,7 @@ def _nullable_number(value):
         evidence._number(value, integer=True)
 
 
-def validate_record(row):
+def validate_record(row, *, format_version=None):
     phase = row["phase"]
     fields = {
         "file_batch": FILE,
@@ -55,6 +55,11 @@ def validate_record(row):
         "io_slot": SLOT,
         "io_capability": CAPABILITY,
     }[phase]
+    if phase == "io_charge" and "charge_sequence" in row:
+        if format_version != 6:
+            raise evidence.EvidenceError("charge_sequence_format_invalid")
+        fields = (*fields, "charge_sequence")
+        evidence._number(row["charge_sequence"], integer=True, positive=True)
     evidence._fields(row, fields)
     for field in ("id", "process_sequence", "at_s"):
         evidence._number(row[field], integer=field != "at_s")
@@ -173,6 +178,7 @@ class IoEvents:
             "budget_id",
             "direction",
             "requested_bytes",
+            "charge_sequence",
             "pages_per_step",
             "sleep_seconds",
             "callback_present",
@@ -467,6 +473,8 @@ class IoObservation:
                     direction=direction,
                     requested_bytes=size,
                 )
+                if self.observer.recorder.format_version == 6:
+                    fields["charge_sequence"] = stage.sequence
                 self.event(
                     "io_charge", **fields, event="started", charged_bytes=None, outcome="unknown"
                 )

@@ -442,6 +442,19 @@ def validate_record(name, row, *, format_version=None):
     if (
         name == "storage-phases.jsonl"
         and type(row) is dict
+        and row.get("phase") in {"budget_accounting", "pressure_source_binding"}
+    ):
+        if format_version != 6:
+            raise EvidenceError("unsupported_budget_accounting_event")
+        if __package__:
+            from . import measurement_budget_observation as budget_tools
+        else:
+            import measurement_budget_observation as budget_tools
+        budget_tools.validate_record(row)
+        return
+    if (
+        name == "storage-phases.jsonl"
+        and type(row) is dict
         and row.get("phase") == "io_control_binding"
     ):
         if format_version != 6:
@@ -480,7 +493,7 @@ def validate_record(name, row, *, format_version=None):
     if name == "storage-phases.jsonl" and type(row) is dict and row.get("phase") in IO_PHASES:
         if format_version not in {5, 6}:
             raise EvidenceError("unsupported_io_event")
-        io_tools().validate_record(row)
+        io_tools().validate_record(row, format_version=format_version)
         return
     if (
         name == "storage-phases.jsonl"

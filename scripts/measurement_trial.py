@@ -296,6 +296,7 @@ async def run(directory, run, product_root, tiny=False):
 
                 control = IoControl(owner.clock, home=owner.home)
                 session = control.register(storage_owner=True)
+                observation.bind_pressure_source(owner.storage_owner, control, session)
 
                 async def reply(message):
                     channel.receive(message)

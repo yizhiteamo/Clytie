@@ -15,6 +15,7 @@ if __package__:
         RequiredKeys,
         require,
     )
+    from .measurement_pressure_validation import Predicates
     from .measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
 else:
     import measurement_evidence as evidence
@@ -27,6 +28,7 @@ else:
         RequiredKeys,
         require,
     )
+    from measurement_pressure_validation import Predicates
     from measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
 
 
@@ -753,8 +755,8 @@ class MechanismValidation(Index):
         ):
             self.checked(name, check)
         for name, code in (
-            ("budget_bytes_and_rate", "cross_stream_byte_matching_and_token_model_not_implemented"),
-            ("pressure_chain", "owner_receipt_budget_mode_transition_not_implemented"),
+            ("budget_bytes_and_rate", "token_observation_is_not_full_cross_stream_byte_coverage"),
+            ("pressure_chain", "partial_pressure_observations_are_not_complete_transition_history"),
             (
                 "snapshot_wal_limits",
                 "wal_generation_growth_limit_and_copy_geometry_proof_not_implemented",
@@ -798,6 +800,7 @@ class MechanismValidation(Index):
             "row_counts": self.counts,
             "expected_identity_fields": self.expected_fields,
             "requirements": results,
+            "pressure_and_accounting": Predicates(self).report(),
             "coverage_exceptions": [
                 "native_sqlite_internal_bytes_unknown",
                 "plugin_io_bypassing_host_unobserved",

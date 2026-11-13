@@ -36,7 +36,7 @@ class Observation:
         self.guard = threading.Lock()
         self.sequence = 0
         self.process_sequence = process_sequence
-        self.io = self.pressure = self.control = None
+        self.io = self.pressure = self.control = self.accounting = None
         if recorder.format_version in {5, 6}:
             try:
                 from .measurement_io_observation import IoObservation
@@ -56,6 +56,15 @@ class Observation:
             except ImportError:
                 from measurement_control_observation import ControlObservation
             self.control = ControlObservation(self.io)
+            try:
+                from .measurement_budget_observation import BudgetObservation
+            except ImportError:
+                from measurement_budget_observation import BudgetObservation
+            self.accounting = BudgetObservation(self.io)
+
+    def bind_pressure_source(self, owner, control, session):
+        if self.accounting is not None:
+            self.accounting.bind_source(owner, control, session)
 
     def now(self):
         return max(0, self.timer() - self.origin)
@@ -301,6 +310,8 @@ class Observation:
                 self.control.install(stack)
             if self.pressure is not None:
                 self.pressure.install(stack)
+            if self.accounting is not None:
+                self.accounting.install(stack)
             stack.enter_context(patch.object(sqlite3, "connect", connect))
             stack.enter_context(patch.object(os, "fsync", fsync))
             stack.enter_context(patch.object(locking, "_os_lock", os_lock))
