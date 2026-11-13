@@ -283,6 +283,7 @@ def _archive(plain, ident, expected):
         for entry in entries:
             if (
                 entry.is_dir()
+                or entry.orig_filename != entry.filename
                 or entry.comment
                 or entry.extra
                 or entry.compress_type != zipfile.ZIP_STORED
