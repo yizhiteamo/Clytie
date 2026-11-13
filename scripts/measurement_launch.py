@@ -27,6 +27,7 @@ TOOL_FILES = (
     "uv.lock",
     "scripts/measurement_evidence.py",
     "scripts/measurement_cancel.py",
+    "scripts/measurement_cancel_validation.py",
     "scripts/measurement_fixture.py",
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",

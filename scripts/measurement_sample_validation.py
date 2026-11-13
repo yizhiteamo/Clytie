@@ -113,7 +113,18 @@ class ResourceReleases:
 
 
 class RequestPlan:
-    def __init__(self, run):
+    def __init__(self, run, *, expected_backup="ok"):
+        if expected_backup not in {"ok", "cancelled"} or (
+            expected_backup == "cancelled"
+            and not (
+                run["format"] == 6
+                and run["arm"] == "candidate"
+                and run.get("scenario") == "cancel"
+                and run["result"] == "cancelled"
+            )
+        ):
+            raise SampleError("measurement_backup_expectation_invalid")
+        self.expected_backup = expected_backup
         self.load, self.arm = run["load"], run["arm"]
         self.count = 0
         self.start = self.last_finish = None
@@ -151,7 +162,7 @@ class RequestPlan:
             raise SampleError("measurement_backup_missing_or_unexpected")
         for row in self.backups:
             if (
-                row["outcome"] != "ok"
+                row["outcome"] != self.expected_backup
                 or not math.isclose(
                     row["scheduled_s"],
                     self.start + self.load["backup_start_seconds"],
