@@ -18,6 +18,9 @@ def test_explicit_tool_inventory_contains_every_runtime_adapter_and_scanner():
     inventory = launch.tool_inventory()
     assert inventory["files"]["scripts/measurement_fixture.py"]
     assert inventory["files"]["scripts/measurement_trial.py"]
+    assert inventory["files"]["scripts/measurement_io_observation.py"]
+    assert inventory["files"]["scripts/measurement_plan.py"]
+    assert inventory["files"]["scripts/measurement_sample_validation.py"]
     assert inventory["files"][".pre-commit-config.yaml"]
     assert len(inventory["sha256"]) == 64
     assert len(inventory["files"]) == len(launch.TOOL_FILES)
