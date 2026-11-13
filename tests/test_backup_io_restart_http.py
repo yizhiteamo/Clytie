@@ -180,6 +180,20 @@ async def test_real_daemon_restart_blocks_orphan_io_but_other_companion_chats(tm
         config_path = home / "clytie.local.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         config["companions"].append("companion_b")
+        # This checks instance responsibility across controllers, not whether a
+        # just-killed listener's explicit port is immediately reusable. Linux
+        # diagnostics observed EADDRINUSE with the instance lock released. Keep
+        # the product's explicit-port refusal and use a new fictional endpoint.
+        previous_port = config["api"]["port"]
+        with socket.socket() as first, socket.socket() as second:
+            first.bind(("127.0.0.1", 0))
+            second.bind(("127.0.0.1", 0))
+            config["api"]["port"] = next(
+                port
+                for port in (first.getsockname()[1], second.getsockname()[1])
+                if port != previous_port
+            )
+        assert config["api"]["port"] != previous_port
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
         restarted = await detached_start(home, clock)
         assert restarted["ok"], startup_observation(home, restarted)

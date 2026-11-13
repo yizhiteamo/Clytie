@@ -1,6 +1,8 @@
 import asyncio
 import json
+import threading
 
+import clytie.backup.workers as worker_module
 from clytie.backup.io_control import IoControl
 from clytie.backup.journal import BackupJournal
 from clytie.backup.workers import BackupWorkers
@@ -13,6 +15,7 @@ async def test_worker_bridge_wait_does_not_block_budget_reply(tmp_path, monkeypa
     operation = "a" * 32
     journal, _ = BackupJournal.accept(tmp_path, clock, operation, "verify", {})
     budget_received = asyncio.Event()
+    start_received = asyncio.Event()
     responses = []
 
     class Pipe:
@@ -23,6 +26,7 @@ async def test_worker_bridge_wait_does_not_block_budget_reply(tmp_path, monkeypa
 
         def write(self, value):
             if value == b"start\n":
+                start_received.set()
                 return
             reply = json.loads(value)
             responses.append(reply)
@@ -75,9 +79,29 @@ async def test_worker_bridge_wait_does_not_block_budget_reply(tmp_path, monkeypa
     # This fixture isolates pipe scheduling; durable restart admission is covered
     # with actual workers in test_backup_io_restart_wiring.
     workers.io_control = IoControl(clock)
+    # Deterministically hold the real off-loop identity query. Counting loop
+    # yields before this prerequisite settles measures OS thread scheduling,
+    # not whether the pipe reader is blocked by the capture bridge.
+    loop = asyncio.get_running_loop()
+    identity_entered = loop.create_future()
+    identity_release = threading.Event()
+    original_identity = worker_module.process_identity
+
+    def delayed_identity(pid):
+        loop.call_soon_threadsafe(identity_entered.set_result, None)
+        identity_release.wait()
+        return original_identity(pid)
+
+    monkeypatch.setattr(worker_module, "process_identity", delayed_identity)
     ready = asyncio.get_running_loop().create_future()
     run = asyncio.create_task(workers._run(journal, ready, recover_only=False))
     try:
+        await identity_entered
+        for _ in range(100):
+            await clock.sleep(0)
+        assert not budget_received.is_set() and not start_received.is_set()
+        identity_release.set()
+        await start_received.wait()
         for _ in range(100):
             await clock.sleep(0)
         assert budget_received.is_set(), "bridge must not monopolize the output reader"
@@ -86,6 +110,7 @@ async def test_worker_bridge_wait_does_not_block_budget_reply(tmp_path, monkeypa
         assert not workers.io_control.sessions
         assert workers.io_control.budget.status()["active"] is None
     finally:
+        identity_release.set()
         process.stdout.feed_eof()
         budget_received.set()
         await run
