@@ -32,6 +32,7 @@ TOOL_FILES = (
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_io_observation.py",
+    "scripts/measurement_control_observation.py",
     "scripts/measurement_pressure_observation.py",
     "scripts/measurement_observation.py",
     "scripts/measurement_native_observation.py",

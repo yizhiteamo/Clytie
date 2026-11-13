@@ -442,6 +442,22 @@ def validate_record(name, row, *, format_version=None):
     if (
         name == "storage-phases.jsonl"
         and type(row) is dict
+        and row.get("phase") == "io_control_binding"
+    ):
+        if format_version != 6:
+            raise EvidenceError("unsupported_control_binding_event")
+        if __package__:
+            from . import measurement_control_observation as control_tools
+        else:
+            import measurement_control_observation as control_tools
+        try:
+            control_tools.validate_record(row)
+        except control_tools.BindingError as error:
+            raise EvidenceError(str(error)) from None
+        return
+    if (
+        name == "storage-phases.jsonl"
+        and type(row) is dict
         and row.get("phase")
         in {
             "owner_pressure",
