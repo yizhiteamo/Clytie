@@ -805,6 +805,16 @@ class RestoreManager:
         plan = self._load(plan_id)
         self._target_relation(Path(plan["target"]), Path(plan["source"]), plan["envelope"])
 
+        prior = self.previews.get("instance", plan_id)
+        if prior["state"] == "consumed":
+            return prior["operation_id"], False
+        source = Path(plan["source"])
+
+        def stamp():
+            _safe(source)
+            info = source.stat()
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
         def validate():
             target, source = Path(plan["target"]), Path(plan["source"])
             if (
@@ -814,13 +824,23 @@ class RestoreManager:
                 raise RestoreError("restore_target_changed")
             _safe(Path(plan["key_path"]))
             if (
-                digest(source) != plan["source_sha256"]
+                source_digest != plan["source_sha256"]
+                or before != after
+                or stamp() != after
                 or hashlib.sha256(Path(plan["key_path"]).read_bytes()).hexdigest()
                 != plan["key_fingerprint"]
             ):
                 raise RestoreError("restore_source_changed")
 
-        return self.previews.accept("instance", plan_id, operation_id, validate=validate)
+        # A durable reader protects the source while hashing outside the registry
+        # lock. The short accept transaction rechecks state/expiry and identity,
+        # then atomically replaces preview protection with execution protection.
+        with self.previews.reading("instance", plan_id):
+            before = stamp()
+            source_digest = budget_digest(source)
+            after = stamp()
+            checkpoint()
+            return self.previews.accept("instance", plan_id, operation_id, validate=validate)
 
     def _publish_plan(self, plan):
         atomic_write(self._path(plan["id"]), canonical(plan))

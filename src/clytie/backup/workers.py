@@ -130,6 +130,47 @@ class BackupWorkers:
         task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
         return await asyncio.shield(task)
 
+    async def _admit_restore(self, plan_id, operation_id):
+        """Hash in a registered file executor, before handing off to the child."""
+        from .io_channel import IoChannel
+        from .io_client import io_checks, io_scope
+        from .restore import RestoreManager
+
+        loop = asyncio.get_running_loop()
+        session = self.io_control.register()
+        channel = IoChannel(
+            lambda message: loop.call_soon_threadsafe(
+                self.io_control.dispatch, session, message, reply
+            )
+        )
+
+        async def reply(message):
+            channel.receive(message)
+
+        def check():
+            if self.cancel_since is not None:
+                raise IoBudgetError("backup_io_cancelled")
+
+        def admit():
+            client = channel.client(operation_id, check=check)
+            with io_scope(client), io_checks(check), client.stage():
+                return RestoreManager(self.home, self.clock).admit(plan_id, operation_id)
+
+        try:
+            await self.io_control.authorize_execution(session, operation_id, process_identity())
+            # HTTP waiter cancellation is not file-executor termination. Settle
+            # the real thread before revoking its endpoint or handing off.
+            result, _ = await finish_cleanup(asyncio.to_thread(admit))
+            return result
+        finally:
+
+            async def release():
+                channel.disconnect()
+                await self.io_control.retire_operation(operation_id)
+                await self.io_control.ended(session, confirmed=True)
+
+            await finish_cleanup(release())
+
     async def _execute(self, operation, arguments, operation_id=None, *, shutdown=False):
         if self.stopping and not shutdown:
             raise WorkerError("supervisor_stopping")
@@ -174,7 +215,7 @@ class BackupWorkers:
         if not valid_arguments:
             raise WorkerError("arguments_invalid")
         await self.io_control.ensure_ready()
-        session = self.io_control.register()
+        session = None
         reserved, accepted = False, False
         try:
             with self._gate():
@@ -183,13 +224,8 @@ class BackupWorkers:
                 if worker_locked(self.home) or self._pending():
                     raise WorkerError("backup_busy")
                 if operation == "restore_apply":
-                    from .restore import RestoreManager
-
-                    operation_id, _ = await asyncio.to_thread(
-                        RestoreManager(self.home, self.clock).admit,
-                        arguments["plan_id"],
-                        operation_id,
-                    )
+                    operation_id, _ = await self._admit_restore(arguments["plan_id"], operation_id)
+                session = self.io_control.register()
                 await self.io_control.reserve(session, operation_id)
                 reserved = True
                 journal, fresh = BackupJournal.accept(
@@ -208,7 +244,8 @@ class BackupWorkers:
                 async def release_unstarted():
                     if reserved:
                         await self.io_control.retire_operation(operation_id)
-                    await self.io_control.ended(session, confirmed=True)
+                    if session is not None:
+                        await self.io_control.ended(session, confirmed=True)
 
                 await finish_cleanup(release_unstarted())
         try:
