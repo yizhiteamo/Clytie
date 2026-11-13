@@ -131,8 +131,8 @@
 
 ### A4.3 备份与维护
 
-Issue #72 增补：storage-spec.md 已获用户确认，存储所有者与功能/性能门槛纳入本里程碑验收；尚未实现及验收。
-状态：规格已批准，实施中，尚未验收。依据：`architecture/backup-spec.md`。
+Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/O 协调已有实现候选；功能/性能门槛仍纳入本里程碑验收，不能以局部回归或测量工具通过替代。
+状态：已有实现候选，最终验收未完成。当前有限恢复仅做工程核查、Windows 本机验证及准确状态说明；Linux、必要双平台 CI、正式性能及后续独立审查分别保留缺口。依据：`architecture/backup-spec.md`；证据见 [有限恢复检查点](implementation/a4-3-limited-validation.md) 和 [逐项映射](implementation/a4-3-acceptance-map.md)。正式审查已用 1/3，本检查点不启动第二轮，不解除其他暂停。
 
 范围：在线一致快照、memory/instance/partial 分类、自动调度、日周月与滚动容量保留、异盘副本、完整恢复至新空目标、维护模式与明确切换、旧实例登记和确认清理、密钥 CLI、特殊快照维护、普通日志轮转与审计分卷。复用 A4.2 管理、鉴权与停止契约；不停止正常聊天、不自动上线、不恢复任意旧任务。
 
