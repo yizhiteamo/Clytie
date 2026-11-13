@@ -32,6 +32,11 @@ def test_disk_backed_existing_semantics(tmp_path):
     assert result["mechanism_acceptance"] == "not_evaluated"
     assert result["source_result_preserved"] == "cancelled"
     assert result["requirements"]["wal_associations"]["status"] == "unverified"
+    pressure = result["pressure_and_accounting"]
+    assert pressure["mechanism_acceptance"] == "not_evaluated"
+    assert pressure["native_internal_read_bytes"] is None
+    assert pressure["requirements"]["pressure_owner_identity"]["status"] == "unverified"
+    assert pressure["requirements"]["token_16_4_mibps_512kib_model"]["status"] == "unverified"
 
 
 @pytest.mark.parametrize(
