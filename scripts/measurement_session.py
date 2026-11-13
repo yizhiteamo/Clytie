@@ -127,7 +127,7 @@ async def run_fixture(directory, run, *, scale):
             instruments.enter_context(observation.observe_owner(owner.storage_owner))
             last_tick = perf_counter()
             tick()
-            control = IoControl(owner.clock)
+            control = IoControl(owner.clock, home=owner.home)
             session = control.register(storage_owner=True)
 
             async def reply(value):
@@ -139,9 +139,18 @@ async def run_fixture(directory, run, *, scale):
             channel = IoChannel(emit)
             owner.backup_io_client = channel.client
 
-            async def request(cid, operation, arguments, **_):
+            async def authorize(cid, operation_id, *, child=None):
+                if cid != owner.cid or child is not owner:
+                    raise ValueError("measurement_unexpected_executor")
+                await control.authorize_execution(
+                    session, operation_id, process_identity(), role="capture"
+                )
+
+            async def request(cid, operation, arguments, *, before_send=None, **_):
                 if cid != owner.cid or operation != "backup_capture":
                     raise ValueError("measurement_unexpected_operation")
+                if before_send is not None:
+                    await before_send(owner)
                 return await capture_request(owner, arguments)
 
             supervisor = SimpleNamespace(
@@ -150,7 +159,7 @@ async def run_fixture(directory, run, *, scale):
                 backup_io=control,
                 audit=Audit(owner.home, owner.clock),
                 request=request,
-                authorize_backup_capture=lambda cid, op: control.authorize(session, op),
+                authorize_backup_capture=authorize,
             )
             workers = BackupWorkers(
                 owner.home, owner.clock, capture_handler=CaptureBridge(supervisor)

@@ -262,7 +262,7 @@ async def run(directory, run, product_root, tiny=False):
                 from clytie.backup.io_channel import IoChannel
                 from clytie.backup.io_control import IoControl
 
-                control = IoControl(owner.clock)
+                control = IoControl(owner.clock, home=owner.home)
                 session = control.register(storage_owner=True)
 
                 async def reply(message):
@@ -280,6 +280,9 @@ async def run(directory, run, product_root, tiny=False):
                 async def request(cid, operation, arguments, **kwargs):
                     if cid != owner.cid or operation != "backup_capture":
                         raise ValueError("measurement_unexpected_operation")
+                    before_send = kwargs.get("before_send")
+                    if before_send is not None:
+                        await before_send(owner)
                     return await capture_request(owner, arguments)
 
                 supervisor = SimpleNamespace(
@@ -289,10 +292,16 @@ async def run(directory, run, product_root, tiny=False):
                     request=request,
                 )
                 if control is not None:
+
+                    async def authorize(cid, operation_id, *, child=None):
+                        if cid != owner.cid or child is not owner:
+                            raise ValueError("measurement_unexpected_executor")
+                        await control.authorize_execution(
+                            session, operation_id, process_identity(), role="capture"
+                        )
+
                     supervisor.backup_io = control
-                    supervisor.authorize_backup_capture = lambda cid, op: control.authorize(
-                        session, op
-                    )
+                    supervisor.authorize_backup_capture = authorize
                 workers = BackupWorkers(
                     owner.home, owner.clock, capture_handler=CaptureBridge(supervisor)
                 )
