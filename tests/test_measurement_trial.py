@@ -282,3 +282,34 @@ async def test_maximum_budget_cancels_waiters_then_drains_actual_resources(tmp_p
         json.loads(row) for row in (root / "raw/release-events.jsonl").read_bytes().splitlines()
     ]
     assert any(row["resource"] == "thread" and row["event"] == "exit_verified" for row in events)
+
+
+@pytest.mark.parametrize("format_version, releases", [(4, 2), (5, 1)])
+def test_memory_lifecycle_records_only_first_successful_close_for_v5(
+    monkeypatch, format_version, releases
+):
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    class FictionalStore:
+        def close(self):
+            return None
+
+    module = ModuleType("clytie.memory.store")
+    module.MemoryStore = FictionalStore
+    monkeypatch.setitem(sys.modules, "clytie.memory.store", module)
+    rows = []
+    recorder = SimpleNamespace(
+        failed=False,
+        format_version=format_version,
+        append=lambda name, row: rows.append(row),
+    )
+    with trial._memory_lifecycle(recorder, SimpleNamespace(now=lambda: 1)):
+        store = FictionalStore()
+        store.close()
+        store.close()
+        another = FictionalStore()
+        another.close()
+    assert [row["id"] for row in rows if row["event"] == "acquired"] == [1, 2]
+    assert sum(row["event"] == "released" and row["id"] == 1 for row in rows) == releases
+    assert sum(row["event"] == "released" and row["id"] == 2 for row in rows) == 1

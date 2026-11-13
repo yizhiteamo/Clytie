@@ -106,9 +106,12 @@ def test_real_fresh_process_four_arms_preserve_samples_and_production_identity(f
             native = evidence.NativeEvents()
             samples = load("measurement_sample_validation")
             exits = samples.ProcessExits(actual)
+            releases = samples.ResourceReleases(actual)
             for row in contents["release-events.jsonl"].splitlines():
                 exits.add(json.loads(row))
+                releases.add(json.loads(row))
             exits.complete()
+            releases.complete()
             for row in phases:
                 io_events.add(row)
                 if row["phase"] == "native_validation":

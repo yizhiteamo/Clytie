@@ -42,6 +42,18 @@ def run_v5(directory, sequences=(0,)):
         format=5, observer_sequences=list(sequences), scenario="normal", execution_id="ac" * 32
     )
     save_manifest(directory, run)
+    (directory / "release-events.jsonl").write_text(
+        "".join(
+            json.dumps(dict(id=1, at_s=at, resource=resource, event=event)) + "\n"
+            for resource, event, at in (
+                ("thread", "acquired", 0),
+                ("reference", "acquired", 0),
+                ("reference", "released", 2),
+                ("thread", "exit_verified", 2),
+            )
+        ),
+        encoding="utf-8",
+    )
     return run
 
 
@@ -655,6 +667,8 @@ def test_other_child_exit_cannot_confirm_format5_legacy_unknown_close(tmp_path, 
         with pytest.raises(evidence.EvidenceError, match="native_release_unconfirmed"):
             evidence.validate_files(contents(source), run)
         with (source / "release-events.jsonl").open("a", encoding="utf-8") as stream:
+            for at, event in ((0, "acquired"), (2, "exit_verified")):
+                stream.write(json.dumps(dict(id=1, at_s=at, resource="thread", event=event)) + "\n")
             for at, event in ((0, "acquired"), (2, "exit_verified")):
                 stream.write(
                     json.dumps(dict(id=1, at_s=at, resource="process", event=event)) + "\n"
