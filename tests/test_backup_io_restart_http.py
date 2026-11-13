@@ -80,6 +80,61 @@ def sent_reply(home):
     return any(row.get("status") == "sent" for row in rows)
 
 
+def startup_observation(home, reply):
+    """Fixed diagnostics from this fictional home; no arbitrary process output."""
+    codes = []
+    process_log = home / "logs/supervisor/process.log"
+    if process_log.exists():
+        for line in process_log.read_bytes().splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeError):
+                continue
+            if isinstance(row, dict) and row.get("type") == "error":
+                code = row.get("code")
+                codes.append(
+                    code
+                    if code in {"api_bind_failed", "already_running", "config_invalid"}
+                    else "other_start_error"
+                )
+    port = yaml.safe_load((home / "clytie.local.yaml").read_bytes())["api"]["port"]
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError as exc:
+            bind_errno = exc.errno
+        else:
+            bind_errno = None
+    return dict(
+        response=reply,
+        daemon_codes=codes,
+        instance_locked=status(home)["running"],
+        port_bind_errno=bind_errno,
+    )
+
+
+def test_startup_observation_retains_only_fixed_codes_and_real_bind_result(tmp_path):
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        (tmp_path / "clytie.local.yaml").write_text(
+            yaml.safe_dump({"api": {"port": occupied.getsockname()[1]}}), encoding="utf-8"
+        )
+        log = tmp_path / "logs/supervisor/process.log"
+        log.parent.mkdir(parents=True)
+        log.write_text(
+            "unstructured fictional detail\n"
+            '{"type":"error","code":"api_bind_failed"}\n'
+            '{"type":"error","code":"fictional-private-detail"}\n',
+            encoding="utf-8",
+        )
+        result = startup_observation(tmp_path, {"ok": False})
+    assert result["daemon_codes"] == ["api_bind_failed", "other_start_error"]
+    assert result["port_bind_errno"] is not None
+    assert not result["instance_locked"]
+    assert "fictional-private-detail" not in json.dumps(result)
+
+
 async def test_real_daemon_restart_blocks_orphan_io_but_other_companion_chats(tmp_path):
     home, source = fictional_home(tmp_path)
     clock, client = SystemClock(), Client(home)
@@ -88,7 +143,8 @@ async def test_real_daemon_restart_blocks_orphan_io_but_other_companion_chats(tm
     task = None
     identity = None
     try:
-        assert (await detached_start(home, clock))["ok"]
+        started = await detached_start(home, clock)
+        assert started["ok"], startup_observation(home, started)
 
         async def current():
             reply = await client.request("GET", "/api/v1/status")
@@ -125,7 +181,8 @@ async def test_real_daemon_restart_blocks_orphan_io_but_other_companion_chats(tm
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         config["companions"].append("companion_b")
         config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-        assert (await detached_start(home, clock))["ok"]
+        restarted = await detached_start(home, clock)
+        assert restarted["ok"], startup_observation(home, restarted)
         result = await current()
         assert result["heavy_io"]["state"] == "blocked"
         assert any(row["operation"] == key for row in result["heavy_io"]["blockers"])
