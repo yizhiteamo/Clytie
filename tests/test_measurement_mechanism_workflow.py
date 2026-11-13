@@ -10,9 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
-from scripts import measurement_plan as plan
 from tests import test_measurement_plan_ingress as ingress_tests
+from tests.measurement_tools import load as load_tool
 from tests.test_measurement_plan import inputs, profiles
+
+plan = load_tool("measurement_plan")
 
 
 def load_module(name, path):
@@ -58,6 +60,7 @@ def block_external(monkeypatch):
 
 @pytest.fixture
 def module(monkeypatch):
+    load_tool("measurement_mechanism_workflow")
     return load_module(
         "mechanism_workflow_under_test",
         Path(__file__).resolve().parents[1] / "scripts/measurement_mechanism_workflow.py",

@@ -6,8 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from scripts import measurement_plan as plan
+from tests.measurement_tools import load as load_tool
 from tests.test_measurement_plan import inputs, profiles
+
+plan = load_tool("measurement_plan")
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +38,7 @@ def no_external_commands(monkeypatch):
 
 
 def load():
+    load_tool("measurement_plan_ingress")
     spec = importlib.util.spec_from_file_location(
         "ingress_under_test",
         Path(__file__).resolve().parents[1] / "scripts/measurement_plan_ingress.py",
