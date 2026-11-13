@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tests.measurement_cancel import cancel_at_capture
 from tests.measurement_tools import load
 from tests.test_measurement_manifest import manifest_v3
 
@@ -164,24 +165,19 @@ async def test_short_frozen_window_is_failed_without_extending_requests(tmp_path
 async def test_cancel_keeps_cancelled_manifest_and_waits_for_worker_exit(tmp_path, monkeypatch):
     run, product = prepared(tmp_path, monkeypatch)
     started = asyncio.Event()
+    proceed = asyncio.Event()
     original = trial.capture_request
 
     async def capture(*args, **kwargs):
         started.set()
+        await proceed.wait()
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(trial, "capture_request", capture)
     root = tmp_path / "cancel"
     task = asyncio.create_task(trial.run(root, run, product, tiny=True))
-    waiting = asyncio.create_task(started.wait())
-    done, _ = await asyncio.wait((task, waiting), return_when=asyncio.FIRST_COMPLETED)
-    if task in done:
-        waiting.cancel()
-        await asyncio.gather(waiting, return_exceptions=True)
-        pytest.fail("trial_ended_before_capture")
-    task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await cancel_at_capture(task, started, proceed, root)
     result = json.loads((root / "raw/run-manifest.json").read_bytes())
     assert result["result"] == "cancelled"
     rows = [
