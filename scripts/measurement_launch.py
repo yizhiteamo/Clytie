@@ -35,6 +35,8 @@ TOOL_FILES = (
     "scripts/measurement_preparation_evidence.py",
     "scripts/measurement_preparation_transport.py",
     "scripts/measurement_preparation_generate.py",
+    "scripts/measurement_preparation_request.py",
+    ".github/workflows/preparation.yml",
     "scripts/measurement_launch.py",
     "scripts/measurement_load.py",
     "scripts/measurement_io_observation.py",
