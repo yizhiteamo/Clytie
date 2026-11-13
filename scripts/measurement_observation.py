@@ -30,11 +30,20 @@ def request_scope(identifier):
 
 
 class Observation:
-    def __init__(self, root, recorder, *, origin, timer=perf_counter):
+    def __init__(self, root, recorder, *, origin, timer=perf_counter, process_sequence=None):
         self.root = Path(root).resolve(strict=True)
         self.recorder, self.origin, self.timer = recorder, origin, timer
         self.guard = threading.Lock()
         self.sequence = 0
+        self.process_sequence = process_sequence
+        self.io = None
+        if recorder.format_version == 5:
+            try:
+                from .measurement_io_observation import IoObservation
+            except ImportError:
+                from measurement_io_observation import IoObservation
+            self.io = IoObservation(self, process_sequence)
+            self.sequence = (process_sequence + 1) << 40
 
     def now(self):
         return max(0, self.timer() - self.origin)
@@ -171,7 +180,7 @@ class Observation:
         original_os_lock = locking._os_lock
         original_capture_lock = CaptureCoordinator._lock
         native = None
-        if self.recorder.format_version == 4:
+        if self.recorder.format_version in {4, 5}:
             try:
                 from .measurement_native_observation import NativeObservation, _validation
             except ImportError:
@@ -179,6 +188,15 @@ class Observation:
             native = NativeObservation(self)
 
         class Connection(sqlite3.Connection):
+            def backup(self, target, *, pages=-1, progress=None, name="main", sleep=0.250):
+                if observer.io is None:
+                    return super().backup(
+                        target, pages=pages, progress=progress, name=name, sleep=sleep
+                    )
+                return observer.io.backup(
+                    super().backup, target, pages=pages, progress=progress, name=name, sleep=sleep
+                )
+
             def execute(self, sql, *args, **kwargs):
                 state = native.before_sql(self, sql, _request.get()) if native is not None else None
                 state = state or getattr(self, "_measurement_implicit", None)
@@ -262,6 +280,8 @@ class Observation:
                 observer.call("lock", manager.__exit__, None, None, None)
 
         with ExitStack() as stack:
+            if self.io is not None:
+                self.io.install(stack)
             stack.enter_context(patch.object(sqlite3, "connect", connect))
             stack.enter_context(patch.object(os, "fsync", fsync))
             stack.enter_context(patch.object(locking, "_os_lock", os_lock))

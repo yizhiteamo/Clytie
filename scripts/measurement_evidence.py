@@ -72,6 +72,7 @@ V2_FIELDS = (
     "execution",
     "metrics",
 )
+V5_FIELDS = (*V2_FIELDS, "observer_sequences", "scenario", "execution_id")
 LEDGER_TABLES = ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit")
 RESOURCE_FIELDS_V1 = (
     "at_s",
@@ -213,7 +214,7 @@ def _pattern(value, pattern):
 
 
 def validate_run(run):
-    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3, 4}:
+    if type(run) is dict and type(run.get("format")) is int and run["format"] in {2, 3, 4, 5}:
         _validate_run_versioned(run)
     else:
         _validate_run_v1(run)
@@ -254,12 +255,16 @@ def _validate_run_v1(run):
 
 
 def _validate_run_versioned(run):
-    _fields(run, V2_FIELDS)
+    _fields(run, V5_FIELDS if run["format"] == 5 else V2_FIELDS)
+    if run["format"] == 5:
+        validate_observer_sequences(run["observer_sequences"])
+        _enum(run["scenario"], {"normal", "cancel"})
+        _pattern(run["execution_id"], r"[a-f0-9]{64}")
     _enum(run["source"], {"generated_fictional_only"})
     _enum(run["method"], {"legal_storage_v1", "legal_fixture_comparison_v1"})
     _enum(
         run["fixture_version"],
-        {"legal_memory_v2" if run["format"] in {3, 4} else "legal_memory_v1"},
+        {"legal_memory_v2" if run["format"] in {3, 4, 5} else "legal_memory_v1"},
     )
     for field in ("candidate", "reference", "baseline_reference", "source_commit"):
         _pattern(run[field], r"[a-f0-9]{40}")
@@ -325,15 +330,18 @@ def _validate_run_versioned(run):
     execution = run["execution"]
     _fields(execution, ("order", "position", "warmup_requests"))
     order = execution["order"]
-    if type(order) is not list or len(order) != 4:
+    mechanism = run["format"] == 5 and run["phase"] == "mechanism"
+    if mechanism and (run["arm"] != "candidate" or order != ["candidate"]):
+        raise EvidenceError("invalid_order")
+    if type(order) is not list or len(order) != (1 if mechanism else 4):
         raise EvidenceError("invalid_order")
     for arm in order:
         _enum(arm, {"baseline", "none", "original", "candidate"})
-    if len(set(order)) != 4:
+    if len(set(order)) != len(order):
         raise EvidenceError("invalid_order")
     _number(execution["position"], integer=True)
     _number(execution["warmup_requests"], integer=True)
-    if execution["position"] >= 4 or order[execution["position"]] != run["arm"]:
+    if execution["position"] >= len(order) or order[execution["position"]] != run["arm"]:
         raise EvidenceError("invalid_order")
     _validate_metrics(run["metrics"])
 
@@ -391,17 +399,44 @@ def _validate_metrics(metrics):
         raise EvidenceError("invalid_metrics")
 
 
+IO_PHASES = {"io_capability", "io_slot", "io_charge", "file_batch", "sqlite_batch"}
+
+
+def validate_observer_sequences(value):
+    if (
+        type(value) is not list
+        or not 1 <= len(value) <= 256
+        or any(type(item) is not int or not 0 <= item < 256 for item in value)
+        or value != sorted(set(value))
+        or value[0] != 0
+    ):
+        raise EvidenceError("invalid_observer_sequences")
+
+
+def io_tools():
+    try:
+        from . import measurement_io_observation
+    except ImportError:
+        import measurement_io_observation
+    return measurement_io_observation
+
+
 def validate_record(name, row, *, format_version=None):
     if format_version is not None and (
-        type(format_version) is not int or format_version not in {1, 2, 3, 4}
+        type(format_version) is not int or format_version not in {1, 2, 3, 4, 5}
     ):
         raise EvidenceError("unsupported_format")
+    if name == "storage-phases.jsonl" and type(row) is dict and row.get("phase") in IO_PHASES:
+        if format_version != 5:
+            raise EvidenceError("unsupported_io_event")
+        io_tools().validate_record(row)
+        return
     if (
         name == "storage-phases.jsonl"
         and type(row) is dict
         and row.get("phase") == "native_validation"
     ):
-        if format_version not in {None, 4}:
+        if format_version not in {None, 4, 5}:
             raise EvidenceError("unsupported_native_event")
         _validate_native_event(row)
         return
@@ -428,7 +463,7 @@ def validate_record(name, row, *, format_version=None):
     elif name == "resources.jsonl":
         fields = (
             RESOURCE_FIELDS_V3
-            if format_version in {3, 4}
+            if format_version in {3, 4, 5}
             or (
                 format_version is None and type(row) is dict and set(row) == set(RESOURCE_FIELDS_V3)
             )
@@ -651,20 +686,21 @@ def validate_files(contents, expected, *, report_format=None):
             raise EvidenceError("file_size_limit")
         run = _json(manifest_raw)
         validate_run(run)
-        native = NativeEvents() if run["format"] == 4 and run["result"] == "pass" else None
+        native = NativeEvents() if run["format"] in {4, 5} and run["result"] == "pass" else None
         native_observed = False
+        io_events = io_tools().IoEvents(run) if run["format"] == 5 else None
         process_exit_s = None
         business_start = business_finish = backup_finish = None
         if report_format is None:
-            report_format = 2 if run["format"] in {3, 4} else 1
+            report_format = 2 if run["format"] in {3, 4, 5} else 1
         if (
             type(report_format) is not int
             or report_format not in {1, 2}
-            or (report_format == 2 and run["format"] not in {3, 4})
-            or (run["format"] == 4 and report_format != 2)
+            or (report_format == 2 and run["format"] not in {3, 4, 5})
+            or (run["format"] in {4, 5} and report_format != 2)
         ):
             raise EvidenceError("unsupported_report_format")
-        file_limit = MAX_FILE if run["format"] in {3, 4} else LEGACY_MAX_FILE
+        file_limit = MAX_FILE if run["format"] in {3, 4, 5} else LEGACY_MAX_FILE
         for name in FILES:
             raw = contents[name]
             if not raw or len(raw) > file_limit:
@@ -677,6 +713,8 @@ def validate_files(contents, expected, *, report_format=None):
                 if name != "run-manifest.json":
                     row = _json(line)
                     validate_record(name, row, format_version=run["format"])
+                    if io_events is not None and name == "storage-phases.jsonl":
+                        io_events.add(row)
                     if (
                         native is not None
                         and name == "storage-phases.jsonl"
@@ -729,6 +767,8 @@ def validate_files(contents, expected, *, report_format=None):
                     summary["last_line"] = number
             if summary is not None:
                 exceptions.append(summary)
+        if io_events is not None:
+            io_events.complete()
         if native is not None:
             if (
                 run["method"] == "legal_storage_v1"
@@ -737,7 +777,9 @@ def validate_files(contents, expected, *, report_format=None):
                 and not native_observed
             ):
                 raise EvidenceError("native_validation_missing")
-            native.complete(process_exit_s=process_exit_s)
+            # V5 has disjoint child namespaces. A historical unbound process
+            # exit cannot confirm which child's legacy connections were closed.
+            native.complete(process_exit_s=None if run["format"] == 5 else process_exit_s)
             if run["result"] == "pass" and native.failed:
                 raise EvidenceError("native_failure_with_success")
             if (
@@ -761,13 +803,13 @@ def validate_files(contents, expected, *, report_format=None):
         # V2/V3 freeze every approved field except measured outcomes. In particular,
         # a newer schema must never fall back to the smaller historical identity.
         identity_fields = (
-            set(V2_FIELDS) - {"result", "metrics"}
-            if run["format"] in {2, 3, 4}
+            set(V5_FIELDS if run["format"] == 5 else V2_FIELDS) - {"result", "metrics"}
+            if run["format"] in {2, 3, 4, 5}
             else IDENTITY_FIELDS
         )
         if any(run[key] != expected[key] for key in identity_fields):
             raise EvidenceError("run_identity_mismatch")
-        if run["format"] in {2, 3, 4} and any(
+        if run["format"] in {2, 3, 4, 5} and any(
             run["metrics"][key] != expected["metrics"][key] for key in ("logical", "ledger_rows")
         ):
             # Physical byte layouts/results are observations; the approved
@@ -852,7 +894,7 @@ def seal(source, target, recipient, expected):
     exceptions = validate_files(contents, expected)
     public_fingerprint = fingerprint(recipient)
     manifest = {
-        "format": 2 if expected["format"] in {3, 4} else 1,
+        "format": 2 if expected["format"] in {3, 4, 5} else 1,
         "tool": "pyrage",
         "version": version("pyrage"),
         "recipient_sha256": public_fingerprint,
@@ -939,7 +981,7 @@ def _archive(plain, ident, expected):
     if (
         type(manifest["format"]) is not int
         or manifest["format"] not in {1, 2}
-        or (manifest["format"] == 2 and expected["format"] not in {3, 4})
+        or (manifest["format"] == 2 and expected["format"] not in {3, 4, 5})
         or manifest["tool"] != "pyrage"
         or manifest["version"] != "1.4.0"
         or manifest["private_scan"] != "not_run_in_ci"

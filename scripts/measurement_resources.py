@@ -11,8 +11,17 @@ def file_bytes(root, *, suffix=""):
     """Sample a moving fictional tree; only proven disappearance is benign."""
 
     def onerror(error):
-        if not isinstance(error, FileNotFoundError):
-            raise error
+        if isinstance(error, FileNotFoundError):
+            return
+        if isinstance(error, PermissionError) and error.filename:
+            # A disappearing Windows directory may reject enumeration before
+            # retirement completes. Only a fresh missing-path result proves it
+            # is no longer part of this moving-tree sample; other errors fail.
+            try:
+                Path(error.filename).lstat()
+            except FileNotFoundError:
+                return
+        raise error
 
     total = 0
     for directory, _, names in os.walk(root, onerror=onerror, followlinks=False):

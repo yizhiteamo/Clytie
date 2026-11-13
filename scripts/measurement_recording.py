@@ -20,7 +20,7 @@ except ImportError:
 class Recorder:
     def __init__(self, *, max_file_bytes=None, format_version=None):
         if format_version is not None and (
-            type(format_version) is not int or format_version not in {1, 2, 3, 4}
+            type(format_version) is not int or format_version not in {1, 2, 3, 4, 5}
         ):
             raise evidence.EvidenceError("unsupported_format")
         self.format_version = format_version
