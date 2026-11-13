@@ -290,14 +290,17 @@ def test_active_management_operation_rejected(tmp_path, monkeypatch):
 @pytest.mark.parametrize("stage", ["copying", "verifying"])
 def test_real_kill_recovery_never_replays_unpack(tmp_path, monkeypatch, stage):
     import subprocess
-    import sys
+
+    from clytie.plugin_host.locking import process_identity
+    from clytie.supervisor.processes import python_process
 
     manager, package, key, target, work = fixture_package(tmp_path, monkeypatch)
     plan = manager.plan(package, key, target, work)
     code = """
-import sys, threading
+import json, sys, threading
 from pathlib import Path
 from clytie.backup import restore
+from clytie.plugin_host.locking import process_identity
 from clytie.sdk.testing import MockClock
 manager = restore.RestoreManager(Path(sys.argv[1]), MockClock(), reserve_bytes=0)
 def pause(*args, **kwargs):
@@ -305,7 +308,7 @@ def pause(*args, **kwargs):
         target = Path(manager._load(sys.argv[2])["target"])
         if not (target / restore.MARKER).exists():
             return
-    print("checkpoint", flush=True)
+    print(json.dumps({"checkpoint": True, "executor": process_identity()}), flush=True)
     threading.Event().wait()
 if sys.argv[3] == "verifying":
     restore.validate_contents = pause
@@ -313,16 +316,22 @@ if sys.argv[3] == "verifying":
 else:
     manager.apply(sys.argv[2], check=pause)
 """
+    executable, env = python_process()
     process = subprocess.Popen(
-        [sys.executable, "-c", code, str(manager.home), plan["id"], stage],
+        [executable, "-c", code, str(manager.home), plan["id"], stage],
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
     try:
-        assert process.stdout.readline().strip() == "checkpoint"
+        checkpoint = json.loads(process.stdout.readline())
+        assert checkpoint["checkpoint"] is True
+        assert checkpoint["executor"] == process_identity(process.pid)
         process.kill()
         process.wait(timeout=10)
+        with pytest.raises((OSError, ProcessLookupError)):
+            process_identity(checkpoint["executor"]["pid"])
     finally:
         if process.poll() is None:
             process.kill()
