@@ -170,6 +170,7 @@ def _preserve_invalid(root, recorder, manifest):
 
 async def run(directory, run, product_root, tiny=False):
     evidence.validate_run(run)
+    scenario = run.get("scenario", "normal")
     if (
         tiny is not True
         or run["format"] not in {4, 5, 6}
@@ -177,6 +178,15 @@ async def run(directory, run, product_root, tiny=False):
         or run["method"] != "legal_fixture_comparison_v1"
     ):
         raise ValueError("measurement_launcher_not_frozen")
+    if scenario not in {"normal", "cancel"} or (
+        scenario == "cancel"
+        and (
+            run["format"] != 6
+            or run["arm"] != "candidate"
+            or run["scale"] not in {"large_database", "large_asset"}
+        )
+    ):
+        raise ValueError("measurement_cancel_plan_invalid")
     product_root = _identity(run, product_root)
     try:
         from . import measurement_fixture as fixture
@@ -210,6 +220,7 @@ async def run(directory, run, product_root, tiny=False):
         else None
     )
     owner = workers = control = session = sampling = deadline = None
+    planned_cancel = None
     operations, processes, sample_processes, identities, errors = [], [], [], {}, []
     child_exit_times = {}
     diagnostics = []
@@ -326,6 +337,15 @@ async def run(directory, run, product_root, tiny=False):
                 workers = BackupWorkers(
                     owner.home, owner.clock, capture_handler=CaptureBridge(supervisor)
                 )
+                if scenario == "cancel":
+                    try:
+                        from .measurement_cancel import PlannedCancel
+                    except ImportError:
+                        from measurement_cancel import PlannedCancel
+                    planned_cancel = PlannedCancel(
+                        observation, workers, "e" * 32, scale=run["scale"]
+                    )
+                    instruments.enter_context(planned_cancel.install())
                 native_spawn = asyncio.create_subprocess_exec
                 wrapper = Path(__file__).with_name("measurement_worker.py")
 
@@ -484,6 +504,13 @@ async def run(directory, run, product_root, tiny=False):
                     await workers.execute("create", {"scope": "instance"}, operation)
                     await asyncio.shield(asyncio.gather(*tuple(workers.tasks.values())))
                     result = workers.query(operation)
+                    if planned_cancel is not None:
+                        await planned_cancel.settle()
+                        result = workers.query(operation)
+                        if planned_cancel.terminal(result):
+                            outcome = "cancelled"
+                            return True
+                        return False
                     if (
                         result["phase"] == "committed"
                         and result["result"]["creation"] == "complete"
@@ -566,6 +593,8 @@ async def run(directory, run, product_root, tiny=False):
                 if not task.done():
                     task.cancel()
             await _drain(asyncio.gather(*operations, return_exceptions=True), errors)
+            if planned_cancel is not None:
+                await _drain(planned_cancel.settle(), errors)
             if workers is not None:
                 await _drain(workers.stop("wait" if completed and not errors else "cancel"), errors)
             if sampling is not None:
@@ -614,6 +643,8 @@ async def run(directory, run, product_root, tiny=False):
                 errors.append("measurement_observer_unsettled")
     cancelled = cancelled or "measurement_cleanup_wait_cancelled" in errors
     result = "cancelled" if cancelled else "pass" if completed and not errors else "fail"
+    if scenario == "cancel" and completed and not errors:
+        result = "cancelled"
     manifest = {**run, "metrics": metrics, "result": result}
     if diagnostics:
         # Local diagnosis only, outside the raw whitelist. Never package an

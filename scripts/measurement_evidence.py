@@ -422,6 +422,19 @@ def io_tools():
 
 
 def validate_record(name, row, *, format_version=None):
+    if (
+        name == "storage-phases.jsonl"
+        and isinstance(row, dict)
+        and row.get("phase") == "planned_cancel"
+    ):
+        if format_version != 6:
+            raise EvidenceError("unsupported_cancel_event")
+        if __package__:
+            from .measurement_cancel import validate_record as validate_cancel
+        else:
+            from measurement_cancel import validate_record as validate_cancel
+        validate_cancel(row)
+        return
     if format_version is not None and (
         type(format_version) is not int or format_version not in {1, 2, 3, 4, 5, 6}
     ):
