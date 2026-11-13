@@ -328,3 +328,22 @@ def test_source_hardlink_and_extra_file(tmp_path, monkeypatch):
     (source / "unexpected.json").write_bytes(b"{}")
     with pytest.raises(prep.Error):
         prep.seal(source, tmp_path / "sealed2", str(ident.to_public()), binding)
+
+
+def test_authenticated_archive_rejects_nul_suffix_in_original_member_name(tmp_path):
+    source, binding, _, ident = fixture(tmp_path)
+    prep.seal(source, tmp_path / "sealed", str(ident.to_public()), binding)
+    ciphertext = tmp_path / "sealed" / prep.CIPHER
+    with zipfile.ZipFile(io.BytesIO(pyrage.decrypt(ciphertext.read_bytes(), [ident]))) as original:
+        entries = {name: original.read(name) for name in original.namelist()}
+    changed = io.BytesIO()
+    with zipfile.ZipFile(changed, "w") as archive:
+        for name, raw in entries.items():
+            archive.writestr(name + "XXXX" if name == "runtime.json" else name, raw)
+    raw = changed.getvalue().replace(b"runtime.jsonXXXX", b"runtime.json\0abc")
+    ciphertext.write_bytes(pyrage.encrypt(raw, [ident.to_public()]))
+    with pytest.raises(prep.Error):
+        prep.open_bundle(
+            ciphertext, tmp_path / "opened", ident, binding, private_scan=lambda _: "pass"
+        )
+    assert not (tmp_path / "opened" / "raw").exists()
