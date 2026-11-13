@@ -20,10 +20,15 @@ class Views:
         self.workers, self.open, self.exited = {}, set(), set()
 
     def event(self, worker, resource, event):
-        self.recorder.append(
-            "release-events.jsonl",
-            dict(id=self.workers[worker], at_s=self.now(), resource=resource, event=event),
-        )
+        try:
+            self.recorder.append(
+                "release-events.jsonl",
+                dict(id=self.workers[worker], at_s=self.now(), resource=resource, event=event),
+            )
+        except Exception:
+            # Invalid evidence must fail finalization without interrupting the
+            # production close path or stranding its capture ticket.
+            self.recorder.failed = True
 
     @property
     def pending(self):

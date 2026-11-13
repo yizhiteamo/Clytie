@@ -134,9 +134,13 @@ class BatchObservation:
 
     def scope(self):
         module = self.io.client
-        client, stage = module.current_client(), module._stage.get()
+        client, stage = (
+            (None, None) if module is None else (module.current_client(), module._stage.get())
+        )
         state = (
-            "disabled"
+            "unbound"
+            if module is None
+            else "disabled"
             if client is None
             else "unbound"
             if stage is None
