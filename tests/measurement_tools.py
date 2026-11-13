@@ -5,6 +5,7 @@ from tests.test_measurement_evidence import load_tool
 DEPENDENCIES = {
     "measurement_cancel_validation": ("measurement_cancel", "measurement_sample_validation"),
     "measurement_observation": (
+        "measurement_control_observation",
         "measurement_io_observation",
         "measurement_pressure_observation",
         "measurement_native_observation",
@@ -23,6 +24,7 @@ DEPENDENCIES = {
     ),
     "measurement_launch": (
         "measurement_version",
+        "measurement_control_observation",
         "measurement_io_observation",
         "measurement_pressure_observation",
         "measurement_sample_validation",

@@ -17,6 +17,7 @@ import clytie
 evidence = load("measurement_evidence")
 trial = load("measurement_trial")
 cancel_validation = load("measurement_cancel_validation")
+control_validation = load("measurement_control_observation")
 
 
 class BoundedLines(bytes):
@@ -140,6 +141,13 @@ async def test_full_tiny_trial_native_planned_cancel_and_complete_business(scale
     assert all(row["outcome"] == "ok" for row in business)
     assert next(row for row in requests if row["kind"] == "backup")["outcome"] == "cancelled"
     phases = [json.loads(row) for row in contents["storage-phases.jsonl"].splitlines()]
+    bindings = control_validation.single_instance_bindings(phases)
+    assert bindings["status"] == "observed_bindings_complete", bindings
+    assert bindings["stages"] > 0
+    assert bindings["unbound_io"] == 0
+    # Only an observed identity mapping, not full mechanism/performance acceptance.
+    unbound = [row for row in phases if row.get("phase") != control_validation.PHASE]
+    assert control_validation.single_instance_bindings(unbound)["status"] == "unknown"
     cancel = [row for row in phases if row["phase"] == "planned_cancel"]
     assert [row["event"] for row in cancel] == ["triggered", "requested", "accepted", "terminal"]
     assert cancel[-1]["terminal_phase"] == "cancelled"
