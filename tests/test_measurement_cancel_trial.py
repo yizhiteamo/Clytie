@@ -1,5 +1,6 @@
 """Full tiny wiring; invented inventory hashes are not historical evidence."""
 
+import copy
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import clytie
 
 evidence = load("measurement_evidence")
 trial = load("measurement_trial")
+cancel_validation = load("measurement_cancel_validation")
 
 
 def manifest(scale):
@@ -119,6 +121,9 @@ async def test_full_tiny_trial_native_planned_cancel_and_complete_business(scale
     assert actual["result"] == "cancelled", (root, actual["result"])
     contents = {name: (root / "raw" / name).read_bytes() for name in evidence.FILES}
     evidence.validate_files(contents, run)
+    checks = cancel_validation.verify_cancel_evidence(contents, run)
+    assert checks["planned_cancel_verified"]
+    assert checks["mechanism_acceptance"] == "not_evaluated"
     requests = [json.loads(row) for row in contents["requests.jsonl"].splitlines()]
     business = [row for row in requests if row["kind"] == "business"]
     assert len(business) == run["load"]["request_count"]
@@ -140,3 +145,71 @@ async def test_full_tiny_trial_native_planned_cancel_and_complete_business(scale
         ("reference", "released"),
     ):
         assert any(row["resource"] == resource and row["event"] == event for row in releases)
+    assert_rejects_incomplete_cancel_evidence(contents, run)
+
+
+def assert_rejects_incomplete_cancel_evidence(contents, run):
+    original = {
+        name: [json.loads(line) for line in contents[name].splitlines()]
+        for name in ("storage-phases.jsonl", "release-events.jsonl", "requests.jsonl")
+    }
+    for defect in (
+        "missing_source",
+        "missing_acceptance",
+        "different_source",
+        "committed",
+        "cancel_not_requested",
+        "acceptance_after_terminal",
+        "view_missing",
+        "missing_business",
+        "failed_business",
+        "changed_arrival",
+        "missing_process_exit",
+        "missing_thread_exit",
+        "missing_reference_release",
+        "uncovered_window",
+    ):
+        rows = copy.deepcopy(original)
+        phases, resources, requests = (rows[name] for name in original)
+        cancel = [row for row in phases if row["phase"] == "planned_cancel"]
+        if defect == "missing_source":
+            phases[:] = [row for row in phases if row["id"] != cancel[0]["source_row_id"]]
+        elif defect == "missing_acceptance":
+            phases.remove(cancel[2])
+        elif defect == "different_source":
+            cancel[1]["stage_id"] = "f" * 64
+        elif defect == "committed":
+            cancel[-1]["terminal_phase"] = "committed"
+        elif defect == "cancel_not_requested":
+            cancel[-1]["cancel_requested"] = False
+        elif defect == "acceptance_after_terminal":
+            cancel[2]["at_s"] = cancel[-1]["at_s"] + 1
+        elif defect == "view_missing":
+            resources[:] = [row for row in resources if row["resource"] != "view"]
+            if run["scale"] != "large_database":
+                continue
+        elif defect == "missing_business":
+            requests.remove(next(row for row in requests if row["kind"] == "business"))
+        elif defect == "failed_business":
+            next(row for row in requests if row["kind"] == "business")["outcome"] = "failed"
+        elif defect == "changed_arrival":
+            next(row for row in requests if row["kind"] == "business")["scheduled_s"] += 0.01
+        elif defect in {"missing_process_exit", "missing_thread_exit", "missing_reference_release"}:
+            resource = defect.split("_")[1]
+            resources[:] = [
+                row
+                for row in resources
+                if not (
+                    row["resource"] == resource and row["event"] in {"exit_verified", "released"}
+                )
+            ]
+        elif defect == "uncovered_window":
+            first = next(row for row in requests if row["kind"] == "business")
+            next(row for row in requests if row["kind"] == "backup")["finished_s"] = (
+                first["scheduled_s"] + run["load"]["window_seconds"] + 1
+            )
+        damaged = dict(contents)
+        for name, values in rows.items():
+            damaged[name] = b"".join(json.dumps(row).encode() + b"\n" for row in values)
+        with pytest.raises(ValueError):
+            cancel_validation.verify_cancel_evidence(damaged, run)
