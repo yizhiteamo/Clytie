@@ -278,16 +278,18 @@ class IoObservation:
         if self.observer.recorder.failed:
             return
         try:
+            identifier = self.identifier()
             self.observer.recorder.append(
                 "storage-phases.jsonl",
                 dict(
-                    id=self.identifier(),
+                    id=identifier,
                     process_sequence=self.observer.process_sequence,
                     phase=phase,
                     at_s=self.observer.now(),
                     **fields,
                 ),
             )
+            return identifier
         except Exception:
             # A failed observer invalidates archival; never interrupt accepted I/O
             # or prevent its real cancellation/release path from completing.
@@ -307,6 +309,9 @@ class IoObservation:
             direction=direction,
             requested_bytes=None if count < 0 else count,
         )
+        batch = getattr(self, "batch", None)
+        if batch is not None:
+            batch.safe(lambda: batch.file_link(identifier))
         self.event("file_batch", **fields, event="started", actual_bytes=None, outcome="unknown")
         result, error = None, None
         try:
@@ -340,7 +345,11 @@ class IoObservation:
                 def write(self, data):
                     return observer.file_call(stream.write, data, "write")
 
-            return function(Stream(), argument)
+            batch = getattr(observer, "batch", None)
+            proxy = Stream()
+            if batch is not None:
+                return batch.file_operation(function, proxy, argument)
+            return function(proxy, argument)
 
         return measured
 
@@ -373,7 +382,7 @@ class IoObservation:
                 elif previous[1] == total and previous[0] >= remaining:
                     copied = previous[0] - remaining
                 previous = remaining, total
-            self.event(
+            progress_id = self.event(
                 "sqlite_batch",
                 **fields,
                 event="progress",
@@ -383,6 +392,9 @@ class IoObservation:
                 total_pages=total,
                 copied_pages=copied,
             )
+            batch = getattr(self, "batch", None)
+            if batch is not None:
+                batch.safe(lambda: batch.sqlite_link(progress_id, fields["transfer_id"]))
             if progress is not None:
                 return progress(status, remaining, total)
 

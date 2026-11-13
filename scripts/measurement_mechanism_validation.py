@@ -15,6 +15,7 @@ if __package__:
         RequiredKeys,
         require,
     )
+    from .measurement_batch_validation import BatchPredicates
     from .measurement_pressure_validation import Predicates
     from .measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
 else:
@@ -28,6 +29,7 @@ else:
         RequiredKeys,
         require,
     )
+    from measurement_batch_validation import BatchPredicates
     from measurement_pressure_validation import Predicates
     from measurement_sample_validation import ProcessExits, RequestPlan, ResourceReleases
 
@@ -801,6 +803,7 @@ class MechanismValidation(Index):
             "expected_identity_fields": self.expected_fields,
             "requirements": results,
             "pressure_and_accounting": Predicates(self).report(),
+            "batch_reservations": BatchPredicates(self).report(),
             "coverage_exceptions": [
                 "native_sqlite_internal_bytes_unknown",
                 "plugin_io_bypassing_host_unobserved",

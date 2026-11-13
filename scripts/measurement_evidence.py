@@ -490,6 +490,19 @@ def validate_record(name, row, *, format_version=None):
             import measurement_pressure_observation as pressure_tools
         pressure_tools.validate_record(row)
         return
+    if (
+        name == "storage-phases.jsonl"
+        and type(row) is dict
+        and row.get("phase") == "batch_charge_binding"
+    ):
+        if format_version != 6:
+            raise EvidenceError("unsupported_batch_binding")
+        try:
+            from .measurement_batch_observation import validate_record as validate_batch
+        except ImportError:
+            from measurement_batch_observation import validate_record as validate_batch
+        validate_batch(row)
+        return
     if name == "storage-phases.jsonl" and type(row) is dict and row.get("phase") in IO_PHASES:
         if format_version not in {5, 6}:
             raise EvidenceError("unsupported_io_event")
