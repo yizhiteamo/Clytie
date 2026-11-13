@@ -19,6 +19,11 @@ trial = load("measurement_trial")
 cancel_validation = load("measurement_cancel_validation")
 
 
+class BoundedLines(bytes):
+    def splitlines(self, *args, **kwargs):
+        raise AssertionError("the complete raw file must not be split into an allocated list")
+
+
 def manifest(scale):
     asset = scale == "large_asset"
     files = 1 if asset else 2
@@ -124,6 +129,11 @@ async def test_full_tiny_trial_native_planned_cancel_and_complete_business(scale
     checks = cancel_validation.verify_cancel_evidence(contents, run)
     assert checks["planned_cancel_verified"]
     assert checks["mechanism_acceptance"] == "not_evaluated"
+    streamed = {
+        name: BoundedLines(raw) if name.endswith(".jsonl") else raw
+        for name, raw in contents.items()
+    }
+    assert cancel_validation.verify_cancel_evidence(streamed, run) == checks
     requests = [json.loads(row) for row in contents["requests.jsonl"].splitlines()]
     business = [row for row in requests if row["kind"] == "business"]
     assert len(business) == run["load"]["request_count"]
