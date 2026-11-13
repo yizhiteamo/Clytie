@@ -634,6 +634,12 @@ def _lines(raw):
 
 
 def validate_files(contents, expected, *, report_format=None):
+    """Validate safe archival bytes; only a claimed pass must prove completion.
+
+    Failed, cancelled and incomplete runs retain every schema-valid observation,
+    including an unfinished or violated lifecycle. They are never acceptance
+    evidence. Field, size, source identity and privacy checks apply to every run.
+    """
     if set(contents) != set(FILES):
         raise EvidenceError("unexpected_file_set")
     try:
@@ -645,7 +651,8 @@ def validate_files(contents, expected, *, report_format=None):
             raise EvidenceError("file_size_limit")
         run = _json(manifest_raw)
         validate_run(run)
-        native = NativeEvents() if run["format"] == 4 else None
+        native = NativeEvents() if run["format"] == 4 and run["result"] == "pass" else None
+        native_observed = False
         process_exit_s = None
         business_start = business_finish = backup_finish = None
         if report_format is None:
@@ -676,6 +683,7 @@ def validate_files(contents, expected, *, report_format=None):
                         and row["phase"] == "native_validation"
                     ):
                         native.add(row)
+                        native_observed = True
                     if native is not None and name == "requests.jsonl":
                         if row["kind"] == "business":
                             business_start = min(
@@ -722,6 +730,13 @@ def validate_files(contents, expected, *, report_format=None):
             if summary is not None:
                 exceptions.append(summary)
         if native is not None:
+            if (
+                run["method"] == "legal_storage_v1"
+                and run["phase"] in {"mechanism", "matrix"}
+                and run["arm"] in {"original", "candidate"}
+                and not native_observed
+            ):
+                raise EvidenceError("native_validation_missing")
             native.complete(process_exit_s=process_exit_s)
             if run["result"] == "pass" and native.failed:
                 raise EvidenceError("native_failure_with_success")
@@ -966,6 +981,7 @@ def open_bundle(ciphertext, target, ident, expected, *, private_scan=private_sca
                 os.fsync(stream.fileno())
             paths.append(path)
         outcome = private_scan(paths)
+        measured_result = _json(contents["run-manifest.json"])["result"]
         state = {
             "state": {
                 "pass": "verified_private_pass_generic_exception",
@@ -973,6 +989,13 @@ def open_bundle(ciphertext, target, ident, expected, *, private_scan=private_sca
                 "unavailable": "encrypted_pending_verification",
             }[outcome],
             "accepted": outcome == "pass",
+            # accepted has always meant authenticated/scanned archive acceptance.
+            # A failed measurement can be safely preserved without becoming a
+            # successful run; even a pass still needs its external acceptance review.
+            "measurement_result": measured_result,
+            "measurement_acceptance": "not_evaluated"
+            if measured_result == "pass"
+            else "ineligible",
             "files": manifest["files"],
             "generic_exceptions": manifest["generic_exceptions"],
             "ciphertext_sha256": _hash(ciphertext),
