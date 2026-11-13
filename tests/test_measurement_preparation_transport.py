@@ -149,7 +149,15 @@ def test_download_rejects_bad_zip_or_identity(tmp_path, monkeypatch, bad):
         )
 
 
-def test_verify_uses_existing_private_scanner(tmp_path, monkeypatch):
+@pytest.fixture
+def local_verification_env(monkeypatch):
+    # This fixture models the authorized local reader, not the CI uploader.
+    # The CI refusal test below deliberately does not use it.
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+
+def test_verify_uses_existing_private_scanner(tmp_path, monkeypatch, local_verification_env):
     directory, binding, contents, identity = sealed(tmp_path)
     seen = []
     monkeypatch.setattr(transport.base, "load_identity", lambda path: identity)
@@ -163,7 +171,7 @@ def test_verify_uses_existing_private_scanner(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("outcome", ["fail", "unavailable", "unknown"])
-def test_verify_scanner_cannot_be_skipped(tmp_path, monkeypatch, outcome):
+def test_verify_scanner_cannot_be_skipped(tmp_path, monkeypatch, local_verification_env, outcome):
     directory, binding, _, identity = sealed(tmp_path)
     monkeypatch.setattr(transport.base, "load_identity", lambda path: identity)
     monkeypatch.setattr(transport.evidence, "private_scan", lambda paths: outcome)
@@ -427,7 +435,7 @@ def test_archive_rejects_other_unapproved_metadata(tmp_path, kind):
         transport._extract(downloaded, tmp_path / "extracted")
 
 
-def test_verify_mandatory_external_binding(tmp_path, monkeypatch):
+def test_verify_mandatory_external_binding(tmp_path, monkeypatch, local_verification_env):
     directory, binding, _, identity = sealed(tmp_path)
     monkeypatch.setattr(transport.base, "load_identity", lambda path: identity)
     monkeypatch.setattr(transport.evidence, "private_scan", lambda paths: "pass")
@@ -437,9 +445,12 @@ def test_verify_mandatory_external_binding(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "opened" / "state.json").read_bytes())["accepted"] is False
 
 
-def test_local_verification_refuses_ci_before_key_load(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flag", ["CI", "GITHUB_ACTIONS"])
+def test_local_verification_refuses_ci_before_key_load(tmp_path, monkeypatch, flag):
     directory, binding, *_ = sealed(tmp_path)
-    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.setenv(flag, "true")
 
     def forbidden(path):
         pytest.fail("CI must never attempt to load a private key")
