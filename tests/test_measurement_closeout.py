@@ -93,6 +93,7 @@ def test_workflow_uploads_only_encrypted_outputs_and_never_retries():
         assert "GITHUB_RUN_ATTEMPT']=='1'" in text
         assert "steps.scene.outputs.ciphertext" in text
         assert "steps.scene.outputs.receipt" in text
+        assert f"name: a43-encrypted-closeout-{platform}-" in text
         assert "retention-days: 14" in text
         assert "continue-on-error" not in text
 

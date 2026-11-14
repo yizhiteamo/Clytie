@@ -44,7 +44,7 @@ jobs:
         if: always() && steps.scene.outputs.ciphertext != '' && steps.scene.outputs.receipt != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: a43-closeout-linux-${{ github.run_id }}
+          name: a43-encrypted-closeout-linux-${{ github.run_id }}
           path: |
             ${{ steps.scene.outputs.ciphertext }}
             ${{ steps.scene.outputs.receipt }}
