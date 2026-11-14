@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 7b865241f95be973530eda5106bacd620c6e1b1d
+          ref: 23b0c773529c8f0957a0b5c818bfe0cdcf8a42dc
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -37,7 +37,7 @@ jobs:
       - name: Verify exact test candidate
         run: >-
           python -c "import subprocess;
-          expected='7b865241f95be973530eda5106bacd620c6e1b1d';
+          expected='23b0c773529c8f0957a0b5c818bfe0cdcf8a42dc';
           actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();
           assert actual==expected;
           assert not subprocess.check_output(['git','diff','--name-only']);

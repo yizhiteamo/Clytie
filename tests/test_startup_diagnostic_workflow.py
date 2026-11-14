@@ -16,7 +16,7 @@ def test_fixed_windows_diagnostic_no_upload_no_retry():
     assert "github.run_number == 2 && github.run_attempt == 1" in job["if"]
     steps = job["steps"]
     assert len(steps) == 5
-    assert steps[0]["with"]["ref"] == "7b865241f95be973530eda5106bacd620c6e1b1d"
+    assert steps[0]["with"]["ref"] == "23b0c773529c8f0957a0b5c818bfe0cdcf8a42dc"
     assert steps[0]["with"]["persist-credentials"] is False
     assert all("upload-artifact" not in s.get("uses", "") for s in steps)
     assert steps[-1]["run"].split() == [
