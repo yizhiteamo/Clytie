@@ -14,12 +14,12 @@ def test_environment_entry_is_fixed_manual_once_and_cipher_only():
         job = value["jobs"]["environment_" + platform.lower()]
         assert job["runs-on"] == runner
         assert "strategy" not in job
-        assert "github.run_number == 1 && github.run_attempt == 1" in job["if"]
+        assert "github.run_number == 2 && github.run_attempt == 1" in job["if"]
         assert "github.ref == 'refs/heads/main'" in job["if"]
         steps = job["steps"]
         assert len(steps) == 5
         assert steps[0]["with"] == {
-            "ref": "5025b999b2eb7b0cc444192fb5d1be2adc0e13fb",
+            "ref": "3b1efd82136c451cd283836e0e6662efd7827c63",
             "fetch-depth": 0,
             "persist-credentials": False,
         }
@@ -38,7 +38,7 @@ def test_environment_entry_is_fixed_manual_once_and_cipher_only():
             "--product",
             "e4dfacca7e3493918ded15a82239139f8394e763",
             "--tool",
-            "5025b999b2eb7b0cc444192fb5d1be2adc0e13fb",
+            "3b1efd82136c451cd283836e0e6662efd7827c63",
         ]
         assert "if" not in steps[4]  # Default success-only; no always() upload.
         upload = steps[4]["with"]
