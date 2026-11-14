@@ -16,7 +16,7 @@ jobs:
     if: >-
       github.repository == 'yizhiteamo/Clytie' &&
       github.ref == 'refs/heads/main' &&
-      github.run_number == 1 && github.run_attempt == 1
+      github.run_number == 2 && github.run_attempt == 1
     runs-on: windows-latest
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          ref: 3b1efd82136c451cd283836e0e6662efd7827c63
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -38,7 +38,7 @@ jobs:
         run: >-
           uv run --no-sync python -m scripts.environment_capture
           --product e4dfacca7e3493918ded15a82239139f8394e763
-          --tool 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          --tool 3b1efd82136c451cd283836e0e6662efd7827c63
       - name: Upload exact encrypted environment pair
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -54,7 +54,7 @@ jobs:
     if: >-
       github.repository == 'yizhiteamo/Clytie' &&
       github.ref == 'refs/heads/main' &&
-      github.run_number == 1 && github.run_attempt == 1
+      github.run_number == 2 && github.run_attempt == 1
     runs-on: ubuntu-latest
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -62,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          ref: 3b1efd82136c451cd283836e0e6662efd7827c63
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -76,7 +76,7 @@ jobs:
         run: >-
           uv run --no-sync python -m scripts.environment_capture
           --product e4dfacca7e3493918ded15a82239139f8394e763
-          --tool 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          --tool 3b1efd82136c451cd283836e0e6662efd7827c63
       - name: Upload exact encrypted environment pair
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
