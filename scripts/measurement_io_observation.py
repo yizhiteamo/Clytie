@@ -215,7 +215,11 @@ class IoEvents:
             raise evidence.EvidenceError("io_lifecycle_incomplete")
         if set(self.capabilities) != set(self.run["observer_sequences"]):
             raise evidence.EvidenceError("io_observer_missing")
-        if self.run["arm"] == "candidate" and self.run["phase"] in {"matrix", "mechanism"}:
+        if self.run["arm"] == "candidate" and self.run["phase"] in {
+            "matrix",
+            "mechanism",
+            "closeout",
+        }:
             if any(
                 not all(
                     row[field] for field in ("host_file_batches", "budget_slots", "sqlite_backup")

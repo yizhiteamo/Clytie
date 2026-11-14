@@ -3,6 +3,11 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_closeout": (
+        "measurement_plan",
+        "measurement_plan_ingress",
+        "measurement_preparation_generate",
+    ),
     "measurement_matrix_analysis": (
         "evaluate_storage_performance",
         "measurement_analysis_index",

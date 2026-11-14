@@ -251,6 +251,12 @@ def _validate_run_v1(run):
     _enum(run["scale"], {"small_text", "large_database", "many_small_files", "large_asset"})
     _enum(run["arm"], {"none", "original", "candidate"})
     _enum(run["phase"], {"mechanism", "matrix", "fixture"})
+    if run["phase"] == "closeout" and (
+        run["format"] != 6
+        or run["scenario"] != "normal"
+        or run["scale"] not in {"large_database", "large_asset"}
+    ):
+        raise EvidenceError("closeout_scope_invalid")
     if (run["phase"] == "fixture") != (run["method"] == "encryption_fixture_v1"):
         raise EvidenceError("measurement_method_mismatch")
     _enum(run["result"], {"pass", "fail", "incomplete", "cancelled"})
@@ -293,7 +299,13 @@ def _validate_run_versioned(run):
     _enum(run["platform"], {"Windows", "Linux"})
     _enum(run["scale"], {"small_text", "large_database", "many_small_files", "large_asset"})
     _enum(run["arm"], {"baseline", "none", "original", "candidate"})
-    _enum(run["phase"], {"baseline", "mechanism", "matrix", "fixture"})
+    _enum(run["phase"], {"baseline", "mechanism", "matrix", "fixture", "closeout"})
+    if run["phase"] == "closeout" and (
+        run["format"] != 6
+        or run["scenario"] != "normal"
+        or run["scale"] not in {"large_database", "large_asset"}
+    ):
+        raise EvidenceError("closeout_scope_invalid")
     if (run["phase"] == "fixture") != (run["method"] == "legal_fixture_comparison_v1"):
         raise EvidenceError("measurement_method_mismatch")
     if (run["arm"] == "baseline" and run["phase"] not in {"baseline", "fixture"}) or (
@@ -342,7 +354,7 @@ def _validate_run_versioned(run):
     execution = run["execution"]
     _fields(execution, ("order", "position", "warmup_requests"))
     order = execution["order"]
-    mechanism = run["format"] in {5, 6} and run["phase"] == "mechanism"
+    mechanism = run["format"] in {5, 6} and run["phase"] in {"mechanism", "closeout"}
     if mechanism and (run["arm"] != "candidate" or order != ["candidate"]):
         raise EvidenceError("invalid_order")
     if type(order) is not list or len(order) != (1 if mechanism else 4):
