@@ -1,0 +1,90 @@
+name: A4.3 one environment collection
+
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One approved dispatch, not a reusable measurement or upload entry.
+concurrency:
+  group: a43-environment-once
+  cancel-in-progress: false
+
+jobs:
+  environment_windows:
+    if: >-
+      github.repository == 'yizhiteamo/Clytie' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_number == 1 && github.run_attempt == 1
+    runs-on: windows-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Install locked tooling
+        run: |
+          python -m pip install uv==0.9.5
+          uv sync --locked
+      - name: Collect approved runtime and encrypt
+        run: >-
+          uv run --no-sync python -m scripts.environment_capture
+          --product e4dfacca7e3493918ded15a82239139f8394e763
+          --tool 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+      - name: Upload exact encrypted environment pair
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: a43-environment-${{ github.run_id }}-Windows
+          path: |
+            ${{ runner.temp }}/a43-environment/Windows/environment.age
+            ${{ runner.temp }}/a43-environment/Windows/environment-receipt.json
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: false
+
+  environment_linux:
+    if: >-
+      github.repository == 'yizhiteamo/Clytie' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.10'
+      - name: Install locked tooling
+        run: |
+          python -m pip install uv==0.9.5
+          uv sync --locked
+      - name: Collect approved runtime and encrypt
+        run: >-
+          uv run --no-sync python -m scripts.environment_capture
+          --product e4dfacca7e3493918ded15a82239139f8394e763
+          --tool 5025b999b2eb7b0cc444192fb5d1be2adc0e13fb
+      - name: Upload exact encrypted environment pair
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: a43-environment-${{ github.run_id }}-Linux
+          path: |
+            ${{ runner.temp }}/a43-environment/Linux/environment.age
+            ${{ runner.temp }}/a43-environment/Linux/environment-receipt.json
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: false
+
