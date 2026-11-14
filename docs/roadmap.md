@@ -2,7 +2,17 @@
 
 先把架构做扎实，再接入功能。**架构阶段**的范围和验收是确定的；**功能阶段**列出的内容只是预设，开始前再细化。
 
-每个里程碑一个分支、一个 PR。GPT 在 PR 描述中按验收清单逐项给出证据；Claude 验收后由用户合并并打 tag。
+每个里程碑一个分支、一个 PR，在 PR 描述中按验收清单逐项给出证据。现行协作与审查流程以 [AGENTS.md](../AGENTS.md) 为准；验收、合并及打 tag 不因仓库公开而自动获批。
+
+## 当前状态（2026-11-14）
+
+- `main` 已合入 A1 至 A4.2，包括 SDK、插件宿主、账本与交付、对话、记忆与回想、守护进程、本机 API 和 CLI。
+- A4.3「备份与维护」位于未合并的 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71)，尚不是 `main` 的已交付能力。
+- 固定候选 `007a5c923115abda62116e9c9a25ac782303a973` 的第 3/3 轮独立代码复审通过；正式审查预算已用完。本次公开状态说明不增加或重置该预算。
+- Linux、最终候选必要的 Windows/Linux 功能 CI、正式性能与资源验收仍未完成。代码复审通过不等于 A4.3 最终验收通过，不授权合并、部署或推进下一里程碑。
+- 功能 CI、preparation 与正式 measurement 继续暂停。恢复功能 CI、正式测量安排及未来测量证据的存放/公开范围分别等待用户授权；现有准备密文授权不覆盖未来产物，PRIVATE 上传限制不变。
+
+以下保留 `main` 的既有里程碑范围和验收要求。候选的最新受限代码复审结论见 PR #71；[第二轮修复检查点](https://github.com/yizhiteamo/Clytie/blob/007a5c923115abda62116e9c9a25ac782303a973/docs/implementation/a4-3-review-2-followup.md) 保留其历史时点，不把旧记录改写成第三轮结论。
 
 ## 每个里程碑都要提供
 
@@ -130,6 +140,8 @@
 验收：覆盖 `api-spec.md` 第 10 节全部验收项，含 Issue #56 的第 7a 项与 Issue #57 的第 15 项。使用临时实例、假插件/平台/模型、MockClock 和本机回环地址；Windows 与 Linux 都用真实进程验证后台运行及管理中断恢复。停止、重启、静默复用 A4.1 的内部入口。
 
 ### A4.3 备份与维护
+当前状态见上方入口。本节简表保留早期规划；未合并候选的详细批准范围与验收要求见 [固定候选 backup-spec](https://github.com/yizhiteamo/Clytie/blob/007a5c923115abda62116e9c9a25ac782303a973/docs/architecture/backup-spec.md) 及 [storage-spec](https://github.com/yizhiteamo/Clytie/blob/007a5c923115abda62116e9c9a25ac782303a973/docs/architecture/storage-spec.md)，不能以早期简表缩减最终性能、资源或双平台验收要求。
+
 范围：常规备份、保留策略、恢复校验、副本目录、密钥 CLI、日志轮转。A4.1 验收后另写实现规格。
 
 验收：备份保留策略按模拟时间运行正确，永不删光；恢复校验只清理本次临时目录，遵守逐个明确路径删除的规则。守护进程静默状态、通知冷却与审计随备份保留。
