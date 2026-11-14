@@ -161,9 +161,37 @@ def launch_one(
     frozen, execution_id, version_directory, target, *, environ=None, spawn=subprocess.Popen
 ):
     """One registered spawn, no retry. Root must already register_plan externally."""
+    return _launch_registered(
+        frozen,
+        execution_id,
+        version_directory,
+        target,
+        environ=environ,
+        spawn=spawn,
+        check=checked,
+        consume=mechanism.register_started,
+        root=ROOT,
+        child_module="scripts.measurement_mechanism_launch",
+    )
+
+
+def _launch_registered(
+    frozen,
+    execution_id,
+    version_directory,
+    target,
+    *,
+    environ,
+    spawn,
+    check,
+    consume,
+    root,
+    child_module,
+):
+    """Shared process bookkeeping; dedicated callers own admission and materials."""
     env = os.environ if environ is None else environ
-    before, inputs = checked(frozen, execution_id, version_directory, environ=env)
-    expected = mechanism.register_started(frozen, execution_id, **inputs)
+    before, inputs = check(frozen, execution_id, version_directory, environ=env)
+    expected = consume(frozen, execution_id, **inputs)
     if plan.digest(expected) != plan.digest(before):
         raise Error("mechanism_manifest_changed")
     # Everything after the started marker is consumed even on filesystem/spawn failure.
@@ -178,7 +206,7 @@ def launch_one(
                     sys.executable,
                     "-B",
                     "-m",
-                    "scripts.measurement_mechanism_launch",
+                    child_module,
                     "child",
                     "--plan",
                     str(target / "frozen-plan.json"),
@@ -189,7 +217,7 @@ def launch_one(
                     "--target",
                     str(target / "trial"),
                 ],
-                cwd=ROOT,
+                cwd=root,
                 env=_child_environment(env),
                 stdout=output,
                 stderr=subprocess.STDOUT,
@@ -231,7 +259,7 @@ def launch_one(
             )
         raise
     try:
-        after, _ = checked(frozen, execution_id, version_directory, environ=env)
+        after, _ = check(frozen, execution_id, version_directory, environ=env)
         if plan.digest(after) != plan.digest(before):
             raise Error("mechanism_material_changed")
     except BaseException:

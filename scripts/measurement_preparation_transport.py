@@ -178,7 +178,21 @@ def verify(sealed, target, identity, expected):
 
 def material_identity(root, version_directory, candidate):
     """Recompute current source/tool bytes. No claim about generation history."""
+    return fixed_source_identity(root, version_directory, candidate, mode="candidate")
+
+
+def fixed_source_identity(root, version_directory, candidate, *, mode):
+    """Verify one explicit source against its real fixed Git archive.
+
+    This read-only verifier grants no preparation or public-upload permission.
+    Existing preparation callers remain candidate-only through material_identity.
+    """
     evidence._pattern(candidate, r"[a-f0-9]{40}")
+    if mode not in {"candidate", "legacy", "original"}:
+        raise Error("source_mode_invalid")
+    commit = {"candidate": candidate, "legacy": versions.LEGACY, "original": versions.ORIGINAL}[
+        mode
+    ]
     root = prep._safe(root)
     version_directory = prep._safe(version_directory)
     prep._safe(version_directory / "source")
@@ -190,14 +204,14 @@ def material_identity(root, version_directory, candidate):
     if (
         type(inventory["format"]) is not int
         or inventory["format"] != 1
-        or inventory["mode"] != "candidate"
+        or inventory["mode"] != mode
         or inventory["candidate"] != candidate
-        or inventory["source_commit"] != candidate
+        or inventory["source_commit"] != commit
     ):
         raise Error("source_identity_mismatch")
     # An internally consistent self-written inventory is not source provenance.
     # Compare the entire inventory against the actual fixed git object archive.
-    archive = versions._git(root, "archive", "--format=tar", candidate)
+    archive = versions._git(root, "archive", "--format=tar", commit)
     found = {}
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
         for entry in bundle:

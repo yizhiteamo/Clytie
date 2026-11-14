@@ -200,6 +200,26 @@ async def run_mechanism(directory, frozen, execution_id, version_directory):
             raise ValueError("measurement_material_changed")
 
 
+async def run_matrix(directory, frozen, execution_id, source_directory):
+    """Claim a registered arm before activating its fixed production archive."""
+    if __package__:
+        from . import measurement_matrix_launch as driver
+    else:
+        import measurement_matrix_launch as driver
+    manifest = driver.claim_started(frozen, execution_id, source_directory)
+    identity = driver.plan.digest(manifest)
+    row = driver.matrix.select(frozen, execution_id)
+    selected = Path(source_directory) / driver.matrix.source_mode(row)
+    product_root, _ = driver.versions.activate(selected)
+    try:
+        return await _execute(directory, manifest, product_root, tiny=False)
+    finally:
+        verify_imports(product_root)
+        after, _ = driver.checked(frozen, execution_id, source_directory)
+        if driver.plan.digest(after) != identity:
+            raise ValueError("measurement_material_changed")
+
+
 async def _execute(directory, run, product_root, *, tiny):
     scenario = run.get("scenario", "normal")
     if scenario not in {"normal", "cancel"} or (
