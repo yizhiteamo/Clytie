@@ -1,8 +1,10 @@
 import copy
 
 import pytest
-from scripts import environment_evidence as env
-from scripts import measurement_evidence as evidence
+from tests.measurement_tools import load
+
+env = load("environment_evidence")
+evidence = load("measurement_evidence")
 
 
 def data():
@@ -110,7 +112,7 @@ def test_target_never_overwritten(tmp_path):
 
 
 def test_environment_sources_are_only_approved_fields(monkeypatch):
-    from scripts import measurement_launch as launch
+    launch = load("measurement_launch")
 
     monkeypatch.setattr(launch.os, "cpu_count", lambda: 2)
     monkeypatch.setattr(launch.platform, "system", lambda: "Linux")
@@ -160,7 +162,7 @@ def test_decrypted_path_traversal_rejected(tmp_path):
 
 
 def test_capture_missing_admission_before_probe(monkeypatch):
-    from scripts import environment_capture as capture
+    capture = load("environment_capture")
 
     monkeypatch.setattr(capture.os, "environ", {})
     monkeypatch.setattr(capture.launch, "environment", lambda: pytest.fail("unapproved probe"))
@@ -169,7 +171,7 @@ def test_capture_missing_admission_before_probe(monkeypatch):
 
 
 def test_claim_is_exclusive_and_retained(tmp_path):
-    from scripts import environment_capture as capture
+    capture = load("environment_capture")
 
     _, expected = data()
     capture.claim(tmp_path, expected)
@@ -183,7 +185,7 @@ def test_claim_is_exclusive_and_retained(tmp_path):
     "damage", [None, "attempt", "job", "head", "dirty", "event", "second", "ref", "product"]
 )
 def test_capture_actual_ci_binding(damage):
-    from scripts import environment_capture as capture
+    capture = load("environment_capture")
 
     values = dict(
         GITHUB_ACTIONS="true",

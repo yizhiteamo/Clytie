@@ -8,8 +8,12 @@ from importlib.metadata import version
 
 import pyrage
 
-from . import measurement_evidence as evidence
-from . import measurement_preparation_evidence as prep
+if __package__:
+    from . import measurement_evidence as evidence
+    from . import measurement_preparation_evidence as prep
+else:
+    import measurement_evidence as evidence
+    import measurement_preparation_evidence as prep
 
 FORMAT = "environment_archive_v1"
 PURPOSE = "environment_only_not_measurement"

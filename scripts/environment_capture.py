@@ -7,10 +7,16 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from . import environment_evidence as archive
-from . import measurement_evidence as evidence
-from . import measurement_launch as launch
-from . import measurement_mechanism_workflow as workflow
+if __package__:
+    from . import environment_evidence as archive
+    from . import measurement_evidence as evidence
+    from . import measurement_launch as launch
+    from . import measurement_mechanism_workflow as workflow
+else:
+    import environment_evidence as archive
+    import measurement_evidence as evidence
+    import measurement_launch as launch
+    import measurement_mechanism_workflow as workflow
 
 PRODUCT = "e4dfacca7e3493918ded15a82239139f8394e763"
 PUBLIC_FINGERPRINT = "09d84206c57a4adb3efd462881c0801b7cd9fcadcf103d176ff3b6915fc31eaf"
