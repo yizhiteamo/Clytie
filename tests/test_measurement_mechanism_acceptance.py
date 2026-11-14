@@ -534,3 +534,16 @@ def test_verbose_skip_reason_counts_but_never_satisfies_passed_evidence():
         gate.verbose_test_results(
             raw.replace(b"SKIPPED", b"FAILED").replace(b"1 skipped", b"1 failed")
         )
+
+
+def test_verbose_parameter_paths_remain_distinct_from_skipped_case():
+    raw = (
+        "tests/test_fake.py::test_path[a//b] PASSED [ 50%]\n"
+        "tests/test_fake.py::test_path[a\\\\b] SKIPPED (platform) [100%]\n"
+        "===== 1 passed, 1 skipped in 0.01s =====\n"
+    ).encode()
+    assert gate.verbose_test_results(raw) == {"tests.test_fake::test_path[a//b]"}
+    both = raw.replace(b"SKIPPED (platform)", b"PASSED").replace(
+        b"1 passed, 1 skipped", b"2 passed"
+    )
+    assert len(gate.verbose_test_results(both)) == 2

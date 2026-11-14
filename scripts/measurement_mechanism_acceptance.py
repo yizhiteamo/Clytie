@@ -100,11 +100,16 @@ def verbose_test_results(raw):
         not any(counts[name] for name in ("failed", "error", "xfailed", "xpassed")),
         "combination_tests_failed_or_missing",
     )
-    return {
-        name.replace("\\", "/").replace("/", ".").replace(".py::", "::")
-        for name, status in rows.items()
-        if status == "PASSED"
-    }
+    passed = set()
+    for name, status in rows.items():
+        if status == "PASSED":
+            module, separator, case = name.partition("::")
+            require(bool(separator) and module.endswith(".py"), "test_node_invalid")
+            # Normalize only the module path. Parametrized values are test identity:
+            # converting their slashes can merge a skipped case with a passed one.
+            passed.add(module[:-3].replace("\\", "/").replace("/", ".") + "::" + case)
+    require(len(passed) == counts["passed"], "test_identity_collision")
+    return passed
 
 
 def require(condition, code):
