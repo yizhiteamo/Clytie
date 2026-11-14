@@ -127,19 +127,26 @@ async def _await_start(process, client, clock):
                     clock,
                     max(0, deadline - clock.monotonic()),
                 )
-                if response.status == 200:
-                    frame(process.stdin, {"type": "startup_confirmed", "seq": 0})
-                    return {
-                        "ok": True,
-                        "result": {"message": "已在后台运行，用 clytie supervisor stop 停止"},
-                    }
             except (NotRunning, TimeoutError):
                 pass
             except OSError:
                 return {
                     "ok": False,
-                    "error": {"code": "startup_failed", "message": "后台启动握手失败"},
+                    "error": {"code": "startup_failed", "message": "后台启动状态检查失败"},
                 }
+            else:
+                if response.status == 200:
+                    try:
+                        frame(process.stdin, {"type": "startup_confirmed", "seq": 0})
+                    except OSError:
+                        return {
+                            "ok": False,
+                            "error": {"code": "startup_failed", "message": "后台启动握手失败"},
+                        }
+                    return {
+                        "ok": True,
+                        "result": {"message": "已在后台运行，用 clytie supervisor stop 停止"},
+                    }
         await clock.sleep(min(0.1, max(0, deadline - clock.monotonic())))
     # Closing the launch pipe requests safe cancellation even if HTTP never became ready.
     return {
