@@ -182,7 +182,7 @@ def test_claim_is_exclusive_and_retained(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "damage", [None, "attempt", "job", "head", "dirty", "event", "second", "ref", "product"]
+    "damage", [None, "attempt", "job", "head", "dirty", "event", "first", "third", "ref", "product"]
 )
 def test_capture_actual_ci_binding(damage):
     capture = load("environment_capture")
@@ -193,7 +193,7 @@ def test_capture_actual_ci_binding(damage):
         GITHUB_REPOSITORY="yizhiteamo/Clytie",
         GITHUB_RUN_ATTEMPT="1",
         GITHUB_RUN_ID="123",
-        GITHUB_RUN_NUMBER="1",
+        GITHUB_RUN_NUMBER="2",
         GITHUB_REF="refs/heads/main",
         GITHUB_WORKFLOW_REF="yizhiteamo/Clytie/.github/workflows/environment.yml@refs/heads/main",
         GITHUB_JOB="environment_windows",
@@ -204,8 +204,10 @@ def test_capture_actual_ci_binding(damage):
         values["GITHUB_JOB"] = "other"
     if damage == "event":
         values["GITHUB_EVENT_NAME"] = "push"
-    if damage == "second":
-        values["GITHUB_RUN_NUMBER"] = "2"
+    if damage == "first":
+        values["GITHUB_RUN_NUMBER"] = "1"
+    if damage == "third":
+        values["GITHUB_RUN_NUMBER"] = "3"
     if damage == "ref":
         values["GITHUB_REF"] = "refs/heads/m4-3"
 
