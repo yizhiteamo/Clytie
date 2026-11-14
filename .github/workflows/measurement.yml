@@ -71,6 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 0
       - name: Preserve ciphertext even when the driver failed
+        id: upload0
         if: ${{ always() && steps.slot0.outputs.ciphertext != '' && steps.slot0.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -81,6 +82,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot0.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload0.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload0.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 0
       - name: Execute frozen platform slot 2 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot1
@@ -90,6 +100,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 1
       - name: Preserve ciphertext even when the driver failed
+        id: upload1
         if: ${{ always() && steps.slot1.outputs.ciphertext != '' && steps.slot1.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -100,6 +111,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot1.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload1.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload1.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 1
       - name: Execute frozen platform slot 3 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot2
@@ -109,6 +129,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 2
       - name: Preserve ciphertext even when the driver failed
+        id: upload2
         if: ${{ always() && steps.slot2.outputs.ciphertext != '' && steps.slot2.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -119,6 +140,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot2.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload2.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload2.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 2
       - name: Execute frozen platform slot 4 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot3
@@ -128,6 +158,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 3
       - name: Preserve ciphertext even when the driver failed
+        id: upload3
         if: ${{ always() && steps.slot3.outputs.ciphertext != '' && steps.slot3.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -138,6 +169,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot3.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload3.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload3.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 3
 
   mechanism_linux:
     needs: mechanism_windows
@@ -201,6 +241,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 0
       - name: Preserve ciphertext even when the driver failed
+        id: upload0
         if: ${{ always() && steps.slot0.outputs.ciphertext != '' && steps.slot0.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -211,6 +252,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot0.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload0.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload0.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 0
       - name: Execute frozen platform slot 2 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot1
@@ -220,6 +270,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 1
       - name: Preserve ciphertext even when the driver failed
+        id: upload1
         if: ${{ always() && steps.slot1.outputs.ciphertext != '' && steps.slot1.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -230,6 +281,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot1.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload1.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload1.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 1
       - name: Execute frozen platform slot 3 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot2
@@ -239,6 +299,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 2
       - name: Preserve ciphertext even when the driver failed
+        id: upload2
         if: ${{ always() && steps.slot2.outputs.ciphertext != '' && steps.slot2.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -249,6 +310,15 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot2.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload2.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload2.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 2
       - name: Execute frozen platform slot 4 once and seal stable output
         if: ${{ success() && steps.prepare.outputs.ready == 'true' }}
         id: slot3
@@ -258,6 +328,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow run-slot --slot 3
       - name: Preserve ciphertext even when the driver failed
+        id: upload3
         if: ${{ always() && steps.slot3.outputs.ciphertext != '' && steps.slot3.outputs.receipt != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -268,4 +339,13 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: false
+      - name: Confirm uploaded encrypted pair before advancing
+        if: ${{ success() && steps.slot3.outputs.ciphertext != '' }}
+        shell: bash
+        working-directory: execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload3.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload3.outputs.artifact-digest }}
+        run: uv run --no-sync python -B -m scripts.measurement_mechanism_workflow confirm-upload --slot 3
 

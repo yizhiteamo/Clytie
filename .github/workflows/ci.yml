@@ -46,7 +46,9 @@ jobs:
         run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
         id: offline_tests
-        run: uv run --no-sync pytest
+        # Preserve per-case outcomes for the local mechanism evidence map.
+        # This is the same suite; no additional runs or public artifacts.
+        run: uv run --no-sync pytest -v
       # Issue #72: the approved next measurement is a frozen, one-time mechanism
       # round followed by one three-arm matrix. A normal PR push must not rerun it.
       # Keep prior scripts/results; this functional CI is not performance acceptance.

@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 if __package__:
+    from . import measurement_cipher_handoff as cipher_handoff
     from . import measurement_evidence as evidence
     from . import measurement_launch as launch
     from . import measurement_mechanism_launch as runner
@@ -20,6 +21,7 @@ if __package__:
     from . import measurement_transport as transport
     from . import measurement_version as versions
 else:
+    import measurement_cipher_handoff as cipher_handoff
     import measurement_evidence as evidence
     import measurement_launch as launch
     import measurement_mechanism_launch as runner
@@ -449,6 +451,18 @@ def run_slot(
             ),
             "earlier_slot_not_complete",
         )
+    if ordinal:
+        confirmed = evidence._json(
+            prep._read_file(target / f"slot-{ordinal - 1}" / "upload-confirmed.json", 16 * 1024)
+        )
+        require(
+            confirmed["run_id"] == int(env["GITHUB_RUN_ID"])
+            and confirmed["attempt"] == 1
+            and confirmed["artifact_name"] == artifact_name(env, ordinal - 1)
+            and confirmed["state"] == "upload_confirmed_not_authenticated"
+            and confirmed["local_archive_verified"] is False,
+            "earlier_upload_unconfirmed",
+        )
     public = public_identity(root)
     transport.measurement_repository(repository)
     prep._save_bytes(
@@ -500,6 +514,9 @@ def run_slot(
         # Generic transport upload_gate remains PRIVATE-only.
         transport.measurement_repository(repository)
         paths = transport.validate_sealed(sealed)
+        prep._save_bytes(
+            trial / "sealed-binding.json", launch.canonical(cipher_handoff.sealed_binding(sealed))
+        )
     except BaseException:
         succeeded = False
         paths = []
@@ -561,6 +578,63 @@ def output(env, values):
         stream.write("".join(key + "=" + value + "\n" for key, value in values.items()))
 
 
+def artifact_name(env, ordinal):
+    return f"a43-encrypted-{env['GITHUB_RUN_ID']}-1-{platform.system().lower()}-slot{ordinal}"
+
+
+def confirm_upload(
+    root,
+    ordinal,
+    env,
+    event,
+    *,
+    artifact_id,
+    artifact_digest,
+    repository=deny_network,
+    github=deny_network,
+):
+    require(type(ordinal) is int and 0 <= ordinal < 4, "slot_invalid")
+    target = data_root(env)
+    ready = evidence._json(prep._read_file(target / "ready.json", 16 * 1024))
+    frozen, invocation = ingress.accept_ci(
+        root, ready["admission_commit"], env, sources(target), event=event, repository=repository
+    )
+    require(ready["plan_sha256"] == frozen["plan_sha256"], "prepared_plan_changed")
+    row = selected_rows(frozen, env)[ordinal]
+    expected, _ = runner.checked(
+        frozen, row["execution_id"], sources(target)["candidate"], environ=env
+    )
+    require(ready["manifests"][ordinal] == plan.digest(expected), "prepared_manifest_changed")
+    observed = evidence._json(prep._read_file(target / f"slot-{ordinal}-outcome.json", 4096))
+    require(
+        observed
+        == outcome(
+            row["execution_id"],
+            state="driver_success_encrypted_pending_verification",
+            failure_stage=None,
+            execute_state="returned_success",
+            driver_exit_confirmed=True,
+            driver_exit_code=0,
+            ciphertext_saved=True,
+            upload_eligible=True,
+        ),
+        "upload_slot_not_successful",
+    )
+    trial = target / f"slot-{ordinal}"
+    require(confirmed_exit(trial, row["execution_id"]) == 0, "upload_exit_failed")
+    cipher_handoff.confirm(
+        trial,
+        target / f"slot-{ordinal}-sealed",
+        env,
+        name=artifact_name(env, ordinal),
+        workflow_path=ingress.WORKFLOW_PATH,
+        request_commit=invocation["request_commit"],
+        artifact_id=artifact_id,
+        artifact_digest=artifact_digest,
+        github=github,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -569,6 +643,8 @@ def main(argv=None):
     prepare_parser.add_argument("--admission-commit", required=True)
     slot_parser = commands.add_parser("run-slot")
     slot_parser.add_argument("--slot", type=int, choices=range(4), required=True)
+    confirm = commands.add_parser("confirm-upload")
+    confirm.add_argument("--slot", type=int, choices=range(4), required=True)
     args = parser.parse_args(argv)
     env = os.environ
     try:
@@ -588,6 +664,20 @@ def main(argv=None):
             )
         elif args.command == "prepare":
             values = prepare(ROOT, args.admission_commit, env, event, repository=repository)
+        elif args.command == "confirm-upload":
+            evidence._pattern(env.get("ARTIFACT_ID"), r"[1-9][0-9]{0,19}")
+            confirm_upload(
+                ROOT,
+                args.slot,
+                env,
+                event,
+                artifact_id=int(env["ARTIFACT_ID"]),
+                artifact_digest=env["ARTIFACT_DIGEST"],
+                repository=repository,
+                github=transport._github,
+            )
+            print("mechanism_upload_confirmed_pending_local_verification")
+            return 0
         else:
             result = run_slot(ROOT, args.slot, env, event, repository=repository)
             values = dict(zip(("ciphertext", "receipt"), result["paths"]))
