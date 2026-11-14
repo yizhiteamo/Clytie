@@ -159,17 +159,29 @@ def test_decrypted_path_traversal_rejected(tmp_path):
     assert not (tmp_path / "runtime.json").exists()
 
 
-def test_capture_disabled_before_probe(monkeypatch):
+def test_capture_missing_admission_before_probe(monkeypatch):
     from scripts import environment_capture as capture
 
-    monkeypatch.setattr(
-        capture.platform, "system", lambda: pytest.fail("probe before authorization")
-    )
-    with pytest.raises(ValueError, match="not_authorized"):
-        capture.main(["--product", "a" * 40, "--tool", "b" * 40])
+    monkeypatch.setattr(capture.os, "environ", {})
+    monkeypatch.setattr(capture.launch, "environment", lambda: pytest.fail("unapproved probe"))
+    with pytest.raises(ValueError, match="identity_invalid"):
+        capture.main(["--product", capture.PRODUCT, "--tool", "b" * 40])
 
 
-@pytest.mark.parametrize("damage", [None, "attempt", "job", "head", "dirty", "event"])
+def test_claim_is_exclusive_and_retained(tmp_path):
+    from scripts import environment_capture as capture
+
+    _, expected = data()
+    capture.claim(tmp_path, expected)
+    original = (tmp_path / "a43-environment-claims/environment_windows.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        capture.claim(tmp_path, expected)
+    assert (tmp_path / "a43-environment-claims/environment_windows.json").read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "attempt", "job", "head", "dirty", "event", "second", "ref", "product"]
+)
 def test_capture_actual_ci_binding(damage):
     from scripts import environment_capture as capture
 
@@ -179,6 +191,9 @@ def test_capture_actual_ci_binding(damage):
         GITHUB_REPOSITORY="yizhiteamo/Clytie",
         GITHUB_RUN_ATTEMPT="1",
         GITHUB_RUN_ID="123",
+        GITHUB_RUN_NUMBER="1",
+        GITHUB_REF="refs/heads/main",
+        GITHUB_WORKFLOW_REF="yizhiteamo/Clytie/.github/workflows/environment.yml@refs/heads/main",
         GITHUB_JOB="environment_windows",
     )
     if damage == "attempt":
@@ -187,19 +202,31 @@ def test_capture_actual_ci_binding(damage):
         values["GITHUB_JOB"] = "other"
     if damage == "event":
         values["GITHUB_EVENT_NAME"] = "push"
+    if damage == "second":
+        values["GITHUB_RUN_NUMBER"] = "2"
+    if damage == "ref":
+        values["GITHUB_REF"] = "refs/heads/m4-3"
 
     def git(*args):
         if args[0] == "rev-parse":
             return "c" * 40 if damage == "head" else "b" * 40
         if args[0] == "diff":
             return "dirty" if damage == "dirty" else ""
+        if args[0] == "ls-files":
+            return ""
         return "commit"
 
     if damage:
         with pytest.raises(ValueError):
-            capture.binding(values, "a" * 40, "b" * 40, git=git, system="Windows")
+            capture.binding(
+                values,
+                "a" * 40 if damage == "product" else capture.PRODUCT,
+                "b" * 40,
+                git=git,
+                system="Windows",
+            )
     else:
         assert (
-            capture.binding(values, "a" * 40, "b" * 40, git=git, system="Windows")["job_id"]
+            capture.binding(values, capture.PRODUCT, "b" * 40, git=git, system="Windows")["job_id"]
             == "environment_windows"
         )
