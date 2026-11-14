@@ -43,3 +43,13 @@
 未来上传路径精确为 `RUNNER_TEMP/a43-environment/Windows/environment.age` 和同目录 `environment-receipt.json`，Linux 将路径中 Windows 换为 Linux。不得使用目录通配符。失败和取消不得改为上传明文或整个目录。唯一运行登记必须绑定实际 run，attempt 检查不能单独防止第二次 dispatch；此登记与上传接线须在执行授权时核对，不将当前禁用入口称为已具备运行准入。
 
 本次产品绑定仍为 `e4dfacca7e3493918ded15a82239139f8394e763`。工具绑定应取包含本次入口的最终完整提交，不能使用旧工具版本冒充；实际采集的 run、runtime 及计划环境摘要目前不存在，不填写推测值。现有旧环境材料只作为历史依据；普通 CI 的 runner 标签或 Python 版本不足以证明完整 runtime 摘要匹配。采集之后仍需核验，才能形成新的计划依据。
+
+## 本次离线证据与交接
+
+入口实现提交：`2c674f5619c7d1b99abd082e2ea00ccdec4e502e`；方案提交：`043d931`。当前没有实际采集记录、环境 artifact 或本机解密结果。将来执行若改变入口授权或增加工作流，工具版本须重新固定，不能仍声称执行此提交原字节。
+
+Windows 项目环境执行 `python -m pytest tests/test_environment_evidence.py tests/test_measurement_preparation_evidence.py tests/test_measurement_transport.py tests/test_measurement_preparation_transport.py -q`：一百四十一项通过，包含二十三项新环境回归；不能与单独二十三项相加。唯一警告为拒绝测试主动构造重复 ZIP 成员。新文件 ruff 检查通过；文件及两次提交说明的通用、私有扫描通过。测试使用虚构 runtime 和临时密钥，不读取真实运行环境用于证据采集。
+
+方案未新增活动工作流；实际采集与上传仍未授权。现有 preparation 保持手动停用；正式机制工作流仍只识别固定请求文件，本次不创建或修改请求。环境验证不代表正式性能验收或独立审查通过，正式审查计数仍为三轮已用。
+
+其他执行准备仍未闭合：旧基线与三臂矩阵的公开场次接线、最终环境依据及冻结计划，不由本次环境入口回归替代。正式机制八场、旧基线每平台十二场、三臂矩阵每平台三十六场预算不变；本次未消费其中任何场次。
