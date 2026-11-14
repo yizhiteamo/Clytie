@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts import startup_diagnostic as entry
+from tests.measurement_tools import load
+
+entry = load("startup_diagnostic")
 
 
 def test_module_entry_is_current_interpreter_and_exact_targets():
