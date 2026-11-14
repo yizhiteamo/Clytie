@@ -502,3 +502,16 @@ def test_prepare_template_is_explicitly_pending_and_never_loads_identity(bundle,
             "actual_local_scans",
         ],
     )
+
+
+def test_verbose_skip_reason_counts_but_never_satisfies_passed_evidence():
+    raw = (
+        "tests/test_fake.py::test_ok PASSED [ 50%]\n"
+        "tests/test_fake.py::test_platform SKIPPED (Windows only) [100%]\n"
+        "===== 1 passed, 1 skipped in 0.01s =====\n"
+    ).encode()
+    assert gate.verbose_test_results(raw) == {"tests.test_fake::test_ok"}
+    with pytest.raises(ValueError, match="combination_tests_failed_or_missing"):
+        gate.verbose_test_results(
+            raw.replace(b"SKIPPED", b"FAILED").replace(b"1 skipped", b"1 failed")
+        )

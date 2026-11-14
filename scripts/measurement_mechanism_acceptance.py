@@ -65,6 +65,7 @@ def verbose_test_results(raw):
         line = re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z\s+", "", line)
         match = re.fullmatch(
             r"((?:tests|plugins)[/\\].+?)\s+(PASSED|SKIPPED|FAILED|ERROR|XFAIL|XPASS)"
+            r"(?:\s+\([^\r\n]*\))?"
             r"(?:\s+\[\s*\d+%\])?\s*",
             line,
         )
