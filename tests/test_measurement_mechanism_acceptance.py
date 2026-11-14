@@ -20,6 +20,25 @@ REAL_AGGREGATE = gate.validation.aggregate
 REAL_VALIDATE_SEALED = gate.transport.validate_sealed
 
 
+@pytest.fixture(autouse=True)
+def fictional_local_context(monkeypatch):
+    # These fixtures model the local verifier, not permission to run it in CI.
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+
+@pytest.mark.parametrize("name", ["CI", "GITHUB_ACTIONS"])
+def test_actual_ci_environment_still_rejected_before_evidence_access(monkeypatch, tmp_path, name):
+    monkeypatch.setenv(name, "true")
+    missing = tmp_path / "not-opened.json"
+    target = tmp_path / "not-created"
+    with pytest.raises(ValueError, match="local_only_operation"):
+        gate.verify_record(missing, identity="fictional", target=target)
+    with pytest.raises(ValueError, match="local_only_operation"):
+        gate.prepare_record(missing, target)
+    assert not target.exists()
+
+
 def save(root, name, value):
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
