@@ -6,6 +6,7 @@ DEPENDENCIES = {
     "environment_evidence": ("measurement_preparation_evidence",),
     "environment_capture": ("environment_evidence", "measurement_mechanism_workflow"),
     "measurement_mechanism_plan": ("measurement_launch",),
+    "measurement_matrix_plan": ("measurement_mechanism_plan",),
     "measurement_wal_validation": ("measurement_pressure_observation",),
     "measurement_plan_ingress": (
         "measurement_mechanism_plan",
