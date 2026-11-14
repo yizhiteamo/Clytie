@@ -8,8 +8,10 @@ import sys
 from pathlib import Path
 
 import pytest
-from scripts import measurement_matrix_analysis as analysis
+from tests.measurement_tools import load
 from tests.test_measurement_matrix_plan import prepared
+
+analysis = load("measurement_matrix_analysis")
 
 
 def rows():

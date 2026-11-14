@@ -6,12 +6,20 @@ import math
 import os
 from pathlib import Path
 
-from scripts import evaluate_storage_performance as legacy
-from scripts import measurement_analysis_index as index
-from scripts import measurement_evidence as evidence
-from scripts import measurement_matrix_plan as matrix
-from scripts import measurement_mechanism_plan as mechanism
-from scripts import measurement_plan as plan
+if __package__:
+    from . import evaluate_storage_performance as legacy
+    from . import measurement_analysis_index as index
+    from . import measurement_evidence as evidence
+    from . import measurement_matrix_plan as matrix
+    from . import measurement_mechanism_plan as mechanism
+    from . import measurement_plan as plan
+else:
+    import evaluate_storage_performance as legacy
+    import measurement_analysis_index as index
+    import measurement_evidence as evidence
+    import measurement_matrix_plan as matrix
+    import measurement_mechanism_plan as mechanism
+    import measurement_plan as plan
 
 
 def require(value, code):
