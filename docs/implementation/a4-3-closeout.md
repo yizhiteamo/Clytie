@@ -1,6 +1,6 @@
 # A4.3 务实收尾执行记录
 
-用户已批准修订范围，起点 1881e4579fc30f1a3670b30a9d3e7376ab0ca927，工作区干净。主规格提交 2a1c65b 的完整编号以 Git 对象为准。旧计划、失败、三轮审查及原始证据保留；本页不改写旧结论。
+用户已批准修订范围，起点 1881e4579fc30f1a3670b30a9d3e7376ab0ca927，工作区干净。主规格提交 2a1c65b6e5ba13485fdcd9b49eefc8390c69bb9a；关联同步 2baf0b162429f071a15415021ad0bc8cf23345c7。旧计划、失败、三轮审查及原始证据保留；本页不改写旧结论。
 
 ## 执行与预算
 
@@ -25,3 +25,26 @@
 ## 当前不可合并结论
 
 验收尚未完成，不能提出合并通过。工具回归和历史 CI 不替代基本性能、资源或最终候选验证。失败原因、已证安全边界及仍需用户接受的限制分别记录；未知安全后果继续阻塞。全部必要项通过后按用户指定措辞报告并暂停，不合并、打标签、替换审查或推进后续功能。
+
+
+## 第一检查点：失败调查与限定修复
+
+完整矩阵延期已登记 https://github.com/yizhiteamo/Clytie/issues/77 ，不关闭 #72。代码修复仅区分 `_await_start` 的状态请求 OSError 与确认帧写失败；不改变 deadline、轮询、确认次数或 EOF 取消。真实 Client→status→health 读拒绝与真实 daemon 确认失败退出回归位于 `tests/test_api_startup_read.py`，本机 Windows 锁定项目环境十三项通过；不证明历史故障根因。
+
+| 要求/现象 | 确切证据 | 绑定与结果 | 仍缺 |
+|---|---|---|---|
+| 状态错误不冒充握手错误 | test_real_client_health_read_denial_is_not_confirmation_failure | 本轮工作树红后绿，完整 diff 与清单保留 | 修复后双平台候选 CI |
+| 确认失败不错误成功且安全退出 | test_real_read_failure_closes_pipe_and_safely_exits[confirm_write] | 真 daemon/假插件、原期限、退出与锁释放通过 | 原历史日志没有同样的内部阶段证据，不能反推 |
+| 健康快照拒绝 | 原 Windows 日志；严格持有读取句柄的虚构实验 | 既有 atomic_read 复用仍遇 WinError，未采用补丁及失败保留 | 历史 errno 不足以区分共享/权限/外部占用，未解决 |
+| 关停后最后一次备份 | test_controller_shutdown_creates_once_after_worker_cancel_drain 单次 | 未复现超时，但 partial 断言失败；任务/进程/槽位已结束，dirty 保留 | 原超时等待链缺失，不能由本轮退出覆盖 |
+| 本轮 partial 分类 | 同一虚构数据短/同深度捕获；SQLite 两长度提交对照 | 短路径成功；同深度复制 OperationalError；数据库路径二百五十四字符时 journal 二百六十二字符失败，一百五十字符对照成功 | 这是本次诊断路径问题，不解释历史 CI 超时；不修改全局路径设置 |
+| 资产/配置/数据恢复 | test_production_tool_ledger_online_encrypted_restore_authorization；test_real_configuration_credentials_and_plugin_versions | 起点普通 CI 已通过，对应源码未改 | 不冒充本次产品修复后的最终验证 |
+| 强杀后不重放与预览/清理保护 | test_real_kill_recovery_never_replays_unpack；test_real_worker_cancel_after_unlink_preserves_progress；test_manual_and_references_and_each_group_protected | 起点证据保留，来源文件不变 | 最终候选与剩余 §13 分支须结合原完整映射核对 |
+
+本机证据目录为 `.cache/closeout-startup-01`、`.cache/closeout-shutdown-01`，原 CI 与实际合并预览、散列在 `.cache/execution-admission-final-01`。缓存路径只作本机索引，原始日志与失败补丁不上传。没有以多集合数量相加作为总验证数。
+
+### 四场入口的实际障碍与人工替代
+
+旧 plan、准入、workflow 和接受器分别固定八场或完整矩阵，不能删除 JSON 行或用 tiny 夹具冒充四场。全面改造这组框架可能超过半个工作日，因此停止该方向。最小替代是仅为此次固定四场清单复用生产 trial、版本核对与既有加密封装，人工核对原始请求分期与资源；不扩通用准入、报告或调度器。无备份期须在冻结前明确样本与边界，不能沿用原很短的备份启动延迟宣称可比。当前正确性未知项仍阻塞，未冻结或执行四场，未消费额外复审。
+
+本检查点结论仍为不可合并。关停操作已接受业务，历史日志没有证明其超时后的内部状态；不得自行把它降为“未接受业务的可用性限制”。四场尚未执行，后续不得用性能通过覆盖该未知安全边界。
