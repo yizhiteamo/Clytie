@@ -2,9 +2,11 @@
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from uuid import uuid4
+
+from clytie.storage.owner import before_storage_commit
 
 from .projection import redact, visible
 
@@ -12,6 +14,21 @@ SCHEMA_VERSION = 2
 EXEC_TERMINAL = {"ok", "error", "denied", "cancelled", "interrupted"}
 INTENT_TERMINAL = {"sent", "failed", "unknown"}
 TABLES = {"inbound", "record", "invocation", "intent", "attempt", "dedupe"}
+SCHEMA_SQL = (
+    *(
+        f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
+        for table in sorted(TABLES)
+    ),
+    "CREATE TABLE audit (id INTEGER PRIMARY KEY, data TEXT NOT NULL)",
+    "CREATE UNIQUE INDEX task_id ON \"record\"(json_extract(data,'$.task_id'))",
+    "CREATE UNIQUE INDEX source_event ON \"record\"(json_extract(data,'$.source_event_id'))",
+    "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))",
+)
+HEALTH_SQL = (
+    "CREATE INDEX IF NOT EXISTS health_tasks ON record("
+    "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))",
+    "CREATE INDEX IF NOT EXISTS health_sending ON intent(json_extract(data,'$.status'))",
+)
 
 
 class LedgerError(ValueError):
@@ -31,9 +48,10 @@ def dump(value):
 class Ledger:
     """运行期间由上层持有 ledger/.lock；只读实例不修正或创建任何文件。"""
 
-    def __init__(self, path, companion_id, clock, *, readonly=False):
+    def __init__(self, path, companion_id, clock, *, readonly=False, coordination=None):
         self.path, self.companion_id, self.clock = path, companion_id, clock
         self.readonly = readonly
+        self.coordination = coordination
         if readonly and (path.parent / ".migration.json").exists():
             raise LedgerError("ledger_unavailable", "迁移中或待迁移")
         if readonly and not path.is_file():
@@ -51,35 +69,18 @@ class Ledger:
                 raise LedgerError("ledger_unavailable", "迁移中或待迁移")
             if not readonly and 0 < version < SCHEMA_VERSION:
                 raise LedgerError("ledger_unavailable", "migration requires LedgerRuntime")
+            if not readonly:
+                if self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0] != "wal":
+                    raise LedgerError("ledger_unavailable", "WAL unavailable")
             if not readonly and version == 0:
                 with self.db:
-                    for table in sorted(TABLES):
-                        self.db.execute(
-                            f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
-                        )
-                    self.db.execute(
-                        "CREATE TABLE audit (id INTEGER PRIMARY KEY, data TEXT NOT NULL)"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX task_id ON \"record\"(json_extract(data,'$.task_id'))"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX source_event ON \"record\"(json_extract(data,'$.source_event_id'))"
-                    )
-                    self.db.execute(
-                        "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))"
-                    )
+                    for statement in SCHEMA_SQL:
+                        self.db.execute(statement)
                     self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             if not readonly:
                 with self.db:
-                    self.db.execute(
-                        "CREATE INDEX IF NOT EXISTS health_tasks ON record("
-                        "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))"
-                    )
-                    self.db.execute(
-                        "CREATE INDEX IF NOT EXISTS health_sending ON intent("
-                        "json_extract(data,'$.status'))"
-                    )
+                    for statement in HEALTH_SQL:
+                        self.db.execute(statement)
         except BaseException:
             self.db.close()
             raise
@@ -94,9 +95,10 @@ class Ledger:
     def transaction(self):
         if self.readonly:
             raise LedgerError("read_only", "ledger is read-only")
-        with self.db:
+        with self.coordination.commit() if self.coordination else nullcontext(), self.db:
             self.db.execute("BEGIN IMMEDIATE")
             yield
+            before_storage_commit()
 
     def get(self, table, key):
         assert table in TABLES

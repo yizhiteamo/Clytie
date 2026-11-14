@@ -67,10 +67,12 @@ async def test_owner_remember_through_agent_is_chat_without_task_card(tmp_path, 
 async def test_memory_tools_audience_proactive_and_empty_context(tmp_path):
     agent, _, model = await make_agent(tmp_path)
     incoming = event(agent, role="member", scene="public_group", mention=True)
-    tools, _ = agent.tools(incoming.conversation, incoming.message.sender)
+    tools, _ = await agent.tools(incoming.conversation, incoming.message.sender)
     names = {t.name for t in tools}
     assert "core_recall" in names and not names & {"core_remember", "core_forget"}
-    assert agent.tools(incoming.conversation, incoming.message.sender, proactive=True)[0] == []
+    assert (await agent.tools(incoming.conversation, incoming.message.sender, proactive=True))[
+        0
+    ] == []
     await agent.receive(incoming)
     await agent.drain()
     assert any(text_parts(m.parts) == "你们之间还没有记住的事" for m in model.requests[0].messages)
@@ -207,7 +209,7 @@ async def test_private_guard_redacts_rewrite_prompt_and_blocks_second_copy(tmp_p
     assert not channel.sent
     assert private_text not in json.dumps(agent.log.entries, ensure_ascii=False)
     assert private_text not in json.dumps(agent.ledger.rows("audit"), ensure_ascii=False)
-    assert agent.memory.guard("虚构私密岛上，的青色\u200b玻璃城堡", "public_group")
+    assert await agent.memory.guard("虚构私密岛上，的青色\u200b玻璃城堡", "public_group")
     await finish(agent)
 
 
@@ -253,7 +255,10 @@ async def test_write_failure_does_not_break_dialogue_or_retry(tmp_path):
 
 async def test_recall_uses_old_visible_tasks_and_limits_calls(tmp_path):
     agent, _, model = await make_agent(
-        tmp_path, tool("echo", text="fictional remembered task"), {"finish": "stop", "text": "done"}
+        tmp_path,
+        tool("echo", text="fictional remembered task"),
+        {"finish": "stop", "text": "done"},
+        changes={"memory": {"recollect": {"enabled": False}}},
     )
     task_trace = await agent.receive(event(agent))
     await agent.drain()
@@ -268,7 +273,7 @@ async def test_recall_uses_old_visible_tasks_and_limits_calls(tmp_path):
     assert any(task_id in text and "remembered" in text for text in results)
     incoming = event(agent)
     for query in ("status", "2000", "exec_status"):
-        assert agent.memory.task_recall(query, incoming.conversation) == []
+        assert await agent.memory.task_recall(query, incoming.conversation) == []
     for _ in range(4):
         result = await agent.memory.execute(
             "limited",
@@ -403,8 +408,8 @@ async def test_projection_failure_skips_memory_but_guard_failure_blocks(tmp_path
         monkeypatch.setattr(agent.memory.store, "project", unavailable)
         assert await agent.memory.build("fake", event(agent).conversation, "纸船") == []
         monkeypatch.setattr(agent.memory.store, "all_records", unavailable)
-        assert agent.memory.guard("虚构的长内容用于检查", "public_group")
-        assert not agent.memory.guard("虚构的长内容用于检查", "owner_private")
+        assert await agent.memory.guard("虚构的长内容用于检查", "public_group")
+        assert not await agent.memory.guard("虚构的长内容用于检查", "owner_private")
     finally:
         await finish(agent)
 

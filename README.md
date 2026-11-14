@@ -6,7 +6,7 @@ Clytie 是可复用的 AI 伴侣框架：本体提供事件、账本、记忆、
 
 `main` 已合入 A1 至 A4.2：SDK、插件宿主、账本与交付、对话、记忆与回想、守护进程、本机 API 和 CLI。A4.3「备份与维护」仍在未合并的 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71) 中，不能将候选能力视为 `main` 已具备。
 
-截至 2026-11-14，候选 `007a5c923115abda62116e9c9a25ac782303a973` 的第 3/3 轮独立代码复审已通过；Linux、最终候选的 Windows/Linux 功能 CI、正式性能与资源验收尚未完成。本机验证和代码复审不替代最终验收，也不构成合并或部署批准。工作流继续暂停；恢复功能 CI、正式测量及未来测量证据的保存/公开范围仍需另行授权。
+截至 2026-11-14，候选 `007a5c923115abda62116e9c9a25ac782303a973` 的第 3/3 轮独立代码复审已通过；Linux、最终候选的 Windows/Linux 功能 CI、正式性能与资源验收尚未完成。本机验证和代码复审不替代最终验收，也不构成合并或部署批准。普通功能 CI 已获准启用，结果仍待完成；preparation 和正式测量继续暂停，正式测量及未来测量证据的保存/公开范围仍需另行授权。
 
 范围与验收标准见 [路线图](docs/roadmap.md)，架构入口见 [架构总览](docs/architecture/overview.md)，候选的历史验证与限制见 [固定候选检查点](https://github.com/yizhiteamo/Clytie/blob/007a5c923115abda62116e9c9a25ac782303a973/docs/implementation/a4-3-review-2-followup.md)。该检查点保留第二轮时点，最新第三轮完整结论见 PR #71；不改写历史记录。真实平台和产品模型接入、部署切换仍需后续阶段及用户授权。
 
@@ -26,7 +26,7 @@ uv run --no-sync python scripts/check_architecture.py
 uv run --no-sync python scripts/build_catalog.py --check
 ```
 
-`status` 只读配置、插件清单和人设文件存在状态，不导入插件、不读取人设内容、不连接平台或模型。退出码为：有效 `0`，配置错误 `1`，实例目录不存在 `2`。实例目录优先级为 `--home`、`CLYTIE_HOME`、仓库同级目录。
+`status` 离线校验配置、插件清单和人设文件存在状态，并读取已有存储状态以汇总记忆、账本及恢复提醒；不启动运行时服务、不导入插件、不读取人设正文、不连接平台或模型。退出码为：有效 `0`，配置错误 `1`，实例目录不存在 `2`。实例目录优先级为 `--home`、`CLYTIE_HOME`、仓库同级目录。
 
 SDK 规格见 [sdk-spec.md](docs/architecture/sdk-spec.md)，配置格式见 [config-spec.md](docs/architecture/config-spec.md)。插件作者可使用 `clytie.sdk.testing` 中的假实现、`MockClock` 和 `assert_*_contract` 函数；完整样例见 [fake-model](plugins/fake-model/README.md) 与 [fake-channel](plugins/fake-channel/README.md)。
 
@@ -66,6 +66,18 @@ SDK 契约与四层配置见 [A1 实现说明](docs/implementation/a1.md)。A2 �
 
 持久记忆、账本、边界流程与调度、守护进程、本机管理 API 和 CLI 已在 `main` 实现；A4.3 的完整备份、恢复及维护能力属于未合并候选，尚未完成最终验收。官方插件同进程运行，ctx 是能力接口裁剪，不能作为运行任意不可信 Python 代码的安全沙箱。
 
+WebUI、看图与形象识别尚不在当前交付范围；单独记忆包的资产导入继续预留。
+
 ## 许可证
 
 [MIT](LICENSE)。
+
+## A4.3 备份与维护（已有实现候选，最终验收未完成）
+
+实现依据见 [backup-spec.md](docs/architecture/backup-spec.md)。在线备份不停止聊天，允许有界写入协调，不承诺零资源影响。实例 backup 配置默认开启，记忆重要修改合并窗口为 5 分钟，每日实例备份默认当地时间 03:00。
+
+常规自动备份目标默认 20 GiB，不是硬磁盘上限：开始前未超额时允许新包使其超额，下次成功生成并校验后才删除最早的可删除旧包。高频记忆最近十二份与日周月层取并集，最低有效点及恢复引用始终受保护；手动包、特殊快照、失败现场和旧实例不被常规预算顺手删除。配置字段、范围及完整示例语义以规格 §6、§12 为准。
+
+实例备份密钥须另外保管，不进入主包或副本；确认保管不等于验证外部副本。完整恢复到新空目标，经校验、明确源停用和用户切换后才允许正常启动，不自动上线或重放任务。旧实例持续登记，默认不删，清理须计划、确认并核验独有数据、密钥和引用。
+
+候选中的维护与备份入口已接线，但尚不可作为已验收的正式备份保障。Windows 本机功能验证、Linux 验证、GitHub 双平台 CI、正式性能和独立审查分别记录；不能把本机通过写成 CI 或里程碑通过。Issue #72、性能证据及后续审查仍待闭合，当前不启动真实部署。

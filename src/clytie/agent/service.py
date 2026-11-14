@@ -7,7 +7,9 @@ from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 
+from clytie.backup.coordination import run_sync
 from clytie.config import thaw
+from clytie.kernel.delivery import OwnedFinalization
 from clytie.kernel.events import background
 from clytie.kernel.ledger import EXEC_TERMINAL
 from clytie.kernel.service import record_scope
@@ -29,6 +31,7 @@ from clytie.sdk.types import (
     ToolResult,
     ToolSpec,
 )
+from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
 from .context import Context, message
 from .persona import Persona
@@ -134,6 +137,7 @@ class Agent:
         self.outbound.memory_guard = self.memory.guard
         self.memory_context = memory_context
         self.batches, self.background, self.warnings = {}, set(), []
+        self.intake_tasks = set()
         self.filtered_count = 0
         self.model_health = "unknown"
         self.model_error_code = None
@@ -183,6 +187,8 @@ class Agent:
         return result
 
     def rebuild_memory(self):
+        if getattr(self, "shutting_down", False):
+            return
         self._memory_dirty = True
         if not getattr(self, "_memory_rebuilding", None) or self._memory_rebuilding.done():
 
@@ -199,6 +205,7 @@ class Agent:
     async def start(self):
         if self.features.agent_type:
             raise ValueError("unsupported_model_type")
+        await self.boundary.initialize()
         self.protection.update(await self.model_call("quota"))
         await self.kernel.start()
         from clytie.memory.retrieval import HostExtension
@@ -260,10 +267,10 @@ class Agent:
             return "protection_mode"
         return None
 
-    def cancellable(self, conversation, actor=None):
+    async def cancellable(self, conversation, actor=None):
         return [
             r
-            for r in self.ledger.rows("record")
+            for r in await run_sync(self.ledger, self.ledger.rows, "record")
             if r["conversation_id"] == conversation.conversation_id
             and r["kind"] == "task"
             and (r["exec_status"] not in EXEC_TERMINAL or r["delivery_status"] == "pending")
@@ -275,7 +282,7 @@ class Agent:
             )
         ]
 
-    def tools(self, conversation, actor, proactive=False):
+    async def tools(self, conversation, actor, proactive=False):
         if proactive:
             return [], "主动开口时暂不使用能力"
         specs, lines = [], []
@@ -306,7 +313,7 @@ class Agent:
         if not self.features.supports_tools:
             return [], "\n".join(lines)
         specs.extend(self.memory.specifications(actor))
-        if self.cancellable(conversation):
+        if await self.cancellable(conversation):
             specs.append(
                 ToolSpec(
                     name="core_cancel_task",
@@ -344,6 +351,77 @@ class Agent:
         return specs, "\n".join(lines)
 
     async def receive(self, event):
+        if event.companion_id != self.cid:
+            raise ValueError("wrong companion")
+        finalization = OwnedFinalization(self.kernel.delivery)
+        state = {"accepted": False, "handed": False}
+
+        async def receive_owned():
+            try:
+                return await self._receive(event, finalization, state)
+            except BaseException as exc:
+                if state["accepted"] and not state["handed"]:
+                    if state.get("trace"):
+                        await self.kernel.seal(
+                            state["trace"],
+                            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                            error={"code": getattr(exc, "code", "agent_error"), "message": ""},
+                        )
+                    await finalization.persist(
+                        self._ignore_unhandled, [event.event_id], getattr(exc, "code", None)
+                    )
+                raise
+            finally:
+                if not state["handed"]:
+                    finalization.release()
+
+        # 断线不遗弃已进入接受流程的本体任务；它仍由责任对象跟踪。
+        return await self._intake(receive_owned(), finalization)
+
+    async def _intake(self, coroutine, finalization):
+        task = finalization.track(asyncio.create_task(coroutine))
+        self.intake_tasks.add(task)
+        task.add_done_callback(self.intake_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _claim_inbound(self, event, finalization, state):
+        # 接受点仍使用普通容量，满时明确抛出 storage_busy，不能借收尾槽假接收。
+        command = finalization.track(
+            asyncio.create_task(run_sync(self.ledger, self.ledger.claim_inbound, event))
+        )
+        key, new = await asyncio.shield(command)
+        state["accepted"] = new
+        return key, new
+
+    def _ignore_unhandled(self, keys, reason=None):
+        for key in keys:
+            row = self.ledger.get("inbound", key)
+            if row and row["state"] == "received":
+                self.ledger.ignore(key, reason)
+
+    def _bind_finalization(self, trace, finalization):
+        self.kernel.finalizations[trace] = finalization
+
+        def forget():
+            if self.kernel.finalizations.get(trace) is finalization:
+                self.kernel.finalizations.pop(trace, None)
+
+        finalization.on_complete(forget)
+
+    async def _settle_record(self, trace, finalization, future):
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            await self.kernel.seal(trace, "cancelled", error={"code": "cancelled", "message": ""})
+        except Exception as exc:
+            await self.kernel.seal(
+                trace, "error", error={"code": getattr(exc, "code", "agent_error"), "message": ""}
+            )
+            raise
+        finally:
+            finalization.release()
+
+    async def _receive(self, event, finalization, state):
         if event.companion_id == self.cid and event.message:
             actor = event.message.sender
             self.actor_names[actor.actor_id] = actor.display_name
@@ -360,12 +438,10 @@ class Agent:
             if event.companion_id != self.cid:
                 raise ValueError("wrong companion")
             if event.dedupable:
-                key, new = self.ledger.claim_inbound(event)
+                key, new = await self._claim_inbound(event, finalization, state)
                 if new:
-                    self.ledger.ignore(key, reason)
+                    await finalization.persist(self.ledger.ignore, key, reason)
             return None
-        if hasattr(self, "recollector"):
-            self.recollector.activity(event.conversation)
         if event.companion_id != self.cid:
             raise ValueError("wrong companion")
         self.kernel.conversation_scenes[event.conversation.conversation_id] = (
@@ -377,20 +453,22 @@ class Agent:
             return None
         if event.message and self.boundary.paused(event.message.sender):
             if event.dedupable:
-                key, new = self.ledger.claim_inbound(event)
+                key, new = await self._claim_inbound(event, finalization, state)
                 if new:
-                    self.ledger.ignore(key, "boundary_paused")
+                    await finalization.persist(self.ledger.ignore, key, "boundary_paused")
             return None
         if not event.dedupable:
             await self.host.behavior(self.cid, "message_received", event)
             return None
-        key, new = self.ledger.claim_inbound(event)
+        key, new = await self._claim_inbound(event, finalization, state)
         if not new:
             self.kernel.duplicates += 1
             return None
+        if hasattr(self, "recollector"):
+            self.recollector.activity(event.conversation)
         if not event.message:
             await self.host.behavior(self.cid, "message_received", event)
-            self.ledger.ignore(key)
+            await finalization.persist(self.ledger.ignore, key)
             return None
         mentioned = any(p.type == "mention" and p.is_self for p in event.message.parts)
         cancel = fast_cancel(
@@ -403,44 +481,71 @@ class Agent:
             event.conversation.kind == "group"
             and not mentioned
             and cancel is not None
-            and self.cancellable(event.conversation, event.message.sender)
+            and await self.cancellable(event.conversation, event.message.sender)
         ):
             await self.cancel(event, cancel)
-            self.ledger.ignore(key, "cancel_only")
+            await finalization.persist(self.ledger.ignore, key, "cancel_only")
             return None
         await self.host.behavior(self.cid, "message_received", event)
         before = await self.host.behavior(
             self.cid, "before_attention", (event, self.host.companion_state(self.cid))
         )
         if isinstance(before, Ignore):
-            self.ledger.ignore(key)
+            await finalization.persist(self.ledger.ignore, key)
             return None
         if isinstance(before, ReactOnly):
-            record = self.kernel.open_record(event_id=key)
+            record = await self.kernel.open_record(event_id=key, finalization=finalization)
+            state["trace"] = record["trace_id"]
+            self._bind_finalization(record["trace_id"], finalization)
             intent = self.intent(
                 record, [], kind="react", emoji=before.emoji, target=event.message.ref
             )
             # 宿主已检验插件 message.react；owner Ignore 降级是本体例外。
-            self.kernel.allow_reaction_exception(
+            await self.kernel.allow_reaction_exception(
                 record["trace_id"], intent, permissions=("message.react",)
             )
             await self.kernel.seal(record["trace_id"], "ok", [intent])
-            await self.kernel.delivery.deliver(record["trace_id"])
+            await self.kernel.delivery.deliver(record["trace_id"], finalization=finalization)
             return record["trace_id"]
         batch_key = (event.conversation.conversation_id, event.message.sender.actor_id)
         if batch_key in self.batches:
             self.batches[batch_key]["events"].append(event)
+            self.batches[batch_key]["finalizations"].append(finalization)
+            state["handed"] = True
             return None
         batch = {
             "events": [event],
+            "finalizations": [finalization],
             "started": self.clock.monotonic(),
             "mode": before if isinstance(before, Mode) else None,
         }
         self.batches[batch_key] = batch
+        state["handed"] = True
         return await self.attention(batch_key, mentioned)
 
     async def attention(self, key, mentioned):
         batch = self.batches[key]
+        try:
+            return await self._attention(key, mentioned, batch)
+        except BaseException as exc:
+            if not batch.get("queued"):
+                self.batches.pop(key, None)
+                finalization = batch["finalizations"][0]
+                if batch.get("trace"):
+                    await self.kernel.seal(
+                        batch["trace"],
+                        "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                        error={"code": getattr(exc, "code", "agent_error"), "message": ""},
+                    )
+                await finalization.persist(
+                    self._ignore_unhandled, [e.event_id for e in batch["events"]]
+                )
+                for responsibility in batch["finalizations"]:
+                    responsibility.release()
+            raise
+
+    async def _attention(self, key, mentioned, batch):
+        finalization = batch["finalizations"][0]
         event = batch["events"][-1]
         opinion = await self.host.behavior(
             self.cid,
@@ -462,16 +567,38 @@ class Agent:
                     ),
                 )
 
-            self.track(later())
+            async def deferred():
+                try:
+                    await later()
+                except asyncio.CancelledError:
+                    if self.batches.get(key) is batch:
+                        self.batches.pop(key, None)
+                        await finalization.persist(
+                            self._ignore_unhandled, [e.event_id for e in batch["events"]]
+                        )
+                        for responsibility in batch["finalizations"]:
+                            responsibility.release()
+                    raise
+
+            self.track(finalization.follow(deferred()))
             return None
         self.batches.pop(key)
         if isinstance(opinion, Skip):
-            for e in batch["events"]:
-                self.ledger.ignore(e.event_id)
+            await finalization.persist(
+                self._ignore_unhandled, [e.event_id for e in batch["events"]]
+            )
+            for responsibility in batch["finalizations"]:
+                responsibility.release()
             return None
-        record = self.kernel.open_record(event_id=event.event_id)
+        record = await self.kernel.open_record(event_id=event.event_id, finalization=finalization)
         trace = record["trace_id"]
-        self.ledger.merge([e.event_id for e in batch["events"][:-1]], trace)
+        batch["trace"] = trace
+        self._bind_finalization(trace, finalization)
+        await finalization.persist(
+            self.ledger.merge, [e.event_id for e in batch["events"][:-1]], trace
+        )
+        for responsibility in batch["finalizations"][1:]:
+            responsibility.release()
         extra = ""
         cancel = fast_cancel(
             event.message,
@@ -483,7 +610,7 @@ class Agent:
         if cancel is not None:
             with record_scope(trace):
                 extra = "取消结果：" + await self.cancel(event, cancel)
-        self.kernel.submit(
+        future = await self.kernel.submit(
             trace,
             event.message.sender,
             lambda: self.run(
@@ -495,6 +622,8 @@ class Agent:
                 extra=extra,
             ),
         )
+        batch["queued"] = True
+        self.track(self._settle_record(trace, finalization, future))
         return trace
 
     async def cancel(self, event, args):
@@ -508,13 +637,40 @@ class Agent:
 
     async def generate(self, trace, messages, specs, conversation, token, *, rewrite=False):
         token.raise_if_cancelled()
-        record = self.ledger.get("record", trace)
+        finalization = self.kernel.finalizations.get(trace)
+        owned = finalization is None
+        if owned:
+            finalization = OwnedFinalization(self.kernel.delivery)
+        try:
+            return await finalization.follow(
+                self._generate(
+                    trace, messages, specs, conversation, token, finalization, rewrite=rewrite
+                )
+            )
+        finally:
+            if owned:
+                finalization.release()
+
+    async def _generate(
+        self, trace, messages, specs, conversation, token, finalization, *, rewrite=False
+    ):
+        token.raise_if_cancelled()
+        record = await finalization.persist(self.ledger.get, "record", trace)
         limit = self.clock.now() + timedelta(
             seconds=self.config.get("agent", {}).get("model_call_seconds", 120)
         )
         if record["deadline"]:
             deadline = datetime.fromisoformat(record["deadline"])
             limit = min(limit, deadline) if rewrite else deadline
+
+        def record_model_call():
+            with self.ledger.transaction():
+                record = self.ledger.get("record", trace)
+                record["model_calls"] = record.get("model_calls", 0) + 1
+                self.ledger.put("record", trace, record)
+
+        await finalization.persist(record_model_call)
+        token.raise_if_cancelled()
         child = token.child()
         task = asyncio.create_task(
             self.model_call(
@@ -533,23 +689,26 @@ class Agent:
                 conversation_id=conversation.conversation_id,
             )
         )
+        finalization.track(task)
         timer = asyncio.create_task(self.clock.sleep_until(limit))
         cancelled = asyncio.create_task(token.wait())
         watched = False
+        result_observed = False
 
         async def late():
             try:
                 result = await task
             except (Exception, asyncio.CancelledError):
                 return
-            with self.ledger.transaction():
-                self.ledger.audit(
-                    "model.late_result", trace_id=trace, content=result.model_dump(mode="json")
-                )
 
-        with self.ledger.transaction():
-            record["model_calls"] = record.get("model_calls", 0) + 1
-            self.ledger.put("record", trace, record)
+            def audit_late_model_result():
+                with self.ledger.transaction():
+                    self.ledger.audit(
+                        "model.late_result", trace_id=trace, content=result.model_dump(mode="json")
+                    )
+
+            await finalization.persist(audit_late_model_result)
+
         try:
             done, _ = await asyncio.wait(
                 {task, timer, cancelled}, return_when=asyncio.FIRST_COMPLETED
@@ -565,14 +724,15 @@ class Agent:
                 if not task.done():
                     task.cancel()
 
-                self.track(late())
+                finalization.track(self.track(late()))
                 watched = True
                 if token.cancelled:
                     raise asyncio.CancelledError
                 raise TimeoutError("model deadline")
             result = task.result()
+            result_observed = True
             if token.cancelled:
-                self.track(late())
+                finalization.track(self.track(late()))
                 watched = True
                 raise asyncio.CancelledError
             self.protection.update(result.quota)
@@ -581,8 +741,9 @@ class Agent:
             if not task.done():
                 child.cancel(token.reason or "cancelled")
                 task.cancel()
-                if not watched:
-                    self.track(late())
+            if not watched and not result_observed:
+                finalization.track(self.track(late()))
+                watched = True
             timer.cancel()
             cancelled.cancel()
             await asyncio.gather(timer, cancelled, return_exceptions=True)
@@ -600,7 +761,7 @@ class Agent:
             actors.update(part.actor_id for part in event.message.parts if part.type == "mention")
             if event.message.reply_to:
                 ref = event.message.reply_to.model_dump(mode="json")
-                for row in self.ledger.rows("inbound"):
+                for row in await self.kernel.persist(trace, self.ledger.rows, "inbound"):
                     msg = row.get("message")
                     if (
                         msg
@@ -629,15 +790,13 @@ class Agent:
         try:
             assets, dialogue, rounds = [], [], 0
             if direct is not None:
-                intents = [
-                    self.intent(self.ledger.get("record", trace), [part], kind="proactive")
-                    for part in direct
-                ]
+                record = await self.kernel.persist(trace, self.ledger.get, "record", trace)
+                intents = [self.intent(record, [part], kind="proactive") for part in direct]
                 await self.finish(trace, "ok", intents)
                 return
             while True:
                 token.raise_if_cancelled()
-                specs, states = self.tools(conversation, actor, proactive)
+                specs, states = await self.tools(conversation, actor, proactive)
                 exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
                 context = await self.context.build(
                     conversation,
@@ -663,10 +822,14 @@ class Agent:
                     text = turn.text or ""
                     break
                 rounds += 1
-                with self.ledger.transaction():
-                    row = self.ledger.get("record", trace)
-                    row["tool_rounds"] = rounds
-                    self.ledger.put("record", trace, row)
+
+                def record_tool_rounds():
+                    with self.ledger.transaction():
+                        row = self.ledger.get("record", trace)
+                        row["tool_rounds"] = rounds
+                        self.ledger.put("record", trace, row)
+
+                await self.kernel.persist(trace, record_tool_rounds)
                 dialogue.append(
                     ChatMessage(
                         role="assistant",
@@ -689,8 +852,12 @@ class Agent:
                         )
                     )
             if proactive and not text:
-                with self.ledger.transaction():
-                    self.ledger.audit("proactive_declined", trace_id=trace)
+
+                def audit_proactive_decline():
+                    with self.ledger.transaction():
+                        self.ledger.audit("proactive_declined", trace_id=trace)
+
+                await self.kernel.persist(trace, audit_proactive_decline)
             intents = await self.outgoing(
                 trace, conversation, actor, events, text, assets, token, proactive=proactive
             )
@@ -700,6 +867,15 @@ class Agent:
             if not token.cancelled:
                 raise
             await self.kernel.seal(trace, "cancelled", error={"code": "cancelled", "message": ""})
+        except (StorageBusy, StorageCancelled, StorageFailed) as exc:
+            code = exc.code
+
+            def audit_storage_failure():
+                with self.ledger.transaction():
+                    self.ledger.audit("agent.failed", trace_id=trace, code=code)
+
+            await self.kernel.persist(trace, audit_storage_failure)
+            await self.kernel.seal(trace, "error", error={"code": code, "message": ""})
         except Exception as exc:
             code = (
                 "outbound_blocked"
@@ -709,8 +885,12 @@ class Agent:
                 else "agent_error"
             )
             self.log.warning("agent.failed", trace_id=trace, code=code)
-            with self.ledger.transaction():
-                self.ledger.audit("agent.failed", trace_id=trace, code=code)
+
+            def audit_failure():
+                with self.ledger.transaction():
+                    self.ledger.audit("agent.failed", trace_id=trace, code=code)
+
+            await self.kernel.persist(trace, audit_failure)
             intents = []
             if not proactive and conversation.kind == "private" and not token.cancelled:
                 text = self.config.get("replies", {}).get(
@@ -718,11 +898,13 @@ class Agent:
                 )
                 if self.model_health == "auth_invalid" or self.kernel.delivery.silenced:
                     text = ""
-                if text and not self.outbound.check(text, conversation.scene):
+                if text and not await self.outbound.check(text, conversation.scene):
                     try:
                         intents = await self.outgoing(
                             trace, conversation, actor, events, text, [], token, fallback=True
                         )
+                    except (StorageBusy, StorageCancelled, StorageFailed) as failure:
+                        code, intents = failure.code, []
                     except Exception:
                         self.log.warning("fallback.failed", trace_id=trace)
                         intents = []
@@ -766,7 +948,14 @@ class Agent:
             )
         if call.tool.startswith("core_"):
             if call.tool in {"core_remember", "core_forget", "core_recall"}:
-                return await self.memory.execute(trace, conversation, actor, call, token)
+                return await self.memory.execute(
+                    trace,
+                    conversation,
+                    actor,
+                    call,
+                    token,
+                    finalization=self.kernel.finalizations.get(trace),
+                )
             if call.tool == "core_cancel_task":
                 content = await self.kernel.cancel(
                     self.cid,
@@ -778,14 +967,18 @@ class Agent:
                 content = await self.boundary.report(
                     trace, actor, call.arguments["category"], token
                 )
-            with self.ledger.transaction():
-                self.ledger.audit(
-                    "core.tool",
-                    trace_id=trace,
-                    tool=call.tool,
-                    arguments=call.model_dump(mode="json")["arguments"],
-                    result=content,
-                )
+
+            def audit_core_tool():
+                with self.ledger.transaction():
+                    self.ledger.audit(
+                        "core.tool",
+                        trace_id=trace,
+                        tool=call.tool,
+                        arguments=call.model_dump(mode="json")["arguments"],
+                        result=content,
+                    )
+
+            await self.kernel.persist(trace, audit_core_tool)
             return ToolResult(data={}, call_id=call.call_id, status="ok", content=content)
         reg = next(r for r in self.host.registrations(self.cid, "tool") if r.key == call.tool)
         inv = Invocation(
@@ -843,7 +1036,7 @@ class Agent:
         proactive=False,
         fallback=False,
     ):
-        record = self.ledger.get("record", trace)
+        record = await self.kernel.persist(trace, self.ledger.get, "record", trace)
         draft = ReplyDraft(
             parts=[TextPart(text=text)] if text else [],
             conversation=conversation,
@@ -852,9 +1045,9 @@ class Agent:
             form="plain",
         )
         draft = await self.host.behavior(self.cid, "after_generation", draft)
-        hits = self.outbound.check(text_parts(draft.parts), conversation.scene)
+        hits = await self.outbound.check(text_parts(draft.parts), conversation.scene)
         if hits and not fallback:
-            specs, states = self.tools(conversation, actor, proactive)
+            specs, states = await self.tools(conversation, actor, proactive)
             context = await self.context.build(
                 conversation, actor, events, states, proactive=proactive, memory_trace=trace
             )
@@ -878,17 +1071,27 @@ class Agent:
                         form="plain",
                     )
                     draft = await self.host.behavior(self.cid, "after_generation", draft)
-                    hits = self.outbound.check(text_parts(draft.parts), conversation.scene)
+                    hits = await self.outbound.check(text_parts(draft.parts), conversation.scene)
+            except (StorageBusy, StorageCancelled, StorageFailed):
+                raise
             except (TimeoutError, RuntimeError):
                 pass
+
+            def record_rewrite():
+                with self.ledger.transaction():
+                    row = self.ledger.get("record", trace)
+                    row["rewritten"] = True
+                    self.ledger.put("record", trace, row)
+
+            await self.kernel.persist(trace, record_rewrite)
+
+        def record_outbound_categories():
             with self.ledger.transaction():
                 row = self.ledger.get("record", trace)
-                row["rewritten"] = True
+                row["outbound_categories"] = list(hits)
                 self.ledger.put("record", trace, row)
-        with self.ledger.transaction():
-            row = self.ledger.get("record", trace)
-            row["outbound_categories"] = list(hits)
-            self.ledger.put("record", trace, row)
+
+        await self.kernel.persist(trace, record_outbound_categories)
         if "privacy" in hits:
             raise ValueError("outbound_blocked")
         if hits:
@@ -928,13 +1131,11 @@ class Agent:
                 (self.clock.now() - datetime.fromisoformat(start)).total_seconds(),
                 scene=conversation.scene,
             )
-            card_hits = self.outbound.check(card, conversation.scene)
+            card_hits = await self.outbound.check(card, conversation.scene)
             if "privacy" in card_hits:
                 self.log.warning("task_card.private_name", trace_id=trace)
                 self.warnings.append("task_card.private_name: configure external name")
-                if "task_card_private_name" not in self.boundary.warnings:
-                    self.boundary.warnings.append("task_card_private_name")
-                    self.boundary.save()
+                await self.boundary.add_warning("task_card_private_name")
             elif groups:
                 index = len(groups) - 1
                 intents[index] = intents[index].model_copy(
@@ -946,17 +1147,52 @@ class Agent:
 
     async def finish(self, trace, status, intents, error=None):
         await self.kernel.seal(trace, status, intents, error)
-        await self.kernel.delivery.deliver(trace)
+        await self.kernel.delivery.deliver(trace, finalization=self.kernel.finalizations.get(trace))
 
     async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+        finalization = OwnedFinalization(self.kernel.delivery)
+        state = {"handed": False}
+
+        async def submit_owned():
+            try:
+                return await self._submit(
+                    conversation_id,
+                    finalization,
+                    state,
+                    topic=topic,
+                    material=material,
+                    parts=parts,
+                    reason=reason,
+                )
+            except BaseException as exc:
+                if state.get("trace") and not state["handed"]:
+                    await self.kernel.seal(
+                        state["trace"],
+                        "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                        error={"code": getattr(exc, "code", "agent_error"), "message": ""},
+                    )
+                raise
+            finally:
+                if not state["handed"]:
+                    finalization.release()
+
+        return await self._intake(submit_owned(), finalization)
+
+    async def _submit(
+        self, conversation_id, finalization, state, *, topic=None, material=None, parts=None, reason
+    ):
         if (
             self.shutting_down
             or self.kernel.delivery.silenced
             or self.model_health == "auth_invalid"
         ):
             trace = uuid4().hex
-            with self.ledger.transaction():
-                self.ledger.audit("proactive.dropped", trace_id=trace)
+
+            def audit_proactive_drop():
+                with self.ledger.transaction():
+                    self.ledger.audit("proactive.dropped", trace_id=trace)
+
+            await run_sync(self.ledger, audit_proactive_drop)
             return trace
         validate_proactive(topic=topic, material=material, parts=parts)
         target = self.instance.get("conversations", {}).get(conversation_id)
@@ -974,23 +1210,33 @@ class Agent:
             kind=target["kind"],
             scene=target["scene"],
         )
-        record = self.kernel.open_record(conversation=conversation)
+        record = await self.kernel.open_record(conversation=conversation)
         trace = record["trace_id"]
-        with self.ledger.transaction():
-            self.ledger.audit("proactive.submitted", trace_id=trace, reason=reason)
+        state["trace"] = trace
+        self._bind_finalization(trace, finalization)
+
+        def audit_proactive_submission():
+            with self.ledger.transaction():
+                self.ledger.audit("proactive.submitted", trace_id=trace, reason=reason)
+
+        await finalization.persist(audit_proactive_submission)
         self.log.info("proactive.submitted", trace_id=trace, reason=reason)
         extra = "这是你主动开口，不是在回复谁。话题和材料仅为内部说明：" + json.dumps(
             {"topic": topic, "material": material}, ensure_ascii=False
         )
-        self.kernel.submit(
+        future = await self.kernel.submit(
             trace,
             None,
             lambda: self.run(
                 trace, conversation, None, [], extra=extra, proactive=True, direct=parts
             ),
         )
+        state["handed"] = True
+        self.track(self._settle_record(trace, finalization, future))
         return trace
 
     async def drain(self):
+        while self.intake_tasks:
+            await asyncio.gather(*tuple(self.intake_tasks), return_exceptions=True)
         await self.kernel.queue.drain()
         await self.kernel.reactions.drain()

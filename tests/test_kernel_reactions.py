@@ -95,7 +95,7 @@ def fixture(tmp_path, *, role="owner", sourced=True, config=None, **channel_kwar
 async def test_four_states_replace_last_confirmed_marker(tmp_path):
     ledger, reactions, channel, clock, trace = fixture(tmp_path, config={"min_interval_seconds": 0})
     for state in ("accepted", "running", "done", "failed"):
-        reactions.request(trace, state)
+        await reactions.request(trace, state)
         await reactions.drain()
     assert [i.emoji for i in channel.calls] == ["👌", "⏳", "✅", "❌"]
     assert [i.replaces_emoji for i in channel.calls] == [None, "👌", "⏳", "✅"]
@@ -107,15 +107,15 @@ async def test_four_states_replace_last_confirmed_marker(tmp_path):
 
 async def test_merge_within_two_seconds_and_terminal_not_delayed(tmp_path):
     ledger, reactions, channel, clock, trace = fixture(tmp_path)
-    reactions.request(trace, "accepted")
+    await reactions.request(trace, "accepted")
     await clock.drain()
     clock.advance(1)
-    reactions.request(trace, "running")
+    await reactions.request(trace, "running")
     await clock.drain()
     assert not channel.calls
     await clock.advance_and_drain(2)
     assert [i.emoji for i in channel.calls] == ["⏳"]
-    reactions.request(trace, "done")
+    await reactions.request(trace, "done")
     await reactions.drain()
     assert [i.emoji for i in channel.calls] == ["⏳", "✅"]
     ledger.close()
@@ -124,7 +124,7 @@ async def test_merge_within_two_seconds_and_terminal_not_delayed(tmp_path):
 @pytest.mark.parametrize("status", ["failed", "unknown"])
 async def test_failed_or_unknown_reaction_never_retries_or_sends_text(tmp_path, status):
     ledger, reactions, channel, clock, trace = fixture(tmp_path, status=status)
-    reactions.request(trace, "failed")
+    await reactions.request(trace, "failed")
     await reactions.drain()
     await clock.advance_and_drain(100)
     assert len(channel.calls) == 1 and not channel.text
@@ -136,9 +136,9 @@ async def test_platform_without_remove_only_adds(tmp_path):
     ledger, reactions, channel, clock, trace = fixture(
         tmp_path, remove=False, config={"min_interval_seconds": 0}
     )
-    reactions.request(trace, "running")
+    await reactions.request(trace, "running")
     await reactions.drain()
-    reactions.request(trace, "done")
+    await reactions.request(trace, "done")
     await reactions.drain()
     assert channel.markers == ["⏳", "✅"]
     ledger.close()
@@ -155,8 +155,8 @@ async def test_platform_without_remove_only_adds(tmp_path):
 )
 async def test_ineligible_tasks_have_no_reactions(tmp_path, kwargs):
     ledger, reactions, channel, clock, trace = fixture(tmp_path, **kwargs)
-    reactions.request(trace, "accepted")
-    reactions.request(trace, "done")
+    await reactions.request(trace, "accepted")
+    await reactions.request(trace, "done")
     await clock.advance_and_drain(5)
     assert channel.calls == [] and channel.text == []
     ledger.close()
@@ -169,7 +169,7 @@ async def test_cancelled_task_can_register_failed_after_seal(tmp_path):
         r = ledger.get("record", trace)
         r["cancelled"] = True
         ledger.put("record", trace, r)
-    reactions.request(trace, "failed")
+    await reactions.request(trace, "failed")
     await reactions.drain()
     assert [i.emoji for i in channel.calls] == ["❌"]
     assert ledger.get("record", trace)["exec_status"] == "cancelled"
@@ -178,7 +178,7 @@ async def test_cancelled_task_can_register_failed_after_seal(tmp_path):
 
 async def test_restart_marks_interrupted_and_updates_reaction_once(tmp_path):
     ledger, reactions, channel, clock, trace = fixture(tmp_path, config={"min_interval_seconds": 0})
-    reactions.request(trace, "running")
+    await reactions.request(trace, "running")
     await reactions.drain()
     await reactions.restart(ledger.restart())
     await reactions.restart(ledger.restart())

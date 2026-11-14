@@ -195,28 +195,34 @@ class ProcessLauncher:
         self.children = []
 
     async def launch(self, cid):
+        from clytie.clock import SystemClock
+        from clytie.storage.startup_recovery import recovery_operations
+
+        recovery = await asyncio.to_thread(recovery_operations, self.home, cid, SystemClock())
         directory = self.home / "companions" / cid / "logs"
         directory.mkdir(parents=True, exist_ok=True)
-        log = (directory / "process.log").open("ab")
+        log = None
         executable, env = python_process()
         process = subprocess.Popen(
             [executable, "-m", "clytie", "companion", "run", cid, "--home", str(self.home)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=log,
+            stderr=None,
             env=env,
             **creation(),
         )
         try:
             self.job.assign(process)
             child = Child(process, log)
+            child.recovery_operations = recovery
             self.children.append(child)
             await child.send({"type": "boot", "seq": 0})
             return child
         except BaseException:
             process.kill()
             process.wait()
-            log.close()
+            if log:
+                log.close()
             raise
 
     def close(self):

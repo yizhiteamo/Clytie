@@ -5,13 +5,15 @@ import json
 import re
 import sqlite3
 import unicodedata
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from uuid import uuid4
 
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.memory import current_conversation, current_scene
 from clytie.sdk.context import RevisionConflict
 from clytie.sdk.types import MemoryRecord
+from clytie.storage.owner import before_storage_commit, storage_transaction_rolled_back
 
 from . import origins
 from .errors import MemoryStartupError
@@ -55,11 +57,15 @@ def content_hash(record):
 
 
 class MemoryStore:
-    def __init__(self, path, *, clock, config, instance, readonly=False, transient=False):
+    def __init__(
+        self, path, *, clock, config, instance, readonly=False, transient=False, coordination=None
+    ):
         self.path, self.clock = Path(path), clock
         self.config, self.instance = config, instance
         self.changed = None
+        self._pending_changed = False
         self.transient = transient
+        self.coordination = coordination
         if readonly and not transient:
             self.db = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True)
         else:
@@ -162,20 +168,34 @@ class MemoryStore:
     def set_meta(self, key, value):
         self.db.execute("INSERT OR REPLACE INTO metadata VALUES(?,?)", (key, canonical(value)))
 
+    def mark_backup_dirty(self):
+        """重要修改与业务事务一起提交；回滚不留下虚假的待备份版本。"""
+        if not self.db.in_transaction:
+            raise RuntimeError("backup_revision_requires_transaction")
+        self.set_meta("backup_revision", self.meta("backup_revision", 0) + 1)
+
     @property
     def uid(self):
         return self.meta("companion_uid")
 
     @contextmanager
     def transaction(self):
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-            self.set_meta("generation", self.meta("generation", 0) + 1)
-            self.db.commit()
-        except BaseException:
-            self.db.rollback()
-            raise
+        with self.coordination.commit() if self.coordination else nullcontext():
+            self.db.execute("BEGIN IMMEDIATE")
+            self._pending_changed = False
+            try:
+                yield
+                self.set_meta("generation", self.meta("generation", 0) + 1)
+                before_storage_commit()
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                storage_transaction_rolled_back()
+                self._pending_changed = False
+                raise
+            changed, self._pending_changed = self._pending_changed, False
+        if changed and self.changed:
+            self.changed()
 
     def audit(self, kind, **fields):
         self.db.execute(
@@ -280,8 +300,8 @@ class MemoryStore:
             operator=operator,
             import_id=import_id,
         )
-        if self.changed:
-            self.changed()
+        self.mark_backup_dirty()
+        self._pending_changed = True
         return record
 
     def write(
@@ -406,25 +426,44 @@ class PluginMemory:
             permissions=self.permissions,
         )
 
+    async def _run(self, function, *args):
+        from clytie.storage.handle import StoreHandle
+
+        if isinstance(self.store, StoreHandle):
+            return await self.store.invoke(function, *args, _permissions=self.permissions)
+        return await run_sync(self.store, function, *args)
+
     async def search(self, text, *, limit=10):
         words = tokens(text)
-        records = self.store.project(**self.scope())
+        records = await self._run(lambda: self.store.project(**self.scope()))
         return sorted(
             (r for r in records if not r.decay.frozen and (not words or words & tokens(r.content))),
             key=lambda r: (-len(words & tokens(r.content)), r.record_id),
         )[:limit]
 
     async def get(self, record_id):
-        record = self.store.get_raw(record_id)
-        return record if record and self.store.visible(record, **self.scope()) else None
+        def read():
+            record = self.store.get_raw(record_id)
+            return record if record and self.store.visible(record, **self.scope()) else None
+
+        return await self._run(read)
 
     async def write(self, draft):
-        return self.store.write(draft, **self.scope())
+        def write(fixed):
+            return self.store.write(fixed, **self.scope())
+
+        return await self._run(write, draft)
 
     async def revise(self, record_id, expected_revision, changes):
-        return self.store.revise(record_id, expected_revision, changes, **self.scope())
+        def revise(key, revision, fixed):
+            return self.store.revise(key, revision, fixed, **self.scope())
+
+        return await self._run(revise, record_id, expected_revision, changes)
 
     async def retract(self, record_id, expected_revision, reason):
-        return self.store.revise(
-            record_id, expected_revision, {"retracted": True}, reason=reason, **self.scope()
-        )
+        def retract():
+            return self.store.revise(
+                record_id, expected_revision, {"retracted": True}, reason=reason, **self.scope()
+            )
+
+        return await self._run(retract)

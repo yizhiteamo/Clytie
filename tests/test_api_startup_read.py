@@ -23,6 +23,26 @@ from clytie.supervisor.common import read, write
 from clytie.supervisor.entry import status
 
 
+async def test_real_client_health_read_denial_is_not_confirmation_failure(tmp_path, monkeypatch):
+    from clytie.supervisor import entry
+
+    process = SimpleNamespace(pid=42, poll=lambda: None, stdin=Pipe())
+    write(tmp_path / "run/api.json", {"pid": 42, "port": 8765})
+    calls = []
+
+    def denied(path, default=None):
+        calls.append(path)
+        raise PermissionError(errno.EACCES, "fictional health denial")
+
+    monkeypatch.setattr(entry, "read", denied)
+    clock = MockClock()
+    result = await module._await_start(process, module.Client(tmp_path), clock)
+    assert result["error"]["message"] == "后台启动状态检查失败"
+    assert calls == [tmp_path / "run/health.json"]
+    assert not process.stdin.getvalue() and clock.monotonic() == 0
+    process.stdin.close()
+
+
 class Pipe(io.BytesIO):
     def close(self):
         if not self.closed:
@@ -218,9 +238,11 @@ async def test_real_windows_read_denial_then_release_without_permission_changes(
         pipe.close()
 
 
-@pytest.mark.parametrize("failure", ["denied", "io_error", "cancel"])
+@pytest.mark.parametrize(
+    "failure", ["denied", "io_error", "cancel", "confirm_write", "health_denied"]
+)
 async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypatch, failure):
-    """Inject only the parent's read; run the real daemon and fake plugins unchanged."""
+    """Fail the parent's read or confirmation; keep the real daemon and fake plugins."""
     home = tmp_path / "fictional-home"
     shutil.copytree(Path(__file__).resolve().parents[1] / "examples/home", home)
     config_path = home / "clytie.local.yaml"
@@ -236,7 +258,7 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
     injected = []
 
     def failed_read(path, default=None):
-        if path == target and target.exists():
+        if failure not in {"confirm_write", "health_denied"} and path == target and target.exists():
             injected.append(path)
             if failure == "io_error":
                 raise OSError(errno.EIO, "fictional read failure")
@@ -248,9 +270,37 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
 
     def launch(*args, **kwargs):
         process = popen(*args, **kwargs)
+        if failure == "confirm_write":
+            stream = process.stdin
+
+            class FailedConfirmation:
+                @property
+                def closed(self):
+                    return stream.closed
+
+                def write(self, data):
+                    injected.append("confirmation_write")
+                    raise BrokenPipeError(errno.EPIPE, "fictional confirmation failure")
+
+                def flush(self):
+                    stream.flush()
+
+                def close(self):
+                    stream.close()
+
+            process.stdin = FailedConfirmation()
         processes.append(process)
         return process
 
+    from clytie.supervisor import entry
+
+    def health_read(path, default=None):
+        if failure == "health_denied" and path == home / "run/health.json" and target.exists():
+            injected.append("health_read")
+            raise PermissionError(errno.EACCES, "fictional health denial")
+        return read(path, default)
+
+    monkeypatch.setattr(entry, "read", health_read)
     monkeypatch.setattr(module, "read", failed_read)
     monkeypatch.setattr(subprocess, "Popen", launch)
     clock, os_clock = MockClock(), SystemClock()
@@ -263,7 +313,8 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
         assert target.exists(), "real daemon did not publish readiness"
         clock.advance(0.1)
         await clock.drain()
-        assert injected
+        if failure not in {"confirm_write", "health_denied"}:
+            assert injected
         if failure == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -276,6 +327,13 @@ async def test_real_read_failure_closes_pipe_and_safely_exits(tmp_path, monkeypa
             result = await task
             expected = "startup_timeout" if failure == "denied" else "startup_failed"
             assert not result["ok"] and result["error"]["code"] == expected
+            if failure == "confirm_write":
+                assert injected == ["confirmation_write"]
+                assert result["error"]["message"] == "后台启动握手失败"
+            if failure == "health_denied":
+                assert injected == ["health_read"]
+                assert result["error"]["message"] == "后台启动状态检查失败"
+        monkeypatch.setattr(entry, "read", read)
         assert len(processes) == 1 and processes[0].stdin.closed
         # Closing the unconfirmed launch pipe must drive the real safe-stop path.
         try:

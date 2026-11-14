@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from pathlib import Path
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -95,3 +96,80 @@ def _migrate(store, home, companion_id, log):
     except BaseException:
         store.db.rollback()
         raise
+    _record_success(home, companion_id, target, store.clock, log or HostLog())
+
+
+def _record_success(home, companion_id, target, clock, log):
+    """Only a durable successful migration receipt authorizes retention."""
+    directory = contained(home, Path(home) / "backups/memory" / companion_id)
+    index_path = contained(home, directory / "migration-receipts.json")
+    try:
+        index = (
+            json.loads(index_path.read_bytes())
+            if index_path.exists()
+            else {"schema_version": 1, "snapshots": []}
+        )
+        if index.get("schema_version") != 1 or not isinstance(index.get("snapshots"), list):
+            raise ValueError("migration_receipts_invalid")
+        info = target.stat()
+        index["snapshots"].append(
+            dict(
+                path=target.name,
+                sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+                device=info.st_dev,
+                inode=info.st_ino,
+                size=info.st_size,
+                verified_success_at=clock.now().isoformat(),
+            )
+        )
+        atomic_write(index_path, canonical(index).encode())
+        management = contained(home, Path(home) / "companions" / companion_id / "management")
+        if (management / "blocked.json").exists():
+            log.warning("memory.migration_retention_protected")
+            return
+        from clytie.api.management_journal import Journal
+
+        operations = management / "operations"
+        if operations.exists():
+            for path in operations.glob("*.json"):
+                journal = Journal.load(contained(home, path), clock)
+                if journal.value["state"] not in {
+                    "committed",
+                    "cancelled",
+                    "interrupted",
+                    "failed",
+                }:
+                    log.warning("memory.migration_retention_protected")
+                    return
+        from clytie.backup.restore import read_state
+
+        restore = read_state(home)
+        if restore and not restore.get("switched"):
+            log.warning("memory.migration_retention_protected")
+            return
+        for row in list(index["snapshots"][:-3]):
+            name = row["path"]
+            if (
+                Path(name).name != name
+                or not name.startswith("pre-migrate-")
+                or not name.endswith(".enc")
+            ):
+                raise ValueError("migration_receipt_path_invalid")
+            path = contained(home, directory / name)
+            info = path.stat()
+            if (info.st_dev, info.st_ino, info.st_size) != (
+                row["device"],
+                row["inode"],
+                row["size"],
+            ) or hashlib.sha256(path.read_bytes()).hexdigest() != row["sha256"]:
+                raise ValueError("migration_snapshot_changed")
+            path.unlink()
+            index["snapshots"].remove(row)
+            atomic_write(index_path, canonical(index).encode())
+        known = {row["path"] for row in index["snapshots"]}
+        if any(p.name not in known for p in directory.glob("pre-migrate-*.enc")):
+            log.warning("memory.migration_unregistered_snapshots")
+    except (OSError, ValueError, KeyError, TypeError):
+        # Migration has already committed. Preserve all uncertain files and surface
+        # maintenance failure without falsely reporting a rolled-back schema.
+        log.warning("memory.migration_retention_incomplete")

@@ -53,8 +53,8 @@ def local_supervisor_status(home=None):
     return status(resolve_home(home))
 
 
-def local_supervisor_start(home=None):
+def local_supervisor_start(home=None, *, maintenance=False):
     from clytie.config import resolve_home
     from clytie.supervisor.entry import frontend
 
-    return frontend(resolve_home(home))
+    return frontend(resolve_home(home), maintenance=maintenance)

@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import deque
 from pathlib import Path
 
 from clytie.clock import SystemClock
@@ -55,7 +56,52 @@ async def orphan_exit(runtime, clock, protocol):
     os._exit(0)
 
 
+class _SilenceApplications:
+    """静默按收到顺序应用；控制元数据有界，确认只在真实应用之后发送。"""
+
+    def __init__(self, runtime, acknowledge, stopping):
+        self.runtime, self.acknowledge, self.stopping = runtime, acknowledge, stopping
+        self.pending = deque()
+        self.task = None
+        self.applying = self.closed = False
+
+    def submit(self, message):
+        if self.closed or self.stopping() or len(self.pending) + int(self.applying) >= 64:
+            self.runtime.log.warning("companion.silence_busy")
+            return
+        self.pending.append((message["seq"], message["on"]))
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._apply())
+            self.runtime.management_tasks.add(self.task)
+            self.task.add_done_callback(self.runtime.management_tasks.discard)
+
+    def close(self):
+        self.closed = True
+        self.pending.clear()
+
+    async def _apply(self):
+        while self.pending and not self.closed and not self.stopping():
+            seq, on = self.pending.popleft()
+            self.applying = True
+            try:
+                await self.runtime.silence(on)
+            except Exception as exc:
+                self.runtime.log.warning("companion.silence_failed", exc_type=type(exc).__name__)
+            else:
+                self.acknowledge(seq)
+            finally:
+                self.applying = False
+        self.pending.clear()
+
+    async def finish(self):
+        self.close()
+        if self.task is not None:
+            await asyncio.shield(self.task)
+
+
 async def companion_main(home, cid):
+    from clytie.backup.io_channel import IoChannel, pressure_updates
+
     from .heartbeat import Heartbeat
 
     clock = SystemClock()
@@ -74,8 +120,13 @@ async def companion_main(home, cid):
     stop_requested, orphan = threading.Event(), threading.Event()
     loop = asyncio.get_running_loop()
     startup = None
+    io_channel = IoChannel(lambda value: emit(value.pop("type"), **value))
 
     def observed(message):
+        if message is None:
+            io_channel.disconnect()
+        elif io_channel.receive(message):
+            return
         if message is None or message.get("type") in {"stop", "session_ending"}:
             stop_requested.set()
             if message is None:
@@ -88,12 +139,14 @@ async def companion_main(home, cid):
     if first is None:
         return 0
     runtime = Companion(home, cid, clock)
+    runtime.backup_io_client = io_channel.client
     runtime.on_phase = lambda phase: heartbeat.update(phase=phase)
     runtime.stop_requested = stop_requested.is_set
     heartbeat.start()
 
     async def refresh():
         while True:
+            await runtime.refresh_health()
             heartbeat.update(
                 runtime.health(),
                 interval=runtime.config.get("heartbeat_seconds", 5),
@@ -102,6 +155,16 @@ async def companion_main(home, cid):
             await clock.sleep(runtime.config.get("heartbeat_seconds", 5))
 
     heartbeat_task = asyncio.create_task(refresh())
+    pressure_task = asyncio.create_task(
+        pressure_updates(runtime, clock, lambda value: emit(value.pop("type"), **value))
+    )
+
+    async def close_telemetry():
+        heartbeat.close()
+        heartbeat_task.cancel()
+        pressure_task.cancel()
+        await asyncio.gather(heartbeat_task, pressure_task, return_exceptions=True)
+
     startup = asyncio.create_task(runtime.start())
     try:
         started = await startup
@@ -109,16 +172,12 @@ async def companion_main(home, cid):
         started = False
     except StartupBlocked as exc:
         emit("fatal", reason=exc.reason)
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
         await runtime.stop()
         return 1
     except Exception:
         logging.exception("companion.start_failed")
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
         await runtime.stop()
         return 1
     if not started or stop_requested.is_set():
@@ -130,14 +189,20 @@ async def companion_main(home, cid):
             if not orphan.is_set():
                 emit("stop_result", result=result)
         finally:
-            heartbeat.close()
-            heartbeat_task.cancel()
-            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            await close_telemetry()
         return 0
     emit("ready")
     heartbeat.update(runtime.health(), phase="running")
     stopping = None
     requests = runtime.management_requests
+
+    def silence_ack(seq):
+        with output_lock:
+            frame(protocol, dict(type="silence_ack", seq=seq))
+
+    silence = _SilenceApplications(
+        runtime, silence_ack, lambda: stopping is not None or stop_requested.is_set()
+    )
 
     async def handle_request(msg):
         from clytie.api.auth import APIError
@@ -174,11 +239,14 @@ async def companion_main(home, cid):
             if msg is None:
                 await orphan_exit(runtime, clock, protocol)
             kind = msg["type"]
+            if kind == "backup_io_reply":
+                continue  # The pipe reader already delivered this to the I/O thread.
             if kind == "request":
                 task = asyncio.create_task(handle_request(msg))
                 requests.add(task)
                 task.add_done_callback(requests.discard)
             elif kind == "stop" and stopping is None:
+                silence.close()
                 heartbeat.update(phase="stopping")
                 stopping = asyncio.create_task(runtime.stop(msg.get("task_mode", "cancel")))
             elif kind == "management_cancel":
@@ -189,21 +257,19 @@ async def companion_main(home, cid):
                 runtime.escalated.set()
                 runtime.cancel_management()
             elif kind == "session_ending":
+                silence.close()
                 runtime.session_ending()
                 runtime.escalated.set()
             elif kind == "silence":
-                runtime.silence(msg["on"])
-                with output_lock:
-                    frame(protocol, dict(type="silence_ack", seq=msg["seq"]))
+                silence.submit(msg)
             else:
                 runtime.log.warning("companion.unknown_type")
     finally:
+        await silence.finish()
         for task in requests:
             task.cancel()
         await asyncio.gather(*requests, return_exceptions=True)
-        heartbeat.close()
-        heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        await close_telemetry()
 
 
 class FrontendSignals:
@@ -289,10 +355,24 @@ class StartupHandshake:
             self.confirmed = True
 
 
-async def daemon_main(home, detached=False):
+async def daemon_main(home, detached=False, maintenance=False):
     clock = SystemClock()
+    from clytie.backup.restore import RestoreError, assert_start_allowed
+
+    try:
+        assert_start_allowed(home, maintenance=maintenance)
+    except (RestoreError, OSError) as exc:
+        frame(
+            sys.stdout.buffer,
+            dict(
+                type="error",
+                seq=0,
+                code=exc.code if isinstance(exc, RestoreError) else "restore_recovery_blocked",
+            ),
+        )
+        return 1
     report = load_home(home)
-    if report.global_errors or not report.instance:
+    if not maintenance and (report.global_errors or not report.instance):
         frame(
             sys.stdout.buffer,
             dict(
@@ -304,10 +384,16 @@ async def daemon_main(home, detached=False):
         )
         return 1
     launcher = ProcessLauncher(home)
-    instance = thaw(report.instance)
+    instance = thaw(report.instance) if report.instance else {}
     supervisor = Supervisor(
-        home, instance["companions"], launcher, clock, config=instance.get("supervisor", {})
+        home,
+        [] if maintenance else instance["companions"],
+        launcher,
+        clock,
+        config={} if maintenance else instance.get("supervisor", {}),
     )
+    supervisor.maintenance = maintenance
+    supervisor.old_instance_options = instance.get("backup", {}).get("old_instances", {})
     log_seq = 0
 
     def display(entry):
@@ -323,8 +409,13 @@ async def daemon_main(home, detached=False):
     from clytie.plugin_host import PluginHost
     from clytie.plugin_host.instance import InstanceNotifiers
 
-    notifiers = InstanceNotifiers(
-        PluginHost(repository_root(), home, clock=clock), subprocess_backend=ProcessBackend(clock)
+    notifiers = (
+        None
+        if maintenance
+        else InstanceNotifiers(
+            PluginHost(repository_root(), home, clock=clock),
+            subprocess_backend=ProcessBackend(clock),
+        )
     )
     supervisor.notifications.cooldown = instance.get("notify", {}).get("cooldown_hours", 6) * 3600
     detached_events = asyncio.Queue()
@@ -389,11 +480,12 @@ async def daemon_main(home, detached=False):
                     message="还没有设置管理口令：网页登录不可用，危险操作没有口令保护。运行 clytie admin set-password 设置",
                 ),
             )
-        await notifiers.start(
-            instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
-        )
-        supervisor.notifications.plugins = notifiers.notifiers
-        supervisor.finalize = notifiers.close
+        if notifiers is not None:
+            await notifiers.start(
+                instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
+            )
+            supervisor.notifications.plugins = notifiers.notifiers
+            supervisor.finalize = notifiers.close
 
     try:
         await supervisor.start(prepare)
@@ -415,6 +507,11 @@ async def daemon_main(home, detached=False):
         launcher.close()
         return 1
     startup_complete.set()
+    from clytie.backup.controller import BackupController
+
+    supervisor.backup_controller = BackupController(supervisor, management.backup_workers, instance)
+    if not supervisor.stopping:
+        await supervisor.backup_controller.start()
     frame(sys.stdout.buffer, dict(type="ready", seq=0))
 
     async def reminders():
@@ -461,11 +558,12 @@ async def daemon_main(home, detached=False):
         if server:
             await server.close()
         session_events.close()
-        await notifiers.close()
+        if notifiers is not None:
+            await notifiers.close()
         launcher.close()
 
 
-def frontend(home):
+def frontend(home, *, maintenance=False):
     # Redirected Windows stdout may use an ANSI codepage unable to encode this notice.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -482,64 +580,80 @@ def frontend(home):
         asyncio.run(clock.sleep(1))
     directory = home / "logs/supervisor"
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "process.log").open("ab") as log:
-        executable, env = python_process()
-        process = subprocess.Popen(
-            [executable, "-m", "clytie", "_supervisor", "--home", str(home)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=log,
-            env=env,
-            **creation(detached=True),
-        )
-        controls = FrontendSignals(process.stdin)
-        signal.signal(signal.SIGINT, controls.interrupt)
-        if hasattr(signal, "SIGBREAK"):
-            signal.signal(signal.SIGBREAK, controls.interrupt)
-        signal.signal(signal.SIGTERM, lambda *_: controls.send("session_ending"))
-        handler = None
-        if sys.platform == "win32":
-            import ctypes
+    executable, env = python_process()
+    process = subprocess.Popen(
+        [executable, "-m", "clytie", "_supervisor", "--home", str(home)]
+        + (["--maintenance"] if maintenance else []),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env=env,
+        **creation(detached=True),
+    )
+    controls = FrontendSignals(process.stdin)
+    signal.signal(signal.SIGINT, controls.interrupt)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, controls.interrupt)
+    signal.signal(signal.SIGTERM, lambda *_: controls.send("session_ending"))
+    handler = None
+    if sys.platform == "win32":
+        import ctypes
 
-            callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
 
-            @callback
-            def handler(event):
-                return controls.windows(event)
+        @callback
+        def handler(event):
+            return controls.windows(event)
 
-            ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
-        try:
-            for line in process.stdout:
-                # Only protocol status, never child plugin stdout or content.
-                print(line.decode("utf-8").rstrip(), flush=True)
-            return process.wait()
-        finally:
-            process.stdin.close()
-            process.stdout.close()
-            if handler:
-                ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, False)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, True)
+    try:
+        for line in process.stdout:
+            # Only protocol status, never child plugin stdout or content.
+            print(line.decode("utf-8").rstrip(), flush=True)
+        return process.wait()
+    finally:
+        process.stdin.close()
+        process.stdout.close()
+        if handler:
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(handler, False)
 
 
 def internal(argv):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--home", required=True)
     parser.add_argument("--detach", action="store_true")
+    parser.add_argument("--maintenance", action="store_true")
     if argv[0] == "companion":
         parser.add_argument("verb", choices=["run"])
         parser.add_argument("cid")
     args = parser.parse_args(argv[1:])
     home = Path(args.home).resolve()
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO)
-    if argv[0] == "companion":
-        return asyncio.run(companion_main(home, args.cid))
-    return asyncio.run(daemon_main(home, detached=args.detach))
+    from clytie.backup.logs import RotatingLogWriter, process_logs
+    from clytie.plugin_host.snapshots import identifier
+
+    companion = argv[0] == "companion"
+    relative = (
+        f"companions/{identifier(args.cid)}/logs/process.log"
+        if companion
+        else "logs/supervisor/process.log"
+    )
+    writer = RotatingLogWriter(home, relative)
+    with process_logs(writer, stdout=not companion and args.detach):
+        report = load_home(home)
+        options = (report.instance or {}).get("backup", {}).get("logs", {})
+        writer.rotate_bytes = options.get("rotate_mib", 10) * 1024**2
+        writer.archives = options.get("archives", 10)
+        logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+        if companion:
+            return asyncio.run(companion_main(home, args.cid))
+        return asyncio.run(daemon_main(home, detached=args.detach, maintenance=args.maintenance))
 
 
 def run(args):
     from clytie.api import local_supervisor_start, local_supervisor_status
 
     if args.action == "start":
-        return local_supervisor_start(args.home)
+        return local_supervisor_start(args.home, maintenance=getattr(args, "maintenance", False))
     import json
 
     value = local_supervisor_status(args.home)

@@ -23,7 +23,18 @@ class Client:
         if not status(self.home)["running"]:
             raise NotRunning()
         operation_id = None
-        if method == "POST" and "/memory/" in path:
+        if method == "POST" and (
+            "/memory/" in path
+            or path
+            in {
+                "/api/v1/backup/create",
+                "/api/v1/backup/verify",
+                "/api/v1/backup/restore/plan",
+                "/api/v1/backup/restore/apply",
+                "/api/v1/backup/cleanup/plan",
+                "/api/v1/backup/cleanup/apply",
+            }
+        ):
             from uuid import uuid4
 
             json = dict(json or {})
@@ -62,7 +73,7 @@ class Client:
             raise NotRunning() from None
 
 
-async def detached_start(home, clock):
+async def detached_start(home, clock, *, maintenance=False):
     import subprocess
 
     from clytie.supervisor.processes import creation, python_process
@@ -72,15 +83,15 @@ async def detached_start(home, clock):
     directory = home / "logs/supervisor"
     directory.mkdir(parents=True, exist_ok=True)
     executable, env = python_process()
-    with (directory / "process.log").open("ab") as log:
-        process = subprocess.Popen(
-            [executable, "-m", "clytie", "_supervisor", "--home", str(home), "--detach"],
-            stdin=subprocess.PIPE,
-            stdout=log,
-            stderr=log,
-            env=env,
-            **creation(detached=True),
-        )
+    process = subprocess.Popen(
+        [executable, "-m", "clytie", "_supervisor", "--home", str(home), "--detach"]
+        + (["--maintenance"] if maintenance else []),
+        stdin=subprocess.PIPE,
+        stdout=None,
+        stderr=None,
+        env=env,
+        **creation(detached=True),
+    )
     try:
         return await _await_start(process, Client(home), clock)
     finally:
@@ -116,19 +127,26 @@ async def _await_start(process, client, clock):
                     clock,
                     max(0, deadline - clock.monotonic()),
                 )
-                if response.status == 200:
-                    frame(process.stdin, {"type": "startup_confirmed", "seq": 0})
-                    return {
-                        "ok": True,
-                        "result": {"message": "已在后台运行，用 clytie supervisor stop 停止"},
-                    }
             except (NotRunning, TimeoutError):
                 pass
             except OSError:
                 return {
                     "ok": False,
-                    "error": {"code": "startup_failed", "message": "后台启动握手失败"},
+                    "error": {"code": "startup_failed", "message": "后台启动状态检查失败"},
                 }
+            else:
+                if response.status == 200:
+                    try:
+                        frame(process.stdin, {"type": "startup_confirmed", "seq": 0})
+                    except OSError:
+                        return {
+                            "ok": False,
+                            "error": {"code": "startup_failed", "message": "后台启动握手失败"},
+                        }
+                    return {
+                        "ok": True,
+                        "result": {"message": "已在后台运行，用 clytie supervisor stop 停止"},
+                    }
         await clock.sleep(min(0.1, max(0, deadline - clock.monotonic())))
     # Closing the launch pipe requests safe cancellation even if HTTP never became ready.
     return {

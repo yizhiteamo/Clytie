@@ -188,6 +188,9 @@ async def test_worker_transport_loss_preserves_commit_or_clears_unstarted_operat
         async def drain(self):
             pass
 
+        async def wait_closed(self):
+            pass
+
         def close(self):
             pass
 
@@ -204,6 +207,9 @@ async def test_worker_transport_loss_preserves_commit_or_clears_unstarted_operat
             return b"fictional discarded response" if self.chunks == 1 else b""
 
     class Process:
+        from os import getpid
+
+        pid = getpid()
         stdin, stdout = Pipe(), Pipe()
         returncode = None
 

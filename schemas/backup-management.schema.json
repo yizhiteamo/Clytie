@@ -1,0 +1,1715 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Clytie backup management public contracts",
+  "$comment": "Select a $defs entry for its endpoint. Responses describe result inside the existing HTTP envelope. Requests include transport confirm/admin_password; these never enter worker arguments. This schema records existing contracts and is not a runtime validator.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$"
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "physical_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "inode"
+      ],
+      "properties": {
+        "device": {
+          "type": "integer"
+        },
+        "inode": {
+          "type": "integer"
+        }
+      }
+    },
+    "source_repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "backup_id"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/path"
+        },
+        "backup_id": {
+          "$ref": "#/$defs/id"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/operation_id"
+        }
+      },
+      "$comment": "repository_id may be absent for the initial confirmation challenge; confirmed admission requires the server-verified ID. No delete permission is granted."
+    },
+    "source_repository_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "repository_id",
+        "backup_id",
+        "root_identity",
+        "source",
+        "source_identity"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/path"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "backup_id": {
+          "$ref": "#/$defs/id"
+        },
+        "root_identity": {
+          "$ref": "#/$defs/physical_identity"
+        },
+        "source": {
+          "$ref": "#/$defs/path"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/physical_identity"
+        }
+      }
+    },
+    "create_request": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "enum": [
+            "memory",
+            "instance"
+          ],
+          "default": "instance"
+        },
+        "companion_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      },
+      "if": {
+        "required": [
+          "scope"
+        ],
+        "properties": {
+          "scope": {
+            "const": "memory"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "companion_id"
+        ],
+        "properties": {
+          "companion_id": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "companion_id": {
+            "type": "null"
+          }
+        }
+      },
+      "$comment": "Existing create/verify/restore handlers ignore extra body fields. This schema does not invent runtime rejection; companion existence is checked by Management.check_cid."
+    },
+    "verify_request": {
+      "type": "object",
+      "required": [
+        "backup_id"
+      ],
+      "properties": {
+        "backup_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      }
+    },
+    "restore_plan_request": {
+      "type": "object",
+      "required": [
+        "source",
+        "key_path",
+        "target"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/path"
+        },
+        "key_path": {
+          "$ref": "#/$defs/path"
+        },
+        "target": {
+          "$ref": "#/$defs/path"
+        },
+        "source_repository": {
+          "$ref": "#/$defs/source_repository"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      }
+    },
+    "restore_apply_request": {
+      "type": "object",
+      "required": [
+        "plan_id"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      },
+      "$comment": "The API checks a logical ID before worker admission; actual restore plans are UUID hex and must exist. Confirmation/password are enforced by Server.policy."
+    },
+    "restore_transition_request": {
+      "type": "object",
+      "required": [
+        "restore_id"
+      ],
+      "properties": {
+        "restore_id": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      }
+    },
+    "cancel_request": {
+      "type": "object",
+      "properties": {
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      }
+    },
+    "key_path_request": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "confirm": {
+          "type": "boolean"
+        },
+        "admin_password": {
+          "type": "string"
+        }
+      }
+    },
+    "operation_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "creation": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "retention": {
+          "enum": [
+            "pending",
+            "skipped",
+            "ok",
+            "retention_protected",
+            "failed",
+            "not_repeated"
+          ]
+        },
+        "mirror": {
+          "enum": [
+            "pending",
+            "disabled",
+            "ready",
+            "copy_required",
+            "failed",
+            "cancelled",
+            "not_repeated"
+          ]
+        },
+        "restore_readiness": {
+          "enum": [
+            "eligible",
+            "not_applicable",
+            "planned",
+            "ready_for_switch",
+            "incomplete",
+            "recovery_blocked"
+          ]
+        },
+        "backup_id": {
+          "$ref": "#/$defs/id"
+        },
+        "restore_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "reason": {
+          "$ref": "#/$defs/public_reason"
+        },
+        "retention_reason": {
+          "$ref": "#/$defs/public_reason"
+        },
+        "mirror_reason": {
+          "$ref": "#/$defs/public_reason"
+        },
+        "missing_count": {
+          "$ref": "#/$defs/count"
+        },
+        "bytes": {
+          "$ref": "#/$defs/count"
+        }
+      },
+      "$comment": "Only fields present in the committed operation are returned. Empty result while accepted or failed does not claim successful creation."
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "operation",
+        "phase",
+        "created_at",
+        "updated_at",
+        "cancel_requested",
+        "result"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "operation": {
+          "enum": [
+            "create",
+            "verify",
+            "restore_plan",
+            "restore_apply",
+            "recover",
+            "cleanup_plan",
+            "cleanup_apply"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "accepted",
+            "preparing",
+            "capturing",
+            "copying",
+            "verifying",
+            "publishing",
+            "committed",
+            "cancelled",
+            "failed",
+            "recovery_blocked"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "result": {
+          "$ref": "#/$defs/operation_result"
+        },
+        "reason": {
+          "$ref": "#/$defs/public_reason"
+        }
+      }
+    },
+    "unreadable_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "phase",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "phase": {
+          "const": "recovery_blocked"
+        },
+        "reason": {
+          "const": "journal_unreadable"
+        }
+      }
+    },
+    "preview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "plan_id",
+        "state",
+        "created_at",
+        "expires_at",
+        "operation_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "instance",
+            "memory"
+          ]
+        },
+        "plan_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "consumed",
+            "expired",
+            "cancelled",
+            "stale"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/operation_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bytes",
+        "files",
+        "unknown"
+      ],
+      "properties": {
+        "bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "files": {
+          "$ref": "#/$defs/count"
+        },
+        "unknown": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "const": "unavailable"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "primary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/unavailable"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "bytes",
+            "manual_bytes",
+            "partial_bytes",
+            "latest"
+          ],
+          "properties": {
+            "count": {
+              "$ref": "#/$defs/count"
+            },
+            "bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "manual_bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "partial_bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "latest": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/id"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "temporary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/unavailable"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "retained_operations",
+            "registered_bytes",
+            "unverified_operations"
+          ],
+          "properties": {
+            "retained_operations": {
+              "$ref": "#/$defs/count"
+            },
+            "registered_bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "unverified_operations": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        }
+      ]
+    },
+    "configuration_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "pointer",
+        "code"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "valid",
+        "global_errors",
+        "errors",
+        "companions"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "global_errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/configuration_error"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/configuration_error"
+          }
+        },
+        "companions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "valid"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/id"
+              },
+              "valid": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "holder_instance_id",
+        "holder_operation_id",
+        "backup_id",
+        "kind",
+        "created_at",
+        "recovery_required",
+        "executor_state",
+        "reason"
+      ],
+      "properties": {
+        "holder_instance_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "holder_operation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backup_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recovery_required": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "executor_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "protection": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/unavailable"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repositories",
+            "pending_release",
+            "legacy_references"
+          ],
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            },
+            "code": {
+              "$ref": "#/$defs/reason"
+            },
+            "repositories": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "repository_id",
+                  "state",
+                  "references"
+                ],
+                "properties": {
+                  "repository_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "state": {
+                    "enum": [
+                      "ready",
+                      "migration_blocked",
+                      "unavailable"
+                    ]
+                  },
+                  "code": {
+                    "$ref": "#/$defs/reason"
+                  },
+                  "references": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "$ref": "#/$defs/reference"
+                    }
+                  }
+                }
+              }
+            },
+            "pending_release": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation_id",
+                  "state",
+                  "repository_id"
+                ],
+                "properties": {
+                  "operation_id": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "const": "pending"
+                  },
+                  "repository_id": {
+                    "$ref": "#/$defs/operation_id"
+                  }
+                }
+              }
+            },
+            "legacy_references": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "owner_id",
+                  "kind",
+                  "created_at",
+                  "recovery_required"
+                ],
+                "properties": {
+                  "owner_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "created_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "recovery_required": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storage_categories",
+        "audit",
+        "mirror",
+        "old_instances",
+        "protection",
+        "primary",
+        "temporary",
+        "operations",
+        "still_finishing",
+        "mode",
+        "data_state",
+        "credential_exclusions",
+        "configuration",
+        "message",
+        "source_stopped",
+        "key",
+        "space_estimates",
+        "heavy_io"
+      ],
+      "properties": {
+        "storage_categories": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "temporary_backup_work",
+            "ordinary_logs",
+            "plugin_upgrade_failed_sites",
+            "plugin_upgrade_snapshots",
+            "ledger_failed_sites",
+            "ledger_snapshots",
+            "memory_migration_snapshots",
+            "memory_import_snapshots",
+            "memory_snapshot_metadata"
+          ],
+          "properties": {
+            "temporary_backup_work": {
+              "$ref": "#/$defs/usage"
+            },
+            "ordinary_logs": {
+              "$ref": "#/$defs/usage"
+            },
+            "plugin_upgrade_failed_sites": {
+              "$ref": "#/$defs/usage"
+            },
+            "plugin_upgrade_snapshots": {
+              "$ref": "#/$defs/usage"
+            },
+            "ledger_failed_sites": {
+              "$ref": "#/$defs/usage"
+            },
+            "ledger_snapshots": {
+              "$ref": "#/$defs/usage"
+            },
+            "memory_migration_snapshots": {
+              "$ref": "#/$defs/usage"
+            },
+            "memory_import_snapshots": {
+              "$ref": "#/$defs/usage"
+            },
+            "memory_snapshot_metadata": {
+              "$ref": "#/$defs/usage"
+            }
+          }
+        },
+        "audit": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            },
+            "current_bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "archive_bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "untracked_archives": {
+              "$ref": "#/$defs/count"
+            }
+          }
+        },
+        "mirror": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "unconfigured",
+                "switch_pending",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "bytes": {
+              "$ref": "#/$defs/count"
+            },
+            "history_count": {
+              "$ref": "#/$defs/count"
+            },
+            "reason": {
+              "$ref": "#/$defs/reason"
+            }
+          }
+        },
+        "old_instances": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "$comment": "Existing old-instance status retains its own registration records; this contract does not redefine those internal record fields."
+        },
+        "protection": {
+          "$ref": "#/$defs/protection"
+        },
+        "primary": {
+          "$ref": "#/$defs/primary"
+        },
+        "temporary": {
+          "$ref": "#/$defs/temporary"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/operation"
+              },
+              {
+                "$ref": "#/$defs/unreadable_operation"
+              }
+            ]
+          }
+        },
+        "still_finishing": {
+          "type": "boolean"
+        },
+        "mode": {
+          "enum": [
+            "normal",
+            "maintenance"
+          ]
+        },
+        "data_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credential_exclusions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/credential_exclusion"
+          }
+        },
+        "configuration": {
+          "$ref": "#/$defs/configuration"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_stopped": {
+          "type": "boolean"
+        },
+        "key": {
+          "$ref": "#/$defs/key_status"
+        },
+        "space_estimates": {
+          "$ref": "#/$defs/space_estimates"
+        },
+        "heavy_io": {
+          "$ref": "#/$defs/heavy_io"
+        }
+      }
+    },
+    "credential_exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "pointer",
+        "kind"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "inline",
+            "file_reference"
+          ]
+        }
+      }
+    },
+    "missing_component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "reason"
+      ],
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "count": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    },
+    "backup_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backup_id",
+        "path",
+        "scope",
+        "group",
+        "completed_at",
+        "size",
+        "sha256",
+        "identity",
+        "manual",
+        "completeness",
+        "missing_count"
+      ],
+      "properties": {
+        "backup_id": {
+          "$ref": "#/$defs/id"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "scope": {
+          "enum": [
+            "memory",
+            "instance"
+          ]
+        },
+        "group": {
+          "type": "string"
+        },
+        "source_instance_id": {
+          "type": "string"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "size": {
+          "$ref": "#/$defs/count"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "identity": {
+          "$ref": "#/$defs/physical_identity"
+        },
+        "manual": {
+          "type": "boolean"
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "missing_count": {
+          "$ref": "#/$defs/count"
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/missing_component"
+          }
+        },
+        "verified": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "Authenticated local list currently returns these stored records including local path and physical identity. Older records need not contain missing/source_instance_id."
+    },
+    "list_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backups"
+      ],
+      "properties": {
+        "backups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/backup_record"
+          }
+        }
+      }
+    },
+    "error_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ok",
+        "error"
+      ],
+      "properties": {
+        "ok": {
+          "const": false
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "$ref": "#/$defs/reason"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "result": {
+          "type": "object",
+          "$comment": "Existing error-specific challenge/details; source_repository uses source_repository_binding, consumed previews return operation_id, confirmation returns description."
+        }
+      }
+    },
+    "public_reason": {
+      "type": "string",
+      "enum": [
+        "backup_evidence_mismatch",
+        "backup_identity_conflict",
+        "backup_not_published",
+        "backup_referenced",
+        "baseline_absent",
+        "cancelled",
+        "capture_busy",
+        "capture_companion_unknown",
+        "capture_request_invalid",
+        "capture_target_not_empty",
+        "cleanup_not_started",
+        "cleanup_result_unknown",
+        "config_changed",
+        "configuration_runtime_unverified",
+        "container_invalid",
+        "container_limit",
+        "container_path",
+        "delivery_cancelled",
+        "holder_identity_mismatch",
+        "journal_unreadable",
+        "key_changed",
+        "key_export_exists",
+        "key_export_path_invalid",
+        "key_export_verification_failed",
+        "key_invalid",
+        "key_mismatch",
+        "key_missing",
+        "minimum_restore_points",
+        "mirror_device_unverified",
+        "mirror_failed",
+        "mirror_identity_mismatch",
+        "mirror_operation_conflict",
+        "mirror_operation_invalid",
+        "mirror_path_forbidden",
+        "mirror_publish_unsupported",
+        "mirror_repository_not_empty",
+        "mirror_same_device",
+        "mirror_source_invalid",
+        "mirror_switch_pending",
+        "mirror_target_exists",
+        "mirror_unavailable",
+        "mirror_unconfigured",
+        "mirror_verification_failed",
+        "operation_not_started",
+        "plan_changed",
+        "plan_evidence_mismatch",
+        "plan_in_use",
+        "plan_invalid",
+        "plan_not_executable",
+        "plan_not_found",
+        "plan_not_published",
+        "plan_stale",
+        "plugin_manifest_changed",
+        "preservation_changed",
+        "preservation_inside_old_instance",
+        "preservation_unverified",
+        "protection_changed",
+        "recovery_requires_new_plan",
+        "reference_busy",
+        "reference_mismatch",
+        "reference_missing",
+        "reference_recovery_blocked",
+        "registration_conflict",
+        "registration_invalid",
+        "registry_invalid",
+        "restore_asset_missing",
+        "restore_companion_mismatch",
+        "restore_configuration_invalid",
+        "restore_consistency_invalid",
+        "restore_database_invalid",
+        "restore_forbidden_member",
+        "restore_incompatible",
+        "restore_incomplete",
+        "restore_ledger_invalid",
+        "restore_ledger_reference_invalid",
+        "restore_management_incomplete",
+        "restore_member_changed",
+        "restore_member_missing",
+        "restore_memory_invalid",
+        "restore_not_running",
+        "restore_not_started",
+        "restore_origin_invalid",
+        "restore_plan_changed",
+        "restore_plan_invalid",
+        "restore_plugin_incompatible",
+        "restore_progress_invalid",
+        "restore_recovery_blocked",
+        "restore_source_changed",
+        "restore_source_unconfirmed",
+        "restore_target_changed",
+        "restore_target_invalid",
+        "restore_target_mismatch",
+        "restore_target_not_empty",
+        "restore_uid_mismatch",
+        "restore_unknown_member",
+        "retention_failed",
+        "snapshot_inconsistent",
+        "snapshot_metadata_too_large",
+        "snapshot_unavailable",
+        "snapshot_unsupported",
+        "source_changed",
+        "source_identity_mismatch",
+        "source_missing",
+        "source_repository_binding_required",
+        "source_repository_confirmation_required",
+        "source_repository_identity_mismatch",
+        "source_repository_index_invalid",
+        "source_repository_ownership_mismatch",
+        "source_repository_retiring",
+        "source_repository_unavailable",
+        "source_repository_unsupported",
+        "source_unavailable",
+        "source_unverified",
+        "space_insufficient",
+        "target_evidence_mismatch",
+        "unsafe_file",
+        "verification_failed",
+        "worker_failed",
+        "worker_not_created"
+      ]
+    },
+    "key_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "needs_safekeeping",
+        "acknowledged",
+        "copy_verified"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "needs_safekeeping": {
+          "type": "boolean"
+        },
+        "acknowledged": {
+          "type": "boolean"
+        },
+        "copy_verified": {
+          "type": "boolean"
+        },
+        "code": {
+          "enum": [
+            "key_missing",
+            "key_invalid"
+          ]
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "verified_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "available": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "fingerprint",
+          "verified_at"
+        ]
+      },
+      "else": {
+        "required": [
+          "code"
+        ]
+      }
+    },
+    "space_failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "dimension"
+      ],
+      "properties": {
+        "code": {
+          "const": "space_insufficient"
+        },
+        "dimension": {
+          "enum": [
+            "preflight_free",
+            "reserve_free",
+            "wal_growth",
+            "temporary_budget"
+          ]
+        }
+      }
+    },
+    "space_estimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "state",
+        "estimated",
+        "guaranteed",
+        "source_bytes",
+        "package_bytes",
+        "temporary_budget_bytes",
+        "wal_growth_budget_bytes",
+        "reserve_bytes",
+        "occupied",
+        "peak_temporary_bytes",
+        "peak_wal_growth_bytes",
+        "volumes",
+        "failure"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/operation_id"
+        },
+        "state": {
+          "enum": [
+            "estimated",
+            "monitoring",
+            "blocked"
+          ]
+        },
+        "estimated": {
+          "const": true
+        },
+        "guaranteed": {
+          "const": false
+        },
+        "source_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "package_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "temporary_budget_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "wal_growth_budget_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "reserve_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "peak_temporary_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "peak_wal_growth_bytes": {
+          "$ref": "#/$defs/count"
+        },
+        "occupied": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "regular_repository",
+            "categories",
+            "old_instances"
+          ],
+          "properties": {
+            "regular_repository": {
+              "$ref": "#/$defs/usage"
+            },
+            "categories": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "temporary_backup_work",
+                "ordinary_logs",
+                "plugin_upgrade_failed_sites",
+                "plugin_upgrade_snapshots",
+                "ledger_failed_sites",
+                "ledger_snapshots",
+                "memory_migration_snapshots",
+                "memory_import_snapshots",
+                "memory_snapshot_metadata"
+              ],
+              "properties": {
+                "temporary_backup_work": {
+                  "$ref": "#/$defs/usage"
+                },
+                "ordinary_logs": {
+                  "$ref": "#/$defs/usage"
+                },
+                "plugin_upgrade_failed_sites": {
+                  "$ref": "#/$defs/usage"
+                },
+                "plugin_upgrade_snapshots": {
+                  "$ref": "#/$defs/usage"
+                },
+                "ledger_failed_sites": {
+                  "$ref": "#/$defs/usage"
+                },
+                "ledger_snapshots": {
+                  "$ref": "#/$defs/usage"
+                },
+                "memory_migration_snapshots": {
+                  "$ref": "#/$defs/usage"
+                },
+                "memory_import_snapshots": {
+                  "$ref": "#/$defs/usage"
+                },
+                "memory_snapshot_metadata": {
+                  "$ref": "#/$defs/usage"
+                }
+              }
+            },
+            "old_instances": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "known_bytes",
+                "unknown"
+              ],
+              "properties": {
+                "known_bytes": {
+                  "$ref": "#/$defs/count"
+                },
+                "unknown": {
+                  "$ref": "#/$defs/count"
+                }
+              }
+            }
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "device",
+              "free_bytes"
+            ],
+            "properties": {
+              "device": {
+                "type": "string"
+              },
+              "free_bytes": {
+                "$ref": "#/$defs/count"
+              }
+            }
+          }
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/space_failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "state": {
+            "const": "blocked"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "failure": {
+            "$ref": "#/$defs/space_failure"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "failure": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "space_estimates": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/space_estimate"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reason"
+          ],
+          "properties": {
+            "state": {
+              "const": "unavailable"
+            },
+            "reason": {
+              "const": "space_evidence_unverified"
+            }
+          }
+        }
+      ]
+    },
+    "heavy_io": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "blockers",
+        "executions",
+        "observed_at"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "pending",
+            "ready",
+            "blocked"
+          ]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "role",
+              "reason",
+              "check"
+            ],
+            "properties": {
+              "operation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "operation",
+                      "recovery",
+                      "capture",
+                      "startup_recovery"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "executor_active",
+                  "executor_unverified",
+                  "journal_unverified",
+                  "journal_executor_changed",
+                  "coordination_busy",
+                  "responsibility_evidence_unverified"
+                ]
+              },
+              "check": {
+                "enum": [
+                  "verify_executor_identity",
+                  "inspect_responsibility_evidence"
+                ]
+              }
+            }
+          }
+        },
+        "executions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "role",
+              "state",
+              "data_recovery"
+            ],
+            "properties": {
+              "operation": {
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "operation",
+                  "recovery",
+                  "capture",
+                  "startup_recovery"
+                ]
+              },
+              "state": {
+                "enum": [
+                  "reserved",
+                  "active",
+                  "ended"
+                ]
+              },
+              "data_recovery": {
+                "const": "not_checked"
+              }
+            }
+          }
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    }
+  },
+  "$ref": "#/$defs/operation"
+}

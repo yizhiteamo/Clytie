@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
+from clytie.sdk.backup import BackupTicket, BackupView
 from clytie.sdk.behavior import AttentionDirective, BeforeAttentionDirective
 from clytie.sdk.types import (
     QUOTA_UNKNOWN,
@@ -38,6 +39,7 @@ class Registration:
 
 
 FACTORIES = {
+    "backup.snapshot": {"prepare": True, "capture": True, "materialize": True, "release": True},
     "channel": {
         "connect": True,
         "close": True,
@@ -78,6 +80,14 @@ def assemble(runtime, *, role=None, primary=True, scope="companion"):
                     asynchronous and not inspect.iscoroutinefunction(function)
                 ):
                     raise TypeError("factory object does not implement its SDK protocol")
+            if point == "backup.snapshot":
+                for name, count in (
+                    ("prepare", 2),
+                    ("capture", 3),
+                    ("materialize", 3),
+                    ("release", 1),
+                ):
+                    inspect.signature(getattr(implementation, name)).bind(*([None] * count))
             if point == "memory.importer" and inspect.iscoroutinefunction(implementation.detect):
                 raise TypeError("importer detect must be synchronous")
             if point in {"model", "channel"}:
@@ -114,6 +124,8 @@ def assemble(runtime, *, role=None, primary=True, scope="companion"):
     for name, declaration in contributions.get("memory", {}).items():
         if not name.startswith("x-"):
             add("memory." + name, name, declaration, True)
+    if "snapshot" in contributions.get("backup", {}):
+        add("backup.snapshot", "snapshot", contributions["backup"]["snapshot"], True)
     for phase, declaration in contributions.get("behavior", {}).items():
         if not phase.startswith("x-"):
             add("behavior." + phase, phase, declaration)
@@ -162,6 +174,8 @@ def assemble(runtime, *, role=None, primary=True, scope="companion"):
 
 def validate_result(point, method, result):
     models = {
+        ("backup.snapshot", "prepare"): BackupTicket,
+        ("backup.snapshot", "capture"): BackupView,
         ("model", "generate"): ModelTurn,
         ("channel", "send"): Receipt,
         ("channel", "react"): Receipt,
@@ -174,6 +188,8 @@ def validate_result(point, method, result):
         cls = models[point, method]
         if not isinstance(result, cls):
             raise TypeError("plugin returned an invalid SDK type")
+    if point == "backup.snapshot" and method in {"materialize", "release"} and result is not None:
+        raise TypeError("backup materialize and release must return None")
     if point == "tool" and method == "prepare" and not isinstance(result, (Plan, Denial)):
         raise TypeError("prepare must return Plan or Denial")
     if point == "tool" and method == "idempotency_key" and not isinstance(result, str):
