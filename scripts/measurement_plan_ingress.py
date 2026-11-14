@@ -19,7 +19,6 @@ if __package__:
     from . import measurement_mechanism_plan as mechanism
     from . import measurement_plan as plan
     from . import measurement_preparation_evidence as prep
-    from . import measurement_preparation_request as request_gate
     from . import measurement_preparation_transport as preparation
     from . import measurement_transport as base
     from . import measurement_version as versions
@@ -29,7 +28,6 @@ else:
     import measurement_mechanism_plan as mechanism
     import measurement_plan as plan
     import measurement_preparation_evidence as prep
-    import measurement_preparation_request as request_gate
     import measurement_preparation_transport as preparation
     import measurement_transport as base
     import measurement_version as versions
@@ -293,7 +291,7 @@ def _record(value, raw):
 
 def record_local(source, target, root, source_directories, basis_files):
     base._local_only()
-    preparation._private(base.repository)
+    base.measurement_repository(base.repository)
     raw = prep._read_file(source, LIMIT)
     value = validate_payload(raw)
     require(set(basis_files) == basis_hashes(value["plan"]), "basis_set_mismatch")
@@ -351,7 +349,7 @@ def local_pair(root, commit, local):
 
 def request_bytes(root, plan_commit, local):
     base._local_only()
-    preparation._private(base.repository)
+    base.measurement_repository(base.repository)
     value, raw, record = local_pair(root, plan_commit, local)
     request = dict(
         format=1,
@@ -407,7 +405,7 @@ def authorize_run(
 ):
     """Local-only: choose an observed Actions run, reserve campaign before return."""
     base._local_only()
-    preparation._private(repository)
+    base.measurement_repository(repository)
     evidence._number(run_id, integer=True, positive=True)
     request = request_at(root, request_commit)
     value, raw, record = local_pair(root, request["plan_commit"], local)
@@ -470,7 +468,13 @@ def check_ci_event(event, env, request_commit, plan_commit):
         require(env.get("GITHUB_REPOSITORY_ID") == str(identifier), "ci_repository_id_mismatch")
         pr = event["pull_request"]
         for repo in (event["repository"], pr["head"]["repo"], pr["base"]["repo"]):
-            request_gate._repository(repo, identifier)
+            base.measurement_repository(lambda: repo)
+            require(
+                type(repo.get("id")) is int
+                and repo["id"] == identifier
+                and repo.get("fork") is False,
+                "measurement_event_repository_mismatch",
+            )
         require(
             event.get("action") == "synchronize"
             and type(event.get("number")) is int
@@ -492,7 +496,7 @@ def accept_ci(
     root, admission_commit, env, source_directories, *, event, repository=base.repository
 ):
     """One immutable admitted run; caller separately owns durable start markers."""
-    preparation._private(repository)
+    base.measurement_repository(repository)
     admission_raw = git_file(root, admission_commit, ADMISSION_PATH)
     admission = unpack(admission_raw)
     evidence._fields(

@@ -17,7 +17,6 @@ if __package__:
     from . import measurement_plan as plan
     from . import measurement_plan_ingress as ingress
     from . import measurement_preparation_evidence as prep
-    from . import measurement_preparation_transport as preparation
     from . import measurement_transport as transport
     from . import measurement_version as versions
 else:
@@ -28,7 +27,6 @@ else:
     import measurement_plan as plan
     import measurement_plan_ingress as ingress
     import measurement_preparation_evidence as prep
-    import measurement_preparation_transport as preparation
     import measurement_transport as transport
     import measurement_version as versions
 
@@ -120,7 +118,7 @@ def fetch_admission(root, env, *, execute=deny_network):
 
 
 def probe_request(root, env, event, *, repository=deny_network):
-    preparation._private(repository)
+    transport.measurement_repository(repository)
     require(
         env.get("GITHUB_ACTIONS") == "true"
         and env.get("GITHUB_REPOSITORY") == transport.REPOSITORY
@@ -251,7 +249,7 @@ def wait_for_admission(
             continue
         value, admission = binding(root, commit, env, event)
         require(admission["request_commit"] == q, "admission_request_changed")
-        preparation._private(repository)
+        transport.measurement_repository(repository)
         return dict(
             eligible="true",
             admission_commit=commit,
@@ -298,7 +296,7 @@ def selected_rows(frozen, env):
 
 
 def prepare(root, commit, env, event, *, repository=deny_network):
-    preparation._private(repository)
+    transport.measurement_repository(repository)
     ingress._hash(commit, 40)
     # Q's first checkout fetched B. Transfer that exact local Git object and its
     # ancestry to the separate T checkout; never discover a branch again here.
@@ -452,7 +450,7 @@ def run_slot(
             "earlier_slot_not_complete",
         )
     public = public_identity(root)
-    preparation._private(repository)
+    transport.measurement_repository(repository)
     prep._save_bytes(
         target / f"slot-{ordinal}-dispatch.json",
         launch.canonical(dict(execution_id=row["execution_id"], state="dispatch_claimed_no_retry")),
@@ -497,7 +495,11 @@ def run_slot(
         seal(raw, sealed, public["recipient"], expected)
         saved = True
         stage = "upload_gate"
-        paths = transport.upload_gate(sealed, repository=repository)
+        # Public authorization is confined to this fully checked slot path:
+        # accept_ci, runner.checked, confirmed_exit, raw identity and seal above.
+        # Generic transport upload_gate remains PRIVATE-only.
+        transport.measurement_repository(repository)
+        paths = transport.validate_sealed(sealed)
     except BaseException:
         succeeded = False
         paths = []

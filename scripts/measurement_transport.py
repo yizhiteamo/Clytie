@@ -135,6 +135,17 @@ def repository():
     return {"full_name": value.get("full_name"), "private": value.get("private")}
 
 
+def measurement_repository(repository=repository):
+    """Identity precondition only; never grants upload or execution eligibility."""
+    value = repository()
+    if (
+        type(value) is not dict
+        or value.get("full_name") != REPOSITORY
+        or type(value.get("private")) is not bool
+    ):
+        raise evidence.EvidenceError("measurement_repository_unverified")
+
+
 def upload_gate(directory, *, repository=repository):
     value = repository()
     if value.get("full_name") != REPOSITORY or value.get("private") is not True:
@@ -223,9 +234,7 @@ def download(artifact_id, run_id, name, target):
     evidence._number(artifact_id, integer=True, positive=True)
     evidence._number(run_id, integer=True, positive=True)
     evidence._pattern(name, r"a43-encrypted-[a-zA-Z0-9_-]{1,120}")
-    repo = repository()
-    if repo.get("private") is not True or repo.get("full_name") != REPOSITORY:
-        raise evidence.EvidenceError("repository_not_confirmed_private")
+    measurement_repository(repository)
     endpoint = f"repos/{REPOSITORY}/actions/artifacts/{artifact_id}"
     meta = _github(endpoint)
     if meta.get("id") != artifact_id or meta.get("name") != name:
