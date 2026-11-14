@@ -257,6 +257,36 @@ def test_slots_follow_frozen_order_and_publish_exact_cipher_pair(setup, public):
             seal=s["seal"],
         )
         assert result["succeeded"] and len(result["paths"]) == 2
+        # The explicit upload-confirm command is required before the next slot.
+        s["monkeypatch"].setattr(
+            m.ingress,
+            "accept_ci",
+            lambda *a, **kw: (copy.deepcopy(s["frozen"]), dict(request_commit="a" * 40)),
+        )
+
+        def fake_upload(trial, sealed, env, **kwargs):
+            (trial / "upload-confirmed.json").write_text(
+                json.dumps(
+                    dict(
+                        run_id=123,
+                        attempt=1,
+                        artifact_name=kwargs["name"],
+                        state="upload_confirmed_not_authenticated",
+                        local_archive_verified=False,
+                    )
+                )
+            )
+
+        s["monkeypatch"].setattr(m.cipher_handoff, "confirm", fake_upload)
+        m.confirm_upload(
+            s["tmp_path"],
+            ordinal,
+            s["env"],
+            {},
+            artifact_id=456,
+            artifact_digest="b" * 64,
+            repository=s["repository"],
+        )
         assert [Path(path).name for path in result["paths"]] == ["measurements.age", "receipt.json"]
     assert [value for kind, value in s["calls"] if kind == "execute"] == [
         row["execution_id"] for row in s["rows"]
@@ -662,3 +692,29 @@ def test_workflow_permissions_order_and_exact_cipher_uploads():
                 f"${{{{ steps.slot{index}.outputs.receipt }}}}",
             ]
             assert upload["with"]["retention-days"] == 14
+
+
+def test_next_slot_rejects_sealed_but_unconfirmed_upload(setup):
+    s = setup
+    m = s["m"]
+    result = m.run_slot(
+        s["tmp_path"],
+        0,
+        s["env"],
+        {},
+        repository=s["repository"],
+        execute=s["execute"],
+        seal=s["seal"],
+    )
+    assert result["succeeded"]
+    with pytest.raises((ValueError, OSError)):
+        m.run_slot(
+            s["tmp_path"],
+            1,
+            s["env"],
+            {},
+            repository=s["repository"],
+            execute=s["execute"],
+            seal=s["seal"],
+        )
+    assert sum(kind == "execute" for kind, _ in s["calls"]) == 1

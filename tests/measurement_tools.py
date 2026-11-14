@@ -3,6 +3,13 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_matrix_ingress": ("measurement_plan_ingress", "measurement_matrix_plan"),
+    "measurement_matrix_workflow": (
+        "measurement_matrix_ingress",
+        "measurement_matrix_launch",
+        "measurement_mechanism_workflow",
+        "measurement_cipher_handoff",
+    ),
     "environment_evidence": ("measurement_preparation_evidence",),
     "environment_capture": ("environment_evidence", "measurement_mechanism_workflow"),
     "measurement_mechanism_plan": ("measurement_launch",),
@@ -13,7 +20,13 @@ DEPENDENCIES = {
         "measurement_mechanism_plan",
         "measurement_preparation_request",
     ),
+    "measurement_cipher_handoff": (
+        "measurement_launch",
+        "measurement_transport",
+        "measurement_preparation_evidence",
+    ),
     "measurement_mechanism_workflow": (
+        "measurement_cipher_handoff",
         "measurement_plan_ingress",
         "measurement_mechanism_launch",
     ),
