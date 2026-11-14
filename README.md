@@ -2,7 +2,13 @@
 
 Clytie 是可复用的 AI 伴侣框架：本体提供事件、账本、记忆、边界、插件宿主和守护进程；模型、平台、能力和行为通过插件接入。每个伴侣使用独立的配置、人设与记忆。
 
-主线已合入 A1 至 A4.2：SDK、插件宿主、账本与交付、对话、记忆与回想、守护进程、本机 API 和 CLI。当前 A4.3「备份与维护」已有实现候选，最终验收未完成。范围与验收标准见 [路线图](docs/roadmap.md)，架构入口见 [架构总览](docs/architecture/overview.md)，当前证据与限制见 [A4.3 检查点](docs/implementation/a4-3-limited-validation.md)。真实平台和产品模型接入、部署切换仍需后续阶段及用户授权。
+**开发中。仓库公开不代表 A4.3 最终验收通过。**
+
+`main` 已合入 A1 至 A4.2：SDK、插件宿主、账本与交付、对话、记忆与回想、守护进程、本机 API 和 CLI。A4.3「备份与维护」仍在未合并的 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71) 中，不能将候选能力视为 `main` 已具备。
+
+截至 2026-11-14，候选 `007a5c923115abda62116e9c9a25ac782303a973` 的第 3/3 轮独立代码复审已通过；Linux、最终候选的 Windows/Linux 功能 CI、正式性能与资源验收尚未完成。本机验证和代码复审不替代最终验收，也不构成合并或部署批准。普通功能 CI 已获准启用，结果仍待完成；preparation 和正式测量继续暂停，正式测量及未来测量证据的保存/公开范围仍需另行授权。
+
+范围与验收标准见 [路线图](docs/roadmap.md)，架构入口见 [架构总览](docs/architecture/overview.md)，候选的历史验证与限制见 [固定候选检查点](https://github.com/yizhiteamo/Clytie/blob/007a5c923115abda62116e9c9a25ac782303a973/docs/implementation/a4-3-review-2-followup.md)。该检查点保留第二轮时点，最新第三轮完整结论见 PR #71；不改写历史记录。真实平台和产品模型接入、部署切换仍需后续阶段及用户授权。
 
 ## 安装与离线验证
 
@@ -58,7 +64,9 @@ uv run --no-sync python scripts/audit_history.py
 
 SDK 契约与四层配置见 [A1 实现说明](docs/implementation/a1.md)。A2 宿主使用显式注入的时钟和后端，只在测试临时目录验证状态与升级；不会自行连接真实平台、调用模型或弹出通知。参考插件包括 echo-tool、example-behavior、keyword-retriever、desktop-notifier，验收方法见 [A2 实现说明](docs/implementation/a2.md)。
 
-持久记忆、账本、边界流程、调度器、守护进程及本机管理 API/CLI 已有实现。A4.3 候选进一步接入在线捕获、备份恢复、StorageOwner 与重 I/O 协调，但功能测试不代替性能和独立验收。官方插件同进程运行，ctx 是能力接口裁剪，不能作为运行任意不可信 Python 代码的安全沙箱。WebUI、看图与形象识别尚不在当前交付范围；单独记忆包的资产导入继续预留。
+持久记忆、账本、边界流程与调度、守护进程、本机管理 API 和 CLI 已在 `main` 实现；A4.3 的完整备份、恢复及维护能力属于未合并候选，尚未完成最终验收。官方插件同进程运行，ctx 是能力接口裁剪，不能作为运行任意不可信 Python 代码的安全沙箱。
+
+WebUI、看图与形象识别尚不在当前交付范围；单独记忆包的资产导入继续预留。
 
 ## 许可证
 
