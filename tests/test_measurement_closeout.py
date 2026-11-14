@@ -90,7 +90,7 @@ def test_workflow_uploads_only_encrypted_outputs_and_never_retries():
     for platform in ("windows", "linux"):
         text = (root / f".github/workflows/closeout-{platform}.yml").read_text(encoding="utf-8")
         assert "workflow_dispatch" not in text
-        assert "GITHUB_RUN_ATTEMPT']=='1'" in text
+        assert "GITHUB_RUN_ATTEMPT'] == '1'" in text
         assert "steps.scene.outputs.ciphertext" in text
         assert "steps.scene.outputs.receipt" in text
         assert f"name: a43-encrypted-closeout-{platform}-" in text
@@ -163,3 +163,59 @@ def test_entry_exports_paths_only_after_seal(material, tmp_path, monkeypatch, se
         assert lines[0].endswith("measurements.age")
         assert lines[1].endswith("receipt.json")
         assert all("raw" not in line for line in lines)
+
+
+@pytest.mark.parametrize("platform", ["windows", "linux"])
+def test_request_gate_checks_this_push_not_cumulative_pr(tmp_path, platform):
+    import json
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / f".github/workflows/closeout-{platform}.yml").read_text()
+    script = textwrap.dedent(workflow.split("python - <<'PY'\n", 1)[1].split("          PY", 1)[0])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=repo).decode().strip()
+
+    git("init")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "fixture")
+    (repo / "note").write_text("initial")
+    git("add", "note")
+    git("commit", "-m", "initial")
+    before = git("rev-parse", "HEAD")
+    request = repo / f".github/a43-closeout-{platform}-request.json"
+    request.parent.mkdir()
+    request.write_text(json.dumps({"tool": "a" * 40}))
+    git("add", request.relative_to(repo).as_posix())
+    git("commit", "-m", "request")
+    after = git("rev-parse", "HEAD")
+    event = tmp_path / "event.json"
+    output = tmp_path / "outputs"
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    env = dict(
+        os.environ,
+        GITHUB_RUN_ATTEMPT="1",
+        GITHUB_EVENT_PATH=str(event),
+        GITHUB_OUTPUT=str(output),
+        RUNNER_TEMP=str(runner),
+    )
+    event.write_text(json.dumps(dict(before=before, after=after)))
+    subprocess.run([sys.executable, "-c", script], cwd=repo, env=env, check=True)
+    assert "changed=true" in output.read_text()
+    assert (runner / "closeout-request.json").read_bytes() == request.read_bytes()
+    (repo / "note").write_text("unrelated push")
+    git("add", "note")
+    git("commit", "-m", "unrelated")
+    event.write_text(json.dumps(dict(before=after, after=git("rev-parse", "HEAD"))))
+    original = output.read_bytes()
+    # Existing exclusive destination would fail if the unchanged request ran again.
+    subprocess.run([sys.executable, "-c", script], cwd=repo, env=env, check=True)
+    assert output.read_bytes() == original
+    assert workflow.count("if: steps.request.outputs.changed == 'true'") == 4
