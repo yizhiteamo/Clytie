@@ -1,9 +1,12 @@
 """只管理进程与无内容健康状态，不访问账本。"""
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Protocol
 
+from clytie.backup.io_budget import IoBudgetError
+from clytie.backup.io_control import IoControl
 from clytie.plugin_host.locking import file_lock, process_identity
 from clytie.plugin_host.support import HostLog, timed
 
@@ -63,16 +66,24 @@ class Supervisor:
         self.suspended = set()
         self.request_stop = None
         self.startup_cancelled = lambda: False
+        self.backup_io = IoControl(clock, home=home)
+        self.backup_io_sessions = {}
 
     def setting(self, group, key, default):
         return self.config.get(group, {}).get(key, default)
 
     async def start(self, prepare=None):
+        from clytie.backup.old_instances import startup_gate
+
         self.lock = file_lock(
             self.home / "run/supervisor.lock", {**process_identity(), "operation": "supervisor"}
         )
-        self.update_lock = self.lock.__enter__()
+        with startup_gate(self.home):
+            self.update_lock = self.lock.__enter__()
         try:
+            # This only projects heavy-I/O admission. Unrelated companions may
+            # still boot and serve ordinary conversation while evidence is blocked.
+            await self.backup_io.recheck()
             if prepare:
                 await prepare()
         except BaseException:
@@ -107,6 +118,42 @@ class Supervisor:
         await child.send(dict(type=kind, seq=self.seq, **fields))
         return self.seq
 
+    async def authorize_backup_capture(self, cid, operation_id, *, child=None):
+        child = self.children[cid] if child is None else child
+        session = self.backup_io_sessions[cid]
+        identity = await asyncio.to_thread(child.identity)
+        if self.children.get(cid) is not child or self.backup_io_sessions.get(cid) != session:
+            raise IoBudgetError("backup_io_executor_lost")
+        await self.backup_io.authorize_execution(session, operation_id, identity, role="capture")
+
+    async def _backup_io_reply(self, child, response):
+        await self.command(
+            child,
+            response["type"],
+            **{key: value for key, value in response.items() if key != "type"},
+        )
+
+    async def _backup_io_exit_confirmed(self, cid, *, session=None):
+        session = self.backup_io_sessions.get(cid) if session is None else session
+        if session is None:
+            return True
+        try:
+            await self.backup_io.ended(session, confirmed=True)
+            return True
+        except IoBudgetError as exc:
+            # Actual process exit is already known. A failed durable release is
+            # separate evidence; never turn it into a second kill or abandon the
+            # other companions and daemon resources during shutdown.
+            self.rows[cid]["last_heavy_io_release"] = {"state": "unverified", "reason": exc.code}
+            self.log.warning(
+                "supervisor.backup_io_release_unverified", companion_id=cid, reason=exc.code
+            )
+            self.audit.append("backup_io_release_unverified", cid, result="failed", reason=exc.code)
+            return False
+        finally:
+            if self.backup_io_sessions.get(cid) == session:
+                self.backup_io_sessions.pop(cid)
+
     async def monitor(self, cid):
         row = self.rows[cid]
         while not self.stopping and cid not in self.suspended:
@@ -116,9 +163,21 @@ class Supervisor:
             fatal, ready = None, None
             reason = None
             last = self.clock.monotonic()
+            io_session, exit_confirmed = None, False
             try:
                 child = await self.launcher.launch(cid)
                 self.children[cid] = child
+                io_session = self.backup_io.register(storage_owner=True)
+                self.backup_io_sessions[cid] = io_session
+                # Only parent-selected existing management journals are authorized.
+                # A new launch/session never regains the prior executor's stage.
+                for operation in getattr(child, "recovery_operations", ()):
+                    await self.backup_io.authorize_execution(
+                        io_session,
+                        operation,
+                        await asyncio.to_thread(child.identity),
+                        role="recovery",
+                    )
                 while True:
                     now = self.clock.monotonic()
                     if row["phase"] == "starting" and ready is None:
@@ -224,6 +283,17 @@ class Supervisor:
                             )
                         else:
                             self.problems.pop(f"quota_exhausted:{cid}", None)
+                    elif kind == "backup_io":
+
+                        async def reply(response, child=child):
+                            await self._backup_io_reply(child, response)
+
+                        self.backup_io.dispatch(io_session, msg, reply)
+                    elif kind == "storage_pressure":
+                        try:
+                            self.backup_io.pressure(io_session, msg.get("sample"))
+                        except IoBudgetError:
+                            self.log.warning("supervisor.backup_pressure_invalid")
                     elif kind == "fatal":
                         fatal = msg.get("reason")
                         if fatal not in FATAL:
@@ -255,7 +325,9 @@ class Supervisor:
                         await child.kill()
                         reason = "startup_timeout"
                         break
+                self.backup_io.disconnect(io_session)
                 code = await child.wait()
+                exit_confirmed = True
                 from clytie.api.auth import APIError
 
                 for (owner, _), pending in tuple(self.requests.items()):
@@ -263,12 +335,29 @@ class Supervisor:
                         pending.set_exception(APIError("companion_unavailable", 409))
             except asyncio.CancelledError:
                 raise
+            except IoBudgetError as exc:
+                code = 1
+                reason = exc.code
+                fatal = "management_recovery_blocked"
+                row["heavy_io_reason"] = exc.code
+                child = self.children.get(cid)
+                if child:
+                    await child.kill()
+                    await child.wait()
+                    exit_confirmed = True
             except Exception:
                 code = 1
                 reason = "process_failure"
                 child = self.children.get(cid)
                 if child:
                     await child.kill()
+                    await child.wait()
+                    exit_confirmed = True
+            finally:
+                if io_session is not None:
+                    self.backup_io.disconnect(io_session)
+                    if exit_confirmed:
+                        await self._backup_io_exit_confirmed(cid, session=io_session)
             if self.stopping or cid in self.suspended:
                 return
             if fatal:
@@ -312,6 +401,10 @@ class Supervisor:
     async def tick(self):
         while True:
             try:
+                if (self.home / "supervisor/old-instances.json").exists() and (
+                    self.clock.monotonic() >= getattr(self, "_old_instances_next", 0)
+                ):
+                    await self.refresh_old_instances()
                 await self.notifications.update(self.problems, pending=self.pending_health)
                 await self.flush_health()
             except OSError as exc:
@@ -319,11 +412,40 @@ class Supervisor:
                 self.log.warning("supervisor.health_write_failed", error=type(exc).__name__)
             await self.clock.sleep(1)
 
+    async def refresh_old_instances(self):
+        from clytie.backup.old_instances import OldInstances
+        from clytie.backup.restore import read_state
+
+        options = getattr(self, "old_instance_options", {})
+        summary = await asyncio.to_thread(
+            OldInstances(self.home, self.clock).status,
+            warn_count=options.get("warn_count", 3),
+            warn_bytes=options.get("warn_gib", 20) * 1024**3,
+        )
+        self.old_instances_summary = summary
+        self._old_instances_next = self.clock.monotonic() + 60
+        key = "old_instances:instance"
+        restored = read_state(self.home)
+        if restored and restored.get("switched"):
+            key += ":" + restored["operation_id"]
+        for previous in list(self.problems):
+            if previous.startswith("old_instances:instance") and previous != key:
+                self.problems.pop(previous)
+        if summary["count"]:
+            self.problems[key] = (
+                f"old_instances count={summary['count']} known_bytes={summary['known_bytes']} "
+                f"unknown={summary['unknown']} warning={summary['warning']}"
+            )
+        else:
+            self.problems.pop(key, None)
+        return summary
+
     async def flush_health(self):
         external = []
         for component in self.external:
             external.append(await component.status())
         content = dict(
+            old_instances=getattr(self, "old_instances_summary", None),
             companions=self.rows,
             external=external,
             undelivered=self.notifications.undelivered,
@@ -389,7 +511,7 @@ class Supervisor:
         )
         return dict(results)
 
-    async def request(self, cid, op, args, *, timeout=30, before_send=None):
+    async def request(self, cid, op, args, *, timeout=30, before_send=None, after_receive=None):
         from uuid import uuid4
 
         from clytie.api.auth import APIError, RequestNotDelivered
@@ -400,7 +522,9 @@ class Supervisor:
         if child is None:
             raise RequestNotDelivered("companion_busy", 409)
         if before_send is not None:
-            before_send(child)
+            prepared = before_send(child)
+            if inspect.isawaitable(prepared):
+                await prepared
         key = uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self.requests[cid, key] = future
@@ -414,6 +538,10 @@ class Supervisor:
                 )
             except TimeoutError:
                 raise APIError("companion_timeout", 504) from None
+            if after_receive is not None:
+                settled = after_receive()
+                if inspect.isawaitable(settled):
+                    await settled
             if not result["ok"]:
                 error = result["error"]
                 raise APIError(error["code"], error.get("status", 400))
@@ -466,6 +594,7 @@ class Supervisor:
         except TimeoutError:
             await child.kill()
             await child.wait()
+            await self._backup_io_exit_confirmed(cid)
             result = {"stopped": [], "not_stopped": {}, "reason": "timeout_killed"}
             self.audit.append("force_stop", cid, reason="timeout_killed", source="companion_stop")
             self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"
@@ -539,6 +668,9 @@ class Supervisor:
 
     async def _stop(self, mode, source):
         self.stopping = True
+        backup_controller = getattr(self, "backup_controller", None)
+        if backup_controller:
+            await backup_controller.pause()
         management_stop = None
         if self.management_workers:
             self.management_workers.stopping = True
@@ -596,6 +728,7 @@ class Supervisor:
             except Exception as exc:
                 await child.kill()
                 await child.wait()
+                await self._backup_io_exit_confirmed(cid)
                 reason = "timeout_killed" if isinstance(exc, TimeoutError) else "stop_failed"
                 self.audit.append("force_stop", cid, reason=reason, source=source)
                 self.problems[f"stop_killed:{cid}"] = f"{cid} {row['sending']}"
@@ -608,6 +741,8 @@ class Supervisor:
         await self.notifications.update(self.problems, pending=self.pending_health)
         if management_stop:
             await management_stop
+        if backup_controller:
+            await backup_controller.shutdown()
         for task in (*self.monitors.values(), self.ticker):
             if task:
                 task.cancel()

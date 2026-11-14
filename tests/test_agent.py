@@ -299,7 +299,7 @@ async def test_boundary_first_category_pause_filter_context_and_release(tmp_path
         agent.boundary.path, agent.boundary.config, agent.clock, agent.ledger, agent.log
     )
     assert again.paused(actor)
-    again.release(agent.cid, "member")
+    await again.release(agent.cid, "member")
     assert not again.paused(actor)
     agent.clock.advance(24 * 3600)
     assert not agent.boundary.paused(actor)

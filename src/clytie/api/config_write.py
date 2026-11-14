@@ -1,6 +1,7 @@
 """Patch only enabled scalars; preserve every untouched byte of the YAML source."""
 
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -95,6 +96,18 @@ class ConfigWriter:
         self.home, self.clock = Path(home), clock
         self.validate = validate or (lambda: load_home(self.home).valid)
 
+    @contextmanager
+    def _commit(self):
+        from clytie.backup.coordination import CaptureCoordinator, CaptureError
+
+        path = contained(self.home, self.home / "supervisor/config-commit.lock")
+        coordinator = CaptureCoordinator(path, self.clock)
+        try:
+            with coordinator.commit():
+                yield
+        except CaptureError:
+            raise APIError("config_not_writable") from None
+
     def preview(self, cid, patch):
         identifier(cid)
         path = contained(self.home, self.home / "companions" / cid / "companion.yaml")
@@ -117,13 +130,15 @@ class ConfigWriter:
         suffix = self.clock.now().strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid4().hex
         backup = history / ("companion.yaml." + suffix)
         atomic_write(backup, before)
-        atomic_write(path, after)
+        with self._commit():
+            atomic_write(path, after)
         try:
             valid = self.validate()
         except Exception:
             valid = False
         if not valid:
-            atomic_write(path, before)
+            with self._commit():
+                atomic_write(path, before)
             raise APIError("config_invalid_after_write")
         files = sorted(
             p

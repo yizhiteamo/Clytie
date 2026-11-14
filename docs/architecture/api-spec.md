@@ -309,3 +309,68 @@
 - 完整备份系统、保留策略、副本目录、日志轮转、导出密钥（A4.3）；本里程碑仅实现第 4.3a 节管理操作必需的中断核验与恢复。
 - WebUI 页面本身、托盘图标（阶段三）。
 - 局域网或手机访问（不在计划内）。
+
+## A4.3 备份管理与维护模式（待实现）
+
+以下为已批准的 A4.3 契约，尚未实现、未经验收；完整依据为 `backup-spec.md`，不代表历史里程碑已提供这些能力。
+
+所有路径位于 `/api/v1/backup`；CLI `clytie backup ...` 仅调用 API。
+
+| 路径 / CLI | 行为及保护 |
+|---|---|
+| GET /status、/list；status、list | 分类别时间、覆盖、占用、缺项、保护阻碍、副本与旧实例，默认不返回私密内容 |
+| POST /create；create --scope memory或instance [--companion] | 明确生成 manual 包；返回 operation_id，复用查询/取消，身份去重 |
+| GET /operations/<id>；operation <id> | 阶段、提交与校验结果；无密钥或私密内容 |
+| POST /operations/<id>/cancel；cancel <id> | 确认；协作取消，不覆盖已提交事实 |
+| POST /verify；verify <id> | 独立校验、结果版本和时间，不把模型联网启动当验证 |
+| POST /config/plan、/config/apply；config plan/apply | 版本绑定、确认、保留注释，复用 A4.2 配置写回与历史 |
+| POST /restore/plan、/restore/apply；restore plan/apply | 源、目标、空间与兼容性计划；跨 home 受管源按 backup-spec §8.7 绑定并确认保护写入；apply 确认及管理口令 |
+| GET /plans/<kind>/<plan_id>；plan show <kind> <plan_id> | 恢复预览生命周期、到期时间、关联操作；正常鉴权、不续期 |
+| POST /plans/<kind>/<plan_id>/cancel；plan cancel <kind> <plan_id> | 取消未消费预览；鉴权及确认，无额外口令；已接受执行提示原操作编号 |
+| POST /restore/source-stopped；restore source-stopped <id> | 目标 maintenance API 登记启动前源停用确认，确认及管理口令；同机源活跃拒绝 |
+| POST /restore/acknowledge；restore acknowledge <id> | 正常启动后核验并登记切换完成；确认，不自动改环境变量或启动平台 |
+| POST /memory/plan；memory-plan <backup_id> | memory 备份源适配到原记忆计划；跨 home 受管源按 backup-spec §8.7 绑定并确认保护写入；后续沿用原入口与保护 |
+| POST /cleanup/plan、/cleanup/apply；cleanup plan/apply | 分类明确的备份/旧实例清理；apply 确认及管理口令，重新核验保护 |
+| GET /key/fingerprint；show-key-fingerprint | 只显示指纹/保管确认状态 |
+| POST /key/export、/key/verify、/key/acknowledge；export-key、verify-key、acknowledge-key | 导出确认及管理口令；核验不回传密钥；保管声明不等于核验 |
+
+全部非 GET 审计，默认只用逻辑编号/原因码/数量，不把秘密、真实源内容或任意错误原文放入日志。需要展示本机路径时只给已认证管理用户，不传播到外发通知。管理 API 的 plan 根据服务器数据判断保护等级，不能信任客户端声称低风险。
+结果至少分开 creation（complete/partial/failed/cancelled）、verification、retention、mirror、restore_readiness；总体成功不能覆盖其中失败。常见原因码含 capture_busy、snapshot_unsupported、snapshot_inconsistent、space_insufficient、retention_protected、mirror_unavailable、mirror_identity_mismatch、restore_incompatible、restore_target_not_empty、restore_recovery_blocked、continuity_unverified。映射沿用 API 的鉴权/确认/冲突规则，ADR 给出完整映射表与 JSON Schema，不用解析自由文本驱动逻辑。
+
+### 维护模式
+
+正常管理继续走 API。旧实例不可启动时，新增显式 `supervisor start --maintenance`：使用用户单独指定的管理 home（通过原 CLYTIE_HOME 选择），只启动本机管理 API，不启动伴侣、平台、插件、自动备份或模型。允许空管理 home，建立最小管理元数据/通行证，不伪造伴侣配置或空记忆。执行 restore apply 的管理目录必须与尚未恢复完成的目标分开。目标已提交 ready_for_switch 后，可以按 §8.4 在目标自身以 maintenance 模式启动 API 完成切换前确认；不能在 incomplete 目标启动任何模式。
+这是本里程碑新增的恢复引导模式，不把 CLI 变成绕过 API 的离线业务实现。鉴权、Host/Origin、CSRF、管理口令及停止规则仍与 A4.2 相同；首次没有口令沿用原明确提醒/CLI 确认规则，不声称网页已可登录。恢复源密钥由用户显式提供本机文件路径，后端不记录原文、不通过 URL/CLI 参数接收密钥值，不自动扫描旧私有目录找密钥。
+
+### Issue #64：恢复后的凭据缺项（用户已确认，方案 1A）
+
+`ready_for_switch` 是数据恢复结果，不是普通启动许可。维护模式下的已鉴权 `GET /api/v1/backup/status` 可列出合法凭据缺项并重新进行只读配置校验，分别返回数据恢复状态、缺项与普通启动配置结果；不回传秘密、不加载业务插件、不调用真实平台或模型、不自动启动。显示“数据恢复完成，尚需配置凭据”，不能以单个 ready 状态掩盖配置未通过。
+正常启动不新增凭据豁免：全局配置错误仍拒绝整个实例启动，补配后重新校验。恢复校验只接受认证清单与声明式 Schema 精确对应的排除，其他配置错误不能忽略；详见 backup-spec §8.3a。source_stopped 与 switched 的顺序、确认、管理口令、Host/Origin/CSRF 保护不变。
+
+### Issue #66：恢复预览的期限与取消（用户已确认，选项 1）
+
+面向用户称“恢复预览”，内部 plan 保留；不是预约恢复、进程有效期或已恢复目录的有效期。仅完整 instance 恢复与 source_type=backup 的 memory 恢复预览在生成完成后有效 24 小时，不自动续期；重新生成要重新校验。普通记忆包导入/撤销、其他计划原语义不变。
+GET /backup/plans/<kind>/<plan_id> 查询状态，POST 同路径 /cancel 鉴权、CSRF及确认后取消未消费预览，不额外要求管理口令。kind 为 instance 或 memory，服务器校验持久来源。过期/取消拒绝新的 apply/内容读取，但已有执行/读取/核验引用不中断。consumed 取消返回 plan_in_use 和原操作编号，不能把取消预览转成取消执行；原执行取消入口与保护不变。
+接受执行、到期、取消与轮转须原子协调并持久交接引用；恢复受阻仍需要的源不能因计划期限被删除。状态、幂等、错误码与验收以 backup-spec §8.6、§13 第 16a 项为准。取消不删除源、不撤销恢复，也不改写生成预览的成功事实。
+
+### Issue #67：跨管理目录的源保护（用户已确认，选项 1）
+
+restore/plan 和 memory/plan 使用另一个 home 管理的备份时，用户须明确选择源仓库，提交 source_repository（root、repository_id、backup_id），经服务器核验并 confirm 后，才可写源仓库的保护元数据并读取源包。初次缺少确认/预期仓库身份返回 428 及必要绑定说明，不读取恢复内容。该确认仅授权本次操作及其派生引用，不授权业务数据修改、读取凭据或删除源包；正常鉴权、Host/Origin、CSRF、文件权限均须满足，不提权，不新增登记口令复核，原 apply 口令不变。
+源仓库持有唯一权威登记，预览及管理日志仍归发起 home；源在线/离线/重启均依同一持久引用与跨进程锁决定轮转。不能从备份包历史路径推导写权限。A4.3 限同机、可核验身份与锁的本地仓库；只读、不可达、身份不符或登记故障时不开始未受保护的恢复，不退回本地引用，不自动复制。独立副本仅用户显式选择，转出受管源须保护复制过程；详见 backup-spec §8.7。
+源与维护 status 显示本方可核验的持有者和待处理原因，失联不得伪装已释放；原 24 小时只限制未消费预览，执行及恢复依赖不自动过期。API 字段、CLI 对应源选择/确认参数和结构化错误映射须写入 ADR 并同步实现文档；验收按 backup-spec §13 第 16b 项，不另建绕过 API 的离线 CLI。
+
+### Issue #68：显式清理候选（用户已确认，选项 1）
+
+cleanup/plan 可接收明确 backup_ids，选择当前管理权限覆盖的常规受管 manual 和日/周/月保留层备份；逐包返回删除后果、保护原因及合格执行集合。cleanup/apply 绑定确认的集合与文件身份，沿用鉴权、确认、管理口令和 CSRF，逐文件重新核验最低三份与源仓库权威引用；发生变化不得强删或替换候选，部分完成如实记录。无需先生成新备份，不修改自动保留配置。外部恢复源的引用登记授权不包含删除权，特殊快照、失败现场、旧实例及记忆导出文件不混入本选择。完整规则与验收见 backup-spec §6.4 及 Issue #68 补充验收。
+
+## Issue #72：存储背压与真实完成（用户已确认）
+
+本体存储使用 storage-spec.md 的有界所有者；普通容量满时，尚未接受的新请求明确返回 storage_busy，不无限排队或暗中重试。已接受的管理/业务操作继续跟踪，必要收尾不能丢失；HTTP 断线、超时和调用方取消不等于线程结束、回滚或提交。原管理鉴权、确认、口令、操作编号与恢复核验不变。
+
+控制查询可显示带观察时点的缓存状态，不冒充最新数据库核验；取消受理与实际结束分开。具体入口的接受点和错误映射须在实现证据中逐项核对，不能假接收后丢弃。原 stopped/online 管理执行位置、单写入者及关闭例外不变。
+
+### Issue #72：跨重启重 I/O 责任（用户已确认）
+
+新控制器开放重 I/O 前核验全实例遗留执行责任，不仅看 pending 或当前伴侣。待核验/未知时明确拒绝冲突新操作，不假接收后丢弃；状态和诊断保持可用。证据更新或执行者退出后支持重新核验，不重做业务。状态显示阻塞操作、固定原因、观察时点和检查步骤，不含内容或异常原文。
+
+原执行者与 recover_only 分立登记，终态不证明资源释放；可靠退出或可信释放且旧资格不可再用，才在跨控制器协调边界解除并审计。数据恢复及受影响伴侣启动限制独立保留。未知/缺失/损坏不静默清除，不增加忽略入口；HTTP 断线、EOF、超时不是解除依据。鉴权、权限、确认和管理口令不变。详细规则及组合验收见 backup-spec 对应章节。

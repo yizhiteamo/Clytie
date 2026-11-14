@@ -288,6 +288,7 @@ async def test_runtime_recovers_hot_sqlite_journal_before_version_read(tmp_path)
     code = """
 import os, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA journal_mode=DELETE')
 db.execute('PRAGMA cache_size=1')
 db.execute('BEGIN IMMEDIATE')
 db.execute("UPDATE fictional_recovery SET value = 'uncommitted'")

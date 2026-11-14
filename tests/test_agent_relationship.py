@@ -221,7 +221,7 @@ async def test_reminder_expiry_release_ties_and_fixed_system(tmp_path):
             await count(agent, incoming)
         first = await request(agent, model)
         assert reminder(first) == [PREFIX + "member_a（昵称：）、member_b（昵称：）"]
-        agent.boundary.release(agent.cid, "member_a")
+        await agent.boundary.release(agent.cid, "member_a")
         second = await request(agent, model)
         assert reminder(second) == [PREFIX + "member_b（昵称：）"]
         agent.clock.advance(3600)

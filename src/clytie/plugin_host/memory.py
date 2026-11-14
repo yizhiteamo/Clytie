@@ -40,6 +40,20 @@ def current_conversation():
     return scope.conversation_id if scope is not None and scope.active else None
 
 
+def capture_scene_binding():
+    """本体存储交接保留原租约，不能把已失效场景重新激活。"""
+    return _current.get()
+
+
+@contextmanager
+def restore_scene_binding(scope):
+    token = _current.set(scope)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+
+
 class _MemoryBase:
     __slots__ = ("_backend", "_permissions", "_private_scenes")
 

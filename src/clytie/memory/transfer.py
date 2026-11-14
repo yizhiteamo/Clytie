@@ -4,12 +4,15 @@ import hashlib
 import inspect
 import json
 import os
+from contextlib import ExitStack, nullcontext
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from clytie.api.management_io import file_call
+from clytie.api.management_io import management_command as run_sync
 from clytie.api.management_journal import (
     begin_database,
     cancellation,
@@ -51,7 +54,11 @@ def source_fingerprint(source):
     root = source if source.is_dir() else source.parent
     contained(root, source)
     if source.is_file():
-        return hashlib.sha256(source.read_bytes()).hexdigest()
+        hashed = hashlib.sha256()
+        with source.open("rb") as stream:
+            while block := stream.read(1024 * 1024):
+                hashed.update(block)
+        return hashed.hexdigest()
     rows = []
     for path in sorted(source.rglob("*")):
         contained(root, path)
@@ -72,12 +79,23 @@ def runtime_lock(home, companion_id, operation="memory_runtime"):
 
 
 class Transfers:
-    def __init__(self, store, home, companion_id, *, importers=None, log=None, runtime_owned=False):
+    def __init__(
+        self,
+        store,
+        home,
+        companion_id,
+        *,
+        importers=None,
+        log=None,
+        runtime_owned=False,
+        source_adapter=None,
+    ):
         self.store, self.home = store, Path(home).resolve()
         self.cid = identifier(companion_id)
         self.importers = importers or {}
         self.log = log or HostLog()
         self.runtime_owned = runtime_owned
+        self.source_adapter = source_adapter
 
     def plan_path(self, plan_id):
         if len(plan_id) != 32 or any(c not in "0123456789abcdef" for c in plan_id):
@@ -163,12 +181,12 @@ class Transfers:
         self, source, *, passphrase=None, recovery_code=None, importer=None, approve=False
     ):
         source = Path(source).resolve()
-        before = source_fingerprint(source)
+        before = await file_call(self.store, source_fingerprint, source)
         histories, source_audit, foreign_history = {}, [], []
         bindings = {}
         proposals = {key: 0 for key in BASIS}
         if importer:
-            self.importer_allowed(importer, before)
+            await run_sync(self.store, self.importer_allowed, importer, before)
             implementation = self.importers[importer]
             detected = implementation.detect(source)
             if inspect.isawaitable(detected):
@@ -177,7 +195,7 @@ class Transfers:
                 raise ValueError("导入器不支持该源副本")
             records = {}
             async for candidate in implementation.read(source, cancellation()):
-                checkpoint()
+                await run_sync(self.store, checkpoint)
                 record = self.candidate(candidate, approve)
                 if record.record_id in records:
                     raise ValueError("导入候选编号重复")
@@ -185,38 +203,72 @@ class Transfers:
                 proposals[candidate.proposed_basis] += 1
             if not records:
                 raise ValueError("导入器没有产生记录")
-            manifest = {"companion_uid": self.store.uid, "record_count": len(records)}
+            manifest = {
+                "companion_uid": await run_sync(self.store, lambda: self.store.uid),
+                "record_count": len(records),
+            }
         else:
-            raw = decrypt(source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code)
-            manifest, db = unpack(raw, self.home, self.cid)
-            fades = {}
-            try:
-                if manifest["version"] == 3:
-                    registry = {
-                        r["key"]: {k: r[k] for k in origins.FIELDS}
-                        for r in db.execute("SELECT * FROM conversation_registry")
-                    }
-                    bindings = {
-                        (r["record_id"], r["revision"]): registry[r["registry_key"]]
-                        for r in db.execute("SELECT * FROM revision_origins")
-                    }
-                    fades = {
-                        row["record_id"]: dict(row) for row in db.execute("SELECT * FROM fade")
-                    }
-                records = {
-                    row["id"]: MemoryRecord.model_validate_json(row["data"])
-                    for row in db.execute("SELECT * FROM records")
+            return await file_call(
+                self.store,
+                self._load_package,
+                source,
+                before,
+                passphrase=passphrase,
+                recovery_code=recovery_code,
+            )
+        if await file_call(self.store, source_fingerprint, source) != before:
+            raise ValueError("源数据发生变化，请重新生成计划")
+        return dict(
+            bindings=bindings,
+            records=records,
+            manifest=manifest,
+            histories=histories,
+            audit=source_audit,
+            hash=before,
+            proposals=proposals,
+            foreign_history=foreign_history,
+            fade={},
+        )
+
+    def _load_package(self, source, before, *, passphrase=None, recovery_code=None):
+        histories, source_audit, foreign_history = {}, [], []
+        bindings = {}
+        proposals = {key: 0 for key in BASIS}
+        resources = ExitStack()
+        fades = {}
+        try:
+            if self.source_adapter is not None:
+                if passphrase is not None or recovery_code is not None:
+                    raise ValueError("backup_source_credentials_invalid")
+                manifest, db = resources.enter_context(self.source_adapter.open(source))
+            else:
+                raw = decrypt(
+                    source.read_bytes(), passphrase=passphrase, recovery_code=recovery_code
+                )
+                manifest, db = unpack(raw, self.home, self.cid)
+                resources.callback(db.close)
+            if manifest["version"] == 3:
+                registry = {
+                    r["key"]: {k: r[k] for k in origins.FIELDS}
+                    for r in db.execute("SELECT * FROM conversation_registry")
                 }
-                for row in db.execute("SELECT * FROM revisions ORDER BY record_id,revision"):
-                    histories.setdefault(row["record_id"], []).append(dict(row))
-                source_audit = [
-                    json.loads(row[0]) for row in db.execute("SELECT data FROM audit ORDER BY id")
-                ]
-                foreign_history = [
-                    dict(row) for row in db.execute("SELECT * FROM foreign_revisions")
-                ]
-            finally:
-                db.close()
+                bindings = {
+                    (r["record_id"], r["revision"]): registry[r["registry_key"]]
+                    for r in db.execute("SELECT * FROM revision_origins")
+                }
+                fades = {row["record_id"]: dict(row) for row in db.execute("SELECT * FROM fade")}
+            records = {
+                row["id"]: MemoryRecord.model_validate_json(row["data"])
+                for row in db.execute("SELECT * FROM records")
+            }
+            for row in db.execute("SELECT * FROM revisions ORDER BY record_id,revision"):
+                histories.setdefault(row["record_id"], []).append(dict(row))
+            source_audit = [
+                json.loads(row[0]) for row in db.execute("SELECT data FROM audit ORDER BY id")
+            ]
+            foreign_history = [dict(row) for row in db.execute("SELECT * FROM foreign_revisions")]
+        finally:
+            resources.close()
         if source_fingerprint(source) != before:
             raise ValueError("源数据发生变化，请重新生成计划")
         return dict(
@@ -228,7 +280,7 @@ class Transfers:
             hash=before,
             proposals=proposals,
             foreign_history=foreign_history,
-            fade=fades if not importer else {},
+            fade=fades,
         )
 
     def _normalized(self, record, *, preserve_origin=False):
@@ -340,7 +392,17 @@ class Transfers:
                 chain.append(value)
         return chain
 
-    async def plan(
+    async def plan(self, source, **options):
+        if self.source_adapter is not None:
+            await file_call(self.store, self.source_adapter.begin, source)
+        try:
+            return await self._plan(source, **options)
+        except BaseException:
+            if self.source_adapter is not None:
+                await file_call(self.store, self.source_adapter.failed_generation, _cleanup=True)
+            raise
+
+    async def _plan(
         self,
         source,
         *,
@@ -357,7 +419,7 @@ class Transfers:
             raise ValueError("invalid import mode")
         if importer and mode != "new":
             raise ValueError("导入器只支持 new")
-        before = database_fingerprint(self.store)
+        before = await run_sync(self.store, lambda: database_fingerprint(self.store))
         loaded = await self._load(
             source,
             passphrase=passphrase,
@@ -365,6 +427,33 @@ class Transfers:
             importer=importer,
             approve=approve_proposals,
         )
+        return await run_sync(
+            self.store,
+            self._plan_loaded,
+            source,
+            loaded,
+            before,
+            mode=mode,
+            choices=choices,
+            confirm_identity=confirm_identity,
+            importer=importer,
+            approve_proposals=approve_proposals,
+            show_content=show_content,
+        )
+
+    def _plan_loaded(
+        self,
+        source,
+        loaded,
+        before,
+        *,
+        mode,
+        choices,
+        confirm_identity,
+        importer,
+        approve_proposals,
+        show_content,
+    ):
         uid = self.store.uid
         if not importer:
             if uid and uid != loaded["manifest"]["companion_uid"]:
@@ -406,7 +495,13 @@ class Transfers:
             downgrade_count=sum(r["downgrade"] for r in rows),
             reimport=bool(importer and uid),
         )
-        publish_file(self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]})
+        if self.source_adapter is not None:
+            plan.update(source_type="backup", backup_binding=self.source_adapter.binding)
+            self.source_adapter.publish(plan, self.plan_path(plan["id"]))
+        else:
+            publish_file(
+                self.plan_path(plan["id"]), canonical(plan).encode(), {"plan_id": plan["id"]}
+            )
         preview = dict(plan)
         if show_content:
             preview["content"] = {
@@ -421,6 +516,9 @@ class Transfers:
     def _snapshot(self):
         checkpoint()
         raw = snapshot(self.store, self.home, self.cid)
+        return self._snapshot_raw(raw)
+
+    def _snapshot_raw(self, raw):
         key = UpgradeSnapshots(self.home, self.store.clock, self.log)._key(create=True)
         header = {
             "version": 1,
@@ -456,8 +554,13 @@ class Transfers:
             )
             if checked != raw:
                 raise ValueError("导入前快照校验失败")
-            db = open_database(checked, self.home, self.cid)
-            db.close()
+            from clytie.backup.native_sqlite import validation_stage
+            from clytie.backup.operation_slot import current_slot
+
+            native = self.source_adapter is not None and current_slot() is not None
+            with validation_stage() if native else nullcontext():
+                db = open_database(checked, self.home, self.cid, native=native)
+                db.close()
             from clytie.api.management_journal import current
 
             journal = current.get()
@@ -488,7 +591,11 @@ class Transfers:
                 self.store.audit("memory_snapshot_removed", file=path.name)
 
     async def apply(self, plan_id, *, passphrase=None, recovery_code=None):
-        plan = json.loads(self.plan_path(plan_id).read_bytes())
+        plan = await file_call(self.store, lambda: json.loads(self.plan_path(plan_id).read_bytes()))
+        if plan.get("source_type") == "backup" and (
+            self.source_adapter is None or self.source_adapter.binding != plan.get("backup_binding")
+        ):
+            raise ValueError("backup_source_adapter_required")
         if plan["companion_id"] != self.cid or plan["id"] != plan_id:
             raise ValueError("计划目标不匹配")
         from contextlib import nullcontext
@@ -498,15 +605,9 @@ class Transfers:
             if self.runtime_owned
             else runtime_lock(self.home, self.cid, "memory_import")
         ):
-            if self.store.transient and self.store.path.exists():
-                raise ValueError("计划失效，记忆库已建立")
-            if (
-                plan["database"] != database_fingerprint(self.store)
-                or plan["configuration"] != self.binding_fingerprint()
-            ):
-                raise ValueError("计划失效，请重新生成")
+            await run_sync(self.store, self._validate_plan, plan)
             if plan["kind"] == "undo":
-                return self._apply_undo(plan)
+                return await run_sync(self.store, self._apply_validated_undo, plan)
             loaded = await self._load(
                 plan["source"],
                 passphrase=passphrase,
@@ -514,184 +615,236 @@ class Transfers:
                 importer=plan["importer"],
                 approve=plan["approve_proposals"],
             )
-            if loaded["hash"] != plan["source_hash"]:
-                raise ValueError("计划失效，源数据发生变化")
-            rows, targets = self._actions(loaded, plan["mode"], plan["choices"], plan["importer"])
-            if plan["candidates"] != fingerprint(
-                {key: r.model_dump(mode="json") for key, (r, _) in targets.items()}
-            ) or plan["database"] != database_fingerprint(self.store):
-                raise ValueError("计划失效，候选或记忆库发生变化")
-            if rows != plan["records"]:
-                raise ValueError("计划动作变化")
-            if not self.store.uid and not plan["confirm_identity"]:
-                raise ValueError("必须确认这是她的记忆")
-            if any(r["action"] == "conflict" and r["choice"] is None for r in rows):
-                raise ValueError("冲突尚未选择")
-            begin_database(self.store, "materializing")
-            self.store.materialize()
-            from .migration import migrate
+            from clytie.backup.operation_slot import current_slot
+            from clytie.storage.handle import StoreHandle
 
-            migrate(self.store, self.home, self.cid, self.log)
+            if isinstance(self.store, StoreHandle) or (
+                self.source_adapter is not None and current_slot() is not None
+            ):
+                from clytie.api.management_io import owned_snapshot
+                from clytie.memory.store import MemoryStore
+
+                await run_sync(self.store, self._prepare_live)
+                metadata = dict(
+                    clock=self.store.clock,
+                    config=self.store.config,
+                    instance=self.store.instance,
+                    readonly=True,
+                )
+
+                def save_snapshot(path):
+                    source = MemoryStore(path, **metadata)
+                    try:
+                        if database_fingerprint(source) != plan["database"]:
+                            raise ValueError("计划失效，请重新生成")
+                        raw = snapshot(source, self.home, self.cid)
+                        return self._snapshot_raw(raw)
+                    finally:
+                        source.close()
+
+                async with owned_snapshot(self.store, self.home, self.cid) as path:
+                    backup = await file_call(self.store, save_snapshot, path)
+                return await run_sync(self.store, self._apply_loaded, plan, loaded, backup=backup)
+            return await run_sync(self.store, self._apply_loaded, plan, loaded)
+
+    def _prepare_live(self):
+        from .migration import migrate
+
+        begin_database(self.store, "materializing")
+        self.store.materialize()
+        migrate(self.store, self.home, self.cid, self.log)
+
+    def _validate_plan(self, plan):
+        if self.store.transient and self.store.path.exists():
+            raise ValueError("计划失效，记忆库已建立")
+        if (
+            plan["database"] != database_fingerprint(self.store)
+            or plan["configuration"] != self.binding_fingerprint()
+        ):
+            raise ValueError("计划失效，请重新生成")
+
+    def _apply_validated_undo(self, plan):
+        self._validate_plan(plan)
+        return self._apply_undo(plan)
+
+    def _apply_loaded(self, plan, loaded, *, backup=None):
+        self._validate_plan(plan)
+        if loaded["hash"] != plan["source_hash"]:
+            raise ValueError("计划失效，源数据发生变化")
+        rows, targets = self._actions(loaded, plan["mode"], plan["choices"], plan["importer"])
+        if plan["candidates"] != fingerprint(
+            {key: r.model_dump(mode="json") for key, (r, _) in targets.items()}
+        ) or plan["database"] != database_fingerprint(self.store):
+            raise ValueError("计划失效，候选或记忆库发生变化")
+        if rows != plan["records"]:
+            raise ValueError("计划动作变化")
+        if not self.store.uid and not plan["confirm_identity"]:
+            raise ValueError("必须确认这是她的记忆")
+        if any(r["action"] == "conflict" and r["choice"] is None for r in rows):
+            raise ValueError("冲突尚未选择")
+        if backup is None:
+            self._prepare_live()
             backup = self._snapshot()
-            import_id, changes = uuid4().hex, {}
-            begin_database(self.store)
-            with self.store.transaction():
-                if not self.store.uid:
+        import_id, changes = uuid4().hex, {}
+        begin_database(self.store)
+        with self.store.transaction():
+            if not self.store.uid:
+                self.store.set_meta(
+                    "companion_uid", loaded["manifest"]["companion_uid"] or uuid4().hex
+                )
+                if plan["importer"]:
                     self.store.set_meta(
-                        "companion_uid", loaded["manifest"]["companion_uid"] or uuid4().hex
+                        "importer_origin",
+                        {"plugin": plan["importer"], "source": loaded["hash"]},
                     )
-                    if plan["importer"]:
-                        self.store.set_meta(
-                            "importer_origin",
-                            {"plugin": plan["importer"], "source": loaded["hash"]},
+            for row in rows:
+                record_id = row["record_id"]
+                if row["action"] == "skip" or (
+                    row["action"] == "conflict" and row["choice"] == "current"
+                ):
+                    continue
+                target, preserve = targets[record_id]
+                previous = self.store.get_raw(record_id)
+                before_origin = origins.binding(self.store, previous)
+                source = loaded["records"].get(record_id, previous)
+                remote_origin = (
+                    origins.configured(self.store, target.origin_conversation_id)
+                    if plan["importer"]
+                    else loaded["bindings"].get((record_id, source.revision))
+                    if record_id in loaded["records"]
+                    else before_origin
+                )
+                if (
+                    plan["mode"] == "merge"
+                    and not plan["importer"]
+                    and loaded["manifest"].get("version", 0) < 3
+                    and before_origin
+                ):
+                    remote_origin = before_origin
+                if preserve:
+                    for revision in loaded["histories"].get(record_id, []):
+                        if previous and revision["revision"] <= previous.revision:
+                            continue
+                        self.store._save(
+                            MemoryRecord.model_validate_json(revision["data"]),
+                            operator=revision["operator"],
+                            trace=revision["trace"],
+                            reason=revision["reason"],
+                            timestamp=revision["at"],
+                            import_id=import_id,
+                            origin_binding=loaded["bindings"].get(
+                                (record_id, revision["revision"]),
+                                remote_origin
+                                if loaded["manifest"].get("version", 0) < 3
+                                and plan["mode"] == "merge"
+                                else None,
+                            ),
                         )
-                for row in rows:
-                    record_id = row["record_id"]
-                    if row["action"] == "skip" or (
-                        row["action"] == "conflict" and row["choice"] == "current"
-                    ):
-                        continue
-                    target, preserve = targets[record_id]
-                    previous = self.store.get_raw(record_id)
-                    before_origin = origins.binding(self.store, previous)
-                    source = loaded["records"].get(record_id, previous)
-                    remote_origin = (
-                        origins.configured(self.store, target.origin_conversation_id)
-                        if plan["importer"]
-                        else loaded["bindings"].get((record_id, source.revision))
-                        if record_id in loaded["records"]
-                        else before_origin
-                    )
-                    if (
-                        plan["mode"] == "merge"
-                        and not plan["importer"]
-                        and loaded["manifest"].get("version", 0) < 3
-                        and before_origin
-                    ):
-                        remote_origin = before_origin
-                    if preserve:
-                        for revision in loaded["histories"].get(record_id, []):
-                            if previous and revision["revision"] <= previous.revision:
-                                continue
-                            self.store._save(
-                                MemoryRecord.model_validate_json(revision["data"]),
-                                operator=revision["operator"],
-                                trace=revision["trace"],
-                                reason=revision["reason"],
-                                timestamp=revision["at"],
-                                import_id=import_id,
-                                origin_binding=loaded["bindings"].get(
-                                    (record_id, revision["revision"]),
-                                    remote_origin
-                                    if loaded["manifest"].get("version", 0) < 3
-                                    and plan["mode"] == "merge"
-                                    else None,
-                                ),
-                            )
-                        current = self.store.get_raw(record_id)
-                        if current and content_hash(current) != content_hash(target):
-                            target = target.model_copy(update={"revision": current.revision + 1})
-                            self.store._save(
-                                target,
-                                operator="import",
-                                import_id=import_id,
-                                origin_binding=remote_origin,
-                            )
-                    else:
-                        target = target.model_copy(
-                            update={"revision": previous.revision + 1 if previous else 1}
-                        )
+                    current = self.store.get_raw(record_id)
+                    if current and content_hash(current) != content_hash(target):
+                        target = target.model_copy(update={"revision": current.revision + 1})
                         self.store._save(
                             target,
                             operator="import",
                             import_id=import_id,
                             origin_binding=remote_origin,
                         )
-                        for revision in loaded["histories"].get(record_id, []):
-                            self.store.db.execute(
-                                "INSERT OR IGNORE INTO foreign_revisions VALUES(?,?,?,?)",
-                                (
-                                    loaded["hash"],
-                                    record_id,
-                                    revision["revision"],
-                                    canonical(revision),
-                                ),
-                            )
-                    changes[record_id] = {
-                        "before_origin": before_origin,
-                        "after_origin": origins.binding(self.store, self.store.get_raw(record_id)),
-                        "before": previous.model_dump(mode="json") if previous else None,
-                        "after": self.store.get_raw(record_id).model_dump(mode="json"),
-                    }
-                from .fade import state as fade_state
-
-                for row in rows:
-                    rid = row["record_id"]
-                    current = self.store.get_raw(rid)
-                    if current is None:
-                        continue
-                    remote = loaded["fade"].get(rid)
-                    if remote:
-                        at, half = fade_state(self.store, current)
-                        if plan["mode"] == "merge":
-                            at = max(at, datetime.fromisoformat(remote["last_recalled_at"]))
-                            half = max(half, remote["half_life_days"])
-                        else:
-                            at, half = (
-                                datetime.fromisoformat(remote["last_recalled_at"]),
-                                remote["half_life_days"],
-                            )
+                else:
+                    target = target.model_copy(
+                        update={"revision": previous.revision + 1 if previous else 1}
+                    )
+                    self.store._save(
+                        target,
+                        operator="import",
+                        import_id=import_id,
+                        origin_binding=remote_origin,
+                    )
+                    for revision in loaded["histories"].get(record_id, []):
                         self.store.db.execute(
-                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)", (rid, at.isoformat(), half)
-                        )
-                    elif rid in changes:
-                        self.store.db.execute(
-                            "INSERT OR REPLACE INTO fade VALUES(?,?,?)",
+                            "INSERT OR IGNORE INTO foreign_revisions VALUES(?,?,?,?)",
                             (
-                                rid,
-                                self.store.clock.now().isoformat(),
-                                self.store.config.get("memory", {})
-                                .get("fade", {})
-                                .get("half_life_days", 30),
+                                loaded["hash"],
+                                record_id,
+                                revision["revision"],
+                                canonical(revision),
                             ),
                         )
-                self.store.db.execute(
-                    "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
-                )
-                origins.track(self.store)
-                if plan["mode"] == "merge":
-                    self.store.set_meta(
-                        "merged_packages",
-                        sorted(set(self.store.meta("merged_packages", [])) | {loaded["hash"]}),
-                    )
-                for source_event in loaded["audit"]:
-                    self.store.audit(
-                        "memory_imported_audit", source_package=loaded["hash"], event=source_event
-                    )
-                for revision in loaded["foreign_history"]:
+                changes[record_id] = {
+                    "before_origin": before_origin,
+                    "after_origin": origins.binding(self.store, self.store.get_raw(record_id)),
+                    "before": previous.model_dump(mode="json") if previous else None,
+                    "after": self.store.get_raw(record_id).model_dump(mode="json"),
+                }
+            from .fade import state as fade_state
+
+            for row in rows:
+                rid = row["record_id"]
+                current = self.store.get_raw(rid)
+                if current is None:
+                    continue
+                remote = loaded["fade"].get(rid)
+                if remote:
+                    at, half = fade_state(self.store, current)
+                    if plan["mode"] == "merge":
+                        at = max(at, datetime.fromisoformat(remote["last_recalled_at"]))
+                        half = max(half, remote["half_life_days"])
+                    else:
+                        at, half = (
+                            datetime.fromisoformat(remote["last_recalled_at"]),
+                            remote["half_life_days"],
+                        )
                     self.store.db.execute(
-                        "INSERT OR IGNORE INTO foreign_revisions VALUES(?,?,?,?)",
+                        "INSERT OR REPLACE INTO fade VALUES(?,?,?)", (rid, at.isoformat(), half)
+                    )
+                elif rid in changes:
+                    self.store.db.execute(
+                        "INSERT OR REPLACE INTO fade VALUES(?,?,?)",
                         (
-                            revision["package"],
-                            revision["record_id"],
-                            revision["revision"],
-                            revision["data"],
+                            rid,
+                            self.store.clock.now().isoformat(),
+                            self.store.config.get("memory", {})
+                            .get("fade", {})
+                            .get("half_life_days", 30),
                         ),
                     )
-                self._record_import(
-                    import_id,
-                    changes,
-                    importer=plan["importer"],
-                    source_hash=loaded["hash"],
-                    snapshot=backup.name,
+            self.store.db.execute(
+                "DELETE FROM recollect_progress WHERE conversation_id != '!state'"
+            )
+            origins.track(self.store)
+            if plan["mode"] == "merge":
+                self.store.set_meta(
+                    "merged_packages",
+                    sorted(set(self.store.meta("merged_packages", [])) | {loaded["hash"]}),
                 )
-            finish_commit({"import_id": import_id})
-            self._retention()
-            return import_id
+            for source_event in loaded["audit"]:
+                self.store.audit(
+                    "memory_imported_audit", source_package=loaded["hash"], event=source_event
+                )
+            for revision in loaded["foreign_history"]:
+                self.store.db.execute(
+                    "INSERT OR IGNORE INTO foreign_revisions VALUES(?,?,?,?)",
+                    (
+                        revision["package"],
+                        revision["record_id"],
+                        revision["revision"],
+                        revision["data"],
+                    ),
+                )
+            self._record_import(
+                import_id,
+                changes,
+                importer=plan["importer"],
+                source_hash=loaded["hash"],
+                snapshot=backup.name,
+            )
+        finish_commit({"import_id": import_id})
+        self._retention()
+        return import_id
 
     def _record_import(self, import_id, changes, **metadata):
         value = dict(at=self.store.clock.now().isoformat(), changes=changes, **metadata)
         self.store.db.execute("INSERT INTO imports VALUES(?,?)", (import_id, canonical(value)))
+        self.store.mark_backup_dirty()
         self.store.audit("memory_import", import_id=import_id, changed=len(changes))
         transaction_committed(self.store, {"import_id": import_id})
 

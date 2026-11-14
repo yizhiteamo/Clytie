@@ -40,6 +40,10 @@ class Manifest:
     def priority(self) -> int:
         return self.data.get("priority", 100)
 
+    @property
+    def backup_mode(self) -> str:
+        return self.data.get("backup", {}).get("mode", "unsupported")
+
 
 def read_manifest(path: Path, *, repo_root: Path | None = None) -> Manifest:
     reader = _Reader(repo_root)

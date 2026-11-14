@@ -63,7 +63,7 @@ async def test_capabilities_permissions_disabled_no_tools_and_quota(tmp_path):
     conv = event(agent).conversation
     member = Actor(actor_id="member", role="member", channel_id="fake")
     agent.config["permissions"]["member"] = []
-    specs, text = agent.tools(conv, member)
+    specs, text = await agent.tools(conv, member)
     assert not any(s.name == "echo" for s in specs) and "permission" in text
     agent.config["permissions"]["member"] = ["echo"]
     original = agent.declarations
@@ -94,7 +94,8 @@ async def test_capabilities_permissions_disabled_no_tools_and_quota(tmp_path):
     )
     assert agent.reason(member, "echo") is None
     agent.features = agent.features.model_copy(update={"supports_tools": False})
-    assert agent.tools(conv, owner)[0] == [] and "model_no_tools" in agent.tools(conv, owner)[1]
+    specs, states = await agent.tools(conv, owner)
+    assert specs == [] and "model_no_tools" in states
     agent.features = agent.features.model_copy(update={"supports_tools": True})
     plan = agent.host.plan_disable(agent.cid, "echo-tool")
     await agent.host.apply(plan.plan_id)
@@ -176,7 +177,7 @@ async def test_notifications_roll_24_hours_and_owner_peer_exempt(tmp_path):
     for role in ["owner", "peer"]:
         exempt = actor.model_copy(update={"role": role})
         assert not agent.boundary.paused(exempt)
-        specs, _ = agent.tools(event(agent).conversation, exempt)
+        specs, _ = await agent.tools(event(agent).conversation, exempt)
         assert "core_report_boundary" not in [s.name for s in specs]
     await finish(agent)
 

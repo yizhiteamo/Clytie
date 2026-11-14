@@ -6,6 +6,7 @@ import pytest
 
 from clytie.api.auth import APIError
 from clytie.api.management import Management
+from clytie.backup.io_control import IoControl
 from clytie.sdk.testing import MockClock
 from clytie.supervisor.common import read, write
 
@@ -15,6 +16,7 @@ def management(tmp_path):
     svc = SimpleNamespace(
         home=tmp_path,
         clock=clock,
+        backup_io=IoControl(clock),
         companions=["companion_a", "companion_b"],
         rows={c: {"state": "stopped", "inflight_tasks": 2} for c in ("companion_a", "companion_b")},
         setting=lambda group, key, default: default,
@@ -23,7 +25,8 @@ def management(tmp_path):
 
 
 @pytest.mark.parametrize("clear_by", ["save", "restart"])
-async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path, clear_by):
+@pytest.mark.parametrize("cause", ["io", "capture_busy"])
+async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path, clear_by, cause):
     api = management(tmp_path)
     api.svc.notifications = SimpleNamespace(undelivered=0)
     api.svc.rows["companion_a"].update(state="running", restart_count=0)
@@ -41,6 +44,8 @@ async def test_applied_not_saved_status_persists_until_save_or_restart(tmp_path,
         return {"patch": patch}
 
     def fail(*args):
+        if cause == "capture_busy":
+            raise APIError("config_not_writable")
         raise OSError("fictional write failure")
 
     api.transfer = transfer
@@ -347,7 +352,9 @@ async def test_online_management_uncertain_send_keeps_evidence_and_no_second_wri
     child = launcher.children[0][1]
     original = child.send
     received = []
-    intended = {"pid": 7, "started_at": "fictional creation identity"}
+    from clytie.plugin_host.locking import process_identity
+
+    intended = process_identity()
     child.identity = lambda: intended
 
     async def uncertain(message):

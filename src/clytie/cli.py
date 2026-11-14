@@ -21,6 +21,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     supervisor_parser.add_argument("--home")
     supervisor_parser.add_argument("--json", action="store_true")
     supervisor_parser.add_argument("--detach", action="store_true")
+    supervisor_parser.add_argument("--maintenance", action="store_true")
     supervisor_parser.add_argument("--wait-tasks", action="store_true")
     supervisor_parser.add_argument("--yes", action="store_true")
     supervisor_parser.add_argument("value", nargs="?", choices=["on", "off"])
@@ -70,7 +71,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from clytie.api.client import detached_start
                 from clytie.clock import SystemClock
 
-                result = asyncio.run(detached_start(resolve_home(arguments.home), SystemClock()))
+                result = asyncio.run(
+                    detached_start(
+                        resolve_home(arguments.home),
+                        SystemClock(),
+                        maintenance=arguments.maintenance,
+                    )
+                )
                 print(json.dumps(result, ensure_ascii=False))
                 return 0 if result["ok"] else 1
             from clytie.supervisor.entry import run
@@ -84,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             return run(arguments)
         return management_run(arguments)
-    if arguments.command in {"memory", "companion", "boundary", "plugin", "admin"}:
+    if arguments.command in {"memory", "companion", "boundary", "plugin", "admin", "backup"}:
         return management_run(arguments)
     if arguments.command == "task" and supervisor_status(resolve_home(arguments.home))["running"]:
         return management_run(arguments)

@@ -2,7 +2,9 @@
 
 import json
 
+from clytie.backup.coordination import run_sync
 from clytie.plugin_host.support import timed
+from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
 from .retrieval import cosine, vector
 from .store import normalized
@@ -23,7 +25,23 @@ class RetractedGuard:
             self.last_warning = now
             self.log.warning("memory.recollect_semantic_unavailable")
 
-    async def rejected(self, candidates, retracted, cancel):
+    def _cached(self, record, identifier):
+        cached = self.store.db.execute(
+            "SELECT vector FROM vectors WHERE record_id=? AND embedder_id=? AND revision IN (?,?) ORDER BY revision DESC LIMIT 1",
+            (record.record_id, identifier, record.revision, record.revision - 1),
+        ).fetchone()
+        previous = self.store.db.execute(
+            "SELECT data FROM revisions WHERE record_id=? AND revision=?",
+            (record.record_id, record.revision - 1),
+        ).fetchone()
+        return (cached[0] if cached else None, previous[0] if previous else None)
+
+    async def rejected(self, candidates, retracted, cancel, *, persist=None):
+        async def command(function, *args):
+            if persist is not None:
+                return await persist(function, *args)
+            return await run_sync(self.store, function, *args)
+
         cancel.raise_if_cancelled()
         exact = {normalized(r.content) for r in retracted}
         rejected = {i for i, item in enumerate(candidates) if normalized(item.content) in exact}
@@ -36,16 +54,9 @@ class RetractedGuard:
                 raise ValueError("no configured embedder")
             originals = []
             for record in retracted:
-                cached = self.store.db.execute(
-                    "SELECT vector FROM vectors WHERE record_id=? AND embedder_id=? AND revision IN (?,?) ORDER BY revision DESC LIMIT 1",
-                    (record.record_id, identifier, record.revision, record.revision - 1),
-                ).fetchone()
-                previous = self.store.db.execute(
-                    "SELECT data FROM revisions WHERE record_id=? AND revision=?",
-                    (record.record_id, record.revision - 1),
-                ).fetchone()
-                if cached and previous and json.loads(previous[0])["content"] == record.content:
-                    values = vector(json.loads(cached[0]))
+                cached, previous = await command(self._cached, record, identifier)
+                if cached and previous and json.loads(previous)["content"] == record.content:
+                    values = vector(json.loads(cached))
                 else:
                     response = await timed(
                         retrieval.embedder.embed([record.content], cancel), self.store.clock, 30
@@ -72,9 +83,11 @@ class RetractedGuard:
                 for i, values in enumerate(vectors)
                 if any(cosine(values, old) > threshold for old in originals)
             }
+        except (StorageBusy, StorageCancelled, StorageFailed):
+            raise
         except Exception:
             cancel.raise_if_cancelled()
-            self.degraded()
+            await command(self.degraded)
             return rejected
         cancel.raise_if_cancelled()
         return rejected | semantic

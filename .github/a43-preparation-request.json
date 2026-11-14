@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "purpose": "preparation_only_not_measurement",
+  "parent": "0d67f5f4d73bf6da715b534cc43c9811cfc80bb2",
+  "pull_request": 71,
+  "fixture_version": "legal_memory_v2",
+  "seed": 73,
+  "scales": [
+    "small_text",
+    "large_database",
+    "many_small_files",
+    "large_asset"
+  ],
+  "public_sha256": "092af1ed11a0219489dd7c291b6bb7f0dd0bb5fd18506a63881bd09b08b908ed"
+}

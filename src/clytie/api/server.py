@@ -15,6 +15,25 @@ from .auth import APIError, Auth, Identity, csrf
 
 ROUTES = [
     ("GET", "/status"),
+    ("GET", "/backup/status"),
+    ("GET", "/backup/list"),
+    ("POST", "/backup/create"),
+    ("POST", "/backup/verify"),
+    ("GET", "/backup/operations/<operation_id>"),
+    ("POST", "/backup/operations/<operation_id>/cancel"),
+    ("POST", "/backup/restore/plan"),
+    ("POST", "/backup/restore/apply"),
+    ("POST", "/backup/cleanup/plan"),
+    ("POST", "/backup/cleanup/apply"),
+    ("GET", "/backup/cleanup/plans/<plan_id>"),
+    ("GET", "/backup/plans/<kind>/<plan_id>"),
+    ("POST", "/backup/plans/<kind>/<plan_id>/cancel"),
+    ("POST", "/backup/memory/plan"),
+    *[("POST", "/backup/config/" + x) for x in ("plan", "apply")],
+    ("POST", "/backup/restore/source-stopped"),
+    ("POST", "/backup/restore/acknowledge"),
+    ("GET", "/backup/key/fingerprint"),
+    *[("POST", "/backup/key/" + x) for x in ("export", "verify", "acknowledge")],
     *[("POST", "/auth/" + x) for x in ("login", "logout", "reauth")],
     *[("POST", "/admin/" + x) for x in ("password", "logout-all")],
     *[("POST", "/supervisor/" + x) for x in ("stop", "escalate")],
@@ -154,6 +173,11 @@ class Server:
                     clean = {
                         k: v for k, v in data.items() if k not in {"admin_password", "confirm"}
                     }
+                    if route == "/backup/config/apply":
+                        # Server-owned authorization context; never trust a body field.
+                        clean["_backup_config_confirmed"] = data.get("confirm") is True
+                    if route in {"/backup/memory/plan", "/backup/restore/plan"}:
+                        clean["_source_repository_confirmed"] = data.get("confirm") is True
                     result = await self.backend.call(
                         route, params, clean, dict(request.query), request.method
                     )

@@ -3,8 +3,10 @@
 import asyncio
 from uuid import uuid4
 
+from clytie.backup.coordination import run_sync
 from clytie.sdk.types import DeliveryIntent
 
+from .delivery import OwnedFinalization
 from .events import background
 
 
@@ -19,26 +21,35 @@ class Reactions:
             **config.get("emojis", {}),
         }
         self.pending, self.workers, self.changed = {}, {}, {}
+        self.finalizations, self.owners = {}, {}
 
-    def eligible(self, trace):
-        r = self.ledger.get("record", trace)
+    async def eligible(self, trace, *, finalization=None):
+        finalization = finalization or self.finalizations.get(trace)
+        r, event = (
+            await finalization.persist(self._source, trace)
+            if finalization is not None
+            else await run_sync(self.ledger, self._source, trace)
+        )
         if not self.enabled or r["kind"] != "task" or not r["source_event_id"]:
             return False
         if self.audience == "owner" and r["requester"]["role"] != "owner":
             return False
-        event = self.ledger.get("inbound", r["source_event_id"])
         return bool(
             event.get("message")
             and self.delivery.channels[r["channel_id"]].features().supports_react
         )
 
-    def request(self, trace, state):
-        if not self.eligible(trace):
+    async def request(self, trace, state, *, finalization=None):
+        finalization = finalization or self.finalizations.get(trace)
+        if not await self.eligible(trace, finalization=finalization):
             return
         self.pending[trace] = state
         self.changed.setdefault(trace, asyncio.Event()).set()
         if trace not in self.workers:
             self.workers[trace] = background(self._run(trace))
+        if finalization is not None:
+            self.owners[trace] = finalization
+            finalization.track(self.workers[trace])
 
     async def _run(self, trace):
         try:
@@ -61,10 +72,19 @@ class Reactions:
                 await self._send(trace, state)
         finally:
             self.workers.pop(trace, None)
+            self.owners.pop(trace, None)
 
-    async def _send(self, trace, state):
-        r = self.ledger.get("record", trace)
-        event = self.ledger.get("inbound", r["source_event_id"])
+    def _source(self, trace):
+        record = self.ledger.get("record", trace)
+        event = (
+            self.ledger.get("inbound", record["source_event_id"])
+            if record["source_event_id"]
+            else None
+        )
+        return record, event
+
+    def _register(self, trace, state):
+        r, event = self._source(trace)
         previous = [
             i for i in self.ledger.intents(trace) if i["status_reaction"] and i["status"] == "sent"
         ]
@@ -81,19 +101,30 @@ class Reactions:
             trace_id=trace,
         )
         self.ledger.register_intents(trace, [intent], reaction=state)
-        await self.delivery.send_one(intent.intent_id)
+        return intent
+
+    async def _send(self, trace, state):
+        parent = self.owners.get(trace) or self.finalizations.get(trace)
+        finalization = parent or OwnedFinalization(self.delivery)
+
+        async def send():
+            intent = await finalization.persist(self._register, trace, state)
+            await self.delivery.send_one(intent.intent_id, finalization=finalization)
+
+        follow = finalization.follow if parent is not None else finalization.run
+        await follow(send(), cancel=lambda: None)
 
     async def restart(self, interrupted):
         for trace in interrupted:
             previous = [
                 i
-                for i in self.ledger.intents(trace)
+                for i in await run_sync(self.ledger, self.ledger.intents, trace)
                 if i["status_reaction"] and i["status"] == "sent"
             ]
             if (
                 previous
                 and previous[-1]["reaction_state"] in {"accepted", "running"}
-                and self.eligible(trace)
+                and await self.eligible(trace)
             ):
                 # 记录已在重启修正中持久化为 interrupted；下次启动不会再次进入。
                 await self._send(trace, "failed")

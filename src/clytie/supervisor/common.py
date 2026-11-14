@@ -34,8 +34,13 @@ def write(path, value):
 
 
 class Audit:
-    def __init__(self, home, clock):
+    def __init__(self, home, clock, *, rotate_bytes=10 * 1024**2):
+        from clytie.backup.logs import RotatingLogWriter
+
         self.path = Path(home) / "supervisor/audit.jsonl"
+        self.writer = RotatingLogWriter(
+            home, "supervisor/audit.jsonl", rotate_bytes=rotate_bytes, audit=True
+        )
         self.clock = clock
         self.on_entry = None
 
@@ -50,8 +55,6 @@ class Audit:
             source=source,
             **fields,
         )
-        with self.path.open("ab") as stream:
-            stream.write(canonical(value) + b"\n")
-            stream.flush()
+        self.writer.write(canonical(value) + b"\n")
         if self.on_entry:
             self.on_entry(value)

@@ -6,8 +6,17 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from clytie.backup.coordination import run_sync
+from clytie.sdk import Cancelled
 from clytie.sdk.context import RevisionConflict
-from clytie.sdk.types import ChatMessage, TextPart, ToolResult, ToolSpec
+from clytie.sdk.types import ChatMessage, TextPart, ToolCall, ToolResult, ToolSpec
+from clytie.storage.owner import (
+    StorageBusy,
+    StorageCancelled,
+    StorageFailed,
+    cancellable_storage_commit,
+    storage_cancel_scope,
+)
 
 from .fade import reinforce
 from .origins import scope as origin_scope
@@ -132,7 +141,11 @@ class MemoryContext:
         if scene == "stranger_private":
             return []
         try:
-            visible = self.store.project(scene, cid)
+            visible = await run_sync(
+                self.store, self.store.project, scene=scene, conversation_id=cid
+            )
+        except (StorageBusy, StorageCancelled, StorageFailed):
+            raise
         except Exception:
             self.log.warning("memory.projection_failed")
             return []
@@ -169,9 +182,17 @@ class MemoryContext:
             recalled = await self.retrieval.search(
                 query, scene, cid, limit=config.get("recall_limit", 10) + len(selected)
             )
+        except (StorageBusy, StorageCancelled, StorageFailed):
+            raise
         except Exception:
             self.log.warning("memory.retrieval_failed")
             recalled = []
+        scopes = await run_sync(
+            self.store,
+            lambda: {
+                r.record_id: origin_scope(self.store, r) for r in recalled if r.kind == "jargon"
+            },
+        )
         used, count = 0, 0
         for record in recalled:
             if record.record_id in selected or count >= config.get("recall_limit", 10):
@@ -181,7 +202,7 @@ class MemoryContext:
             if record.kind == "jargon":
                 label += (
                     "（这个群里的说法）"
-                    if origin_scope(self.store, record) == cid
+                    if scopes[record.record_id] == cid
                     else "（群里的说法，听懂就好，不主动用）"
                 )
             if used + len(label) > config.get("recall_chars", 3000):
@@ -191,12 +212,17 @@ class MemoryContext:
             selected.add(record.record_id)
             used += len(label)
             count += 1
-        reinforce(self.store, [r for r in visible if r.record_id in selected])
+        await run_sync(
+            self.store,
+            lambda: reinforce(self.store, [r for r in visible if r.record_id in selected]),
+        )
         return [ChatMessage(role="system", parts=[TextPart(text="记忆：\n" + "\n".join(lines))])]
 
-    def guard(self, text, scene):
+    async def guard(self, text, scene):
         try:
-            return self._guard(text, scene)
+            return await run_sync(self.store, self._guard, text, scene=scene)
+        except (StorageBusy, StorageCancelled, StorageFailed):
+            raise
         except Exception:
             self.log.warning("memory.guard_failed")
             return True
@@ -220,7 +246,10 @@ class MemoryContext:
                 return True
         return False
 
-    def task_recall(self, query, conversation):
+    async def task_recall(self, query, conversation):
+        return await run_sync(self.store, lambda: self._task_recall(query, conversation))
+
+    def _task_recall(self, query, conversation):
         if self.ledger is None:
             return []
         from clytie.kernel.projection import visible
@@ -272,22 +301,80 @@ class MemoryContext:
                 rows.append((datetime.fromisoformat(record["created_at"]), display))
         return [text for _, text in sorted(rows, reverse=True)[:10]]
 
-    async def execute(self, trace, conversation, actor, call, cancel):
+    async def execute(self, trace, conversation, actor, call, cancel, *, finalization=None):
+        session = self.session(trace)
+        cancel.raise_if_cancelled()
+        rows, failure = [], None
+        if call.tool == "core_recall":
+            try:
+                if session.recalls >= 3:
+                    raise ValueError("本次回复的回想次数已用完")
+                session.recalls += 1
+                rows = await self.retrieval.search(
+                    call.arguments["query"],
+                    scene=conversation.scene,
+                    conversation_id=conversation.conversation_id,
+                    limit=10,
+                    cancel=cancel,
+                    include_frozen=True,
+                )
+            except (StorageBusy, StorageCancelled, StorageFailed):
+                raise
+            except Exception as exc:
+                failure = exc
+
+        # 同一门闩覆盖记忆提交和账本审计；两个数据库仍各自真实提交。
+        async def persist(function, *args, **kwargs):
+            if finalization is not None:
+                return await finalization.persist(function, *args, **kwargs)
+            return await run_sync(self.store, function, *args, **kwargs)
+
+        def execute(trace, conversation, actor, call, rows, references, **_):
+            try:
+                with cancellable_storage_commit(cancel):
+                    return self._execute(
+                        trace,
+                        conversation,
+                        actor,
+                        ToolCall.model_validate(call),
+                        cancel,
+                        rows,
+                        failure,
+                        references,
+                    )
+            except Cancelled:
+                return None
+
+        with storage_cancel_scope(cancel):
+            result = await persist(
+                execute,
+                trace,
+                conversation,
+                actor,
+                call.model_dump(mode="json"),
+                rows,
+                dict(session.references),
+                scene=conversation.scene,
+                conversation_id=conversation.conversation_id,
+            )
+        if result is None:
+            cancel.raise_if_cancelled()
+        if result.status == "ok" and call.tool != "core_recall" and self.changed:
+            self.changed()
+        return result
+
+    def _execute(self, trace, conversation, actor, call, cancel, rows, failure, references):
         session = self.session(trace)
         cancel.raise_if_cancelled()
         args = dict(call.arguments)
         scope = dict(scene=conversation.scene, conversation_id=conversation.conversation_id)
         try:
+            if failure is not None:
+                raise failure
             if call.tool == "core_recall":
-                if session.recalls >= 3:
-                    raise ValueError("本次回复的回想次数已用完")
-                session.recalls += 1
-                rows = await self.retrieval.search(
-                    args["query"], **scope, limit=10, cancel=cancel, include_frozen=True
-                )
                 lines = [self.label(r, session) for r in rows]
                 reinforce(self.store, rows)
-                lines.extend(self.task_recall(args["query"], conversation))
+                lines.extend(self._task_recall(args["query"], conversation))
                 content = "\n".join(lines) or "记忆和任务记录里都没有找到相关的事"
             else:
                 if actor is None or actor.role != "owner":
@@ -303,10 +390,10 @@ class MemoryContext:
                 if reference is not None:
                     if (
                         not re.fullmatch(r"\[记忆[1-9][0-9]*\]", reference)
-                        or reference not in session.references
+                        or reference not in references
                     ):
                         raise KeyError("找不到这条记忆")
-                    key, revision = session.references[reference]
+                    key, revision = references[reference]
                     changes = (
                         {"retracted": True}
                         if call.tool == "core_forget"
@@ -348,10 +435,10 @@ class MemoryContext:
                         explicit=args.get("explicit", False),
                         trace=trace,
                     )
-                if self.changed:
-                    self.changed()
                 content = "记下了" if call.tool == "core_remember" else "已经不会再提了"
             status, error = "ok", None
+        except (StorageBusy, StorageCancelled, StorageFailed):
+            raise
         except RevisionConflict:
             self.log.warning("memory.revision_conflict", tool=call.tool)
             content, status, error = (

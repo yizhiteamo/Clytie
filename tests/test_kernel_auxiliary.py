@@ -139,12 +139,12 @@ async def test_cancelled_queued_record_is_never_executed(tmp_path):
     r, inv, event = await new_record(kernel)
     other, _, _ = await new_record(kernel, name="other")
     gate, ran = asyncio.Event(), []
-    first = kernel.submit(r["trace_id"], inv.actor, gate.wait)
+    first = await kernel.submit(r["trace_id"], inv.actor, gate.wait)
 
     async def later():
         ran.append(True)
 
-    second = kernel.submit(other["trace_id"], inv.actor, later)
+    second = await kernel.submit(other["trace_id"], inv.actor, later)
     await clock.drain()
     assert await kernel.cancel("companion_a", inv.actor, "test_group") == "cancelled"
     gate.set()

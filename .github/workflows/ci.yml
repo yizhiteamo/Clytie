@@ -12,6 +12,8 @@ jobs:
   offline:
     name: offline (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    env:
+      CLYTIE_BENCHMARK_RUNNER_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +21,8 @@ jobs:
         python: ["3.10"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
@@ -41,7 +45,15 @@ jobs:
       - name: API and management subprocess smoke
         run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
-        run: uv run --no-sync pytest
+        id: offline_tests
+        # Preserve per-case outcomes for the local mechanism evidence map.
+        # This is the same suite; no additional runs or public artifacts.
+        run: uv run --no-sync pytest -v
+      # Issue #72: the approved next measurement is a frozen, one-time mechanism
+      # round followed by one three-arm matrix. A normal PR push must not rerun it.
+      # Keep prior scripts/results; this functional CI is not performance acceptance.
+      - name: Performance acceptance remains pending
+        run: python -c "print('A4.3 mechanism and frozen matrix pending; functional CI only')"
       - name: Validate fictional home
         run: uv run --no-sync python -m clytie status --home examples/home --json
       - name: Build wheel and source distribution

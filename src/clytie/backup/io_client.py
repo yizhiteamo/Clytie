@@ -1,0 +1,179 @@
+"""同步重 I/O 的分块客户端；预算只由既有控制通道的实例调度器授予。"""
+
+import asyncio
+import os
+import stat
+import threading
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
+from functools import wraps
+from inspect import signature
+from uuid import uuid4
+
+from .io_budget import CHUNK, IoBudgetError
+
+_client = ContextVar("backup_io_client", default=None)
+_stage = ContextVar("backup_io_stage", default=None)
+_checks = ContextVar("backup_io_checks", default=())
+
+
+@contextmanager
+def io_checks(check):
+    checks = _checks.get()
+    # Nested helpers often receive the same trusted cancellation/space callback.
+    # Keep every checkpoint and every distinct check, without repeating one
+    # callback merely because the call stack has more helper layers.
+    if any(existing is check for existing in checks):
+        yield
+        return
+    binding = _checks.set((*checks, check))
+    try:
+        yield
+    finally:
+        _checks.reset(binding)
+
+
+def checkpoint():
+    for check in _checks.get():
+        check()
+
+
+@contextmanager
+def io_scope(client):
+    binding = _client.set(client)
+    try:
+        yield
+    finally:
+        _client.reset(binding)
+
+
+def current_client():
+    return _client.get()
+
+
+def current_checks():
+    """文件执行者只转交明确的可信检查，不复制调用方的任意上下文。"""
+    return _checks.get()
+
+
+class IoClient:
+    def __init__(self, request, *, connected=None):
+        # request 与原操作/真实执行者绑定；不能携带客户端选择的其他执行者。
+        self.request = request
+        self.connected = connected
+
+    def check_available(self):
+        if self.connected is not None:
+            self.connected()
+
+    def _request(self, arguments):
+        checkpoint()
+        result = self.request(arguments)
+        checkpoint()
+        return result
+
+    @contextmanager
+    def stage(self):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise IoBudgetError("backup_io_on_event_loop")
+        existing = _stage.get()
+        if existing is not None:
+            if existing["client"] is not self or existing["thread"] != threading.get_ident():
+                raise IoBudgetError("backup_io_stage_context_mismatch")
+            # 管理操作仅复用已明确交接的借用权；不得在 Owner 内重新准入。
+            yield
+            return
+        key = uuid4().hex
+        state = {"client": self, "id": key, "thread": threading.get_ident(), "sequence": 0}
+        binding = _stage.set(state)
+        try:
+            try:
+                self._request({"action": "acquire", "stage": key})
+                yield
+            except BaseException as original:
+                try:
+                    self.request({"action": "release", "stage": key}, cleanup=True)
+                except IoBudgetError as cleanup_error:
+                    # The parent retains unconfirmed occupancy until actual exit.
+                    # Losing the cleanup pipe cannot change accepted cancellation.
+                    raise original from cleanup_error
+                raise
+            else:
+                self.request({"action": "release", "stage": key}, cleanup=True)
+        finally:
+            _stage.reset(binding)
+
+    def charge(self, direction, size):
+        state = _stage.get()
+        if state is None:
+            raise IoBudgetError("backup_io_stage_required")
+        if state["client"] is not self or state["thread"] != threading.get_ident():
+            raise IoBudgetError("backup_io_stage_context_mismatch")
+        state["sequence"] += 1
+        self._request(
+            {
+                "action": "charge",
+                "stage": state["id"],
+                "sequence": state["sequence"],
+                "direction": direction,
+                "size": size,
+            }
+        )
+
+
+def heavy_io(function):
+    """只用于同步门闩外阶段；必要发布/恢复收尾不得标此装饰器。"""
+    if asyncio.iscoroutinefunction(function):
+        raise TypeError("backup_io_async_stage_forbidden")
+    parameters = signature(function)
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        client = current_client()
+        if client is None:
+            return function(*args, **kwargs)
+        check = parameters.bind(*args, **kwargs).arguments.get("check")
+        with io_checks(check) if callable(check) else nullcontext(), client.stage():
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+def io_read(stream, count):
+    client = current_client()
+    if client is None:
+        return stream.read(count)
+    if type(count) is not int or count < 0:
+        raise IoBudgetError("backup_io_unbounded_read")
+    parts = []
+    while count:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise IoBudgetError("backup_io_file_required")
+        amount = min(CHUNK, count, max(0, info.st_size - stream.tell()))
+        if not amount:
+            break
+        client.charge("read", amount)
+        block = stream.read(amount)
+        if len(block) != amount:
+            raise IoBudgetError("backup_io_source_changed")
+        parts.append(block)
+        count -= amount
+    return b"".join(parts)
+
+
+def io_write(stream, data):
+    client = current_client()
+    if client is None:
+        return stream.write(data)
+    value = memoryview(data)
+    for offset in range(0, len(value), CHUNK):
+        block = value[offset : offset + CHUNK]
+        client.charge("write", len(block))
+        if stream.write(block) != len(block):
+            raise IoBudgetError("backup_io_short_write")
+    return len(value)
