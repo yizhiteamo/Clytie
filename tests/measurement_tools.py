@@ -3,6 +3,7 @@
 from tests.test_measurement_evidence import load_tool
 
 DEPENDENCIES = {
+    "measurement_mechanism_plan": ("measurement_launch",),
     "measurement_wal_validation": ("measurement_pressure_observation",),
     "measurement_plan_ingress": (
         "measurement_mechanism_plan",

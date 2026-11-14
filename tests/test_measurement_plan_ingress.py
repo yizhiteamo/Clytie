@@ -264,7 +264,7 @@ def test_local_failures_never_return_publishable_record(setup, failure):
 
 
 @pytest.mark.parametrize(
-    "damage", ["bytes", "hash", "missing_record", "run", "attempt", "public_repo"]
+    "damage", ["bytes", "hash", "missing_record", "run", "attempt", "unknown_repo_visibility"]
 )
 def test_ci_binding_fail_closed(setup, damage):
     s = setup
@@ -299,7 +299,7 @@ def test_ci_binding_fail_closed(setup, damage):
     elif damage in {"run", "attempt"}:
         s["env"]["GITHUB_RUN_ID" if damage == "run" else "GITHUB_RUN_ATTEMPT"] = "2"
     else:
-        s["repository"] = lambda: dict(full_name=m.base.REPOSITORY, private=False)
+        s["repository"] = lambda: dict(full_name=m.base.REPOSITORY, private=None)
     with pytest.raises(ValueError):
         m.accept_ci(s["repo"], b, s["env"], {}, event=s["event"], repository=s["repository"])
 
@@ -333,7 +333,7 @@ def test_ci_event_single_field_mismatch(setup, change):
     elif change in {"fork", "private", "repo"}:
         key, value = {
             "fork": ("fork", True),
-            "private": ("private", False),
+            "private": ("private", None),
             "repo": ("full_name", "fictional/other"),
         }[change]
         s["event"]["pull_request"]["head"]["repo"][key] = value
@@ -506,3 +506,19 @@ def test_actual_material_bytes_are_separate_from_current_product_head(setup):
     (s["repo"] / "scripts/measurement_fixture.py").write_bytes(b"changed fictional tool")
     with pytest.raises(ValueError):
         actual.materials(s["repo"], value, directories)
+
+
+def test_public_same_repository_fixed_admission_remains_required(setup):
+    s = setup
+    s["repository"] = lambda: dict(full_name=s["m"].base.REPOSITORY, private=False)
+    for repo in (
+        s["event"]["repository"],
+        s["event"]["pull_request"]["head"]["repo"],
+        s["event"]["pull_request"]["base"]["repo"],
+    ):
+        repo["private"] = False
+    b = authorize(s)
+    result, _ = s["m"].accept_ci(
+        s["repo"], b, s["env"], {}, event=s["event"], repository=s["repository"]
+    )
+    assert result == s["frozen"]

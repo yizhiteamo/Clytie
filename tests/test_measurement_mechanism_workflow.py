@@ -152,13 +152,10 @@ def setup(module, monkeypatch, tmp_path):
         (target / "measurements.age").write_bytes(b"fictional sealed output")
         (target / "receipt.json").write_text("{}")
 
-    def gate(target, *, repository):
-        value = repository()
-        calls.append(("private", value["private"]))
-        m.preparation._private(lambda: value)
+    def gate(target):
         return [str(target / name) for name in ("measurements.age", "receipt.json")]
 
-    monkeypatch.setattr(m.transport, "upload_gate", gate)
+    monkeypatch.setattr(m.transport, "validate_sealed", gate)
     return locals()
 
 
@@ -244,9 +241,11 @@ def test_network_requires_explicit_executor_and_token_stays_out_of_argv(
     assert "GIT_CONFIG_VALUE_1" in kw["env"]
 
 
-def test_slots_follow_frozen_order_and_publish_exact_cipher_pair(setup):
+@pytest.mark.parametrize("public", [False, True])
+def test_slots_follow_frozen_order_and_publish_exact_cipher_pair(setup, public):
     s = setup
     m = s["m"]
+    s["repository"] = lambda: dict(full_name=m.transport.REPOSITORY, private=not public)
     for ordinal in range(4):
         result = m.run_slot(
             s["tmp_path"],
@@ -307,7 +306,7 @@ def test_failed_raw_preserved_without_retry_or_plaintext_upload(setup, failure):
             raise ValueError("failed seal")
 
     if failure == "private":
-        observations = iter((True, False))
+        observations = iter((True, None))
 
         def repository():
             return dict(full_name=m.transport.REPOSITORY, private=next(observations))

@@ -198,10 +198,11 @@ def test_retention_is_observed_not_assumed():
         transport.retention({**meta, "expires_at": None}, run_id=7)
 
 
-def test_download_keeps_actual_retention_and_cipher_hashes(sealed, tmp_path, monkeypatch):
+@pytest.mark.parametrize("private", [True, False])
+def test_download_keeps_actual_retention_and_cipher_hashes(sealed, tmp_path, monkeypatch, private):
     def github(endpoint):
         if endpoint == "repos/yizhiteamo/Clytie":
-            return {"full_name": "yizhiteamo/Clytie", "private": True}
+            return {"full_name": "yizhiteamo/Clytie", "private": private}
         return {
             "id": 9,
             "name": "a43-encrypted-fixture",
@@ -305,3 +306,16 @@ def test_seal_never_loads_local_identity_or_private_scanner(sealed, monkeypatch)
         )
         == 2
     )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"full_name": "fictional/other", "private": False},
+        {"full_name": "yizhiteamo/Clytie", "private": None},
+    ],
+)
+def test_measurement_repository_unknown_or_other_rejected(metadata):
+    with pytest.raises(evidence.EvidenceError):
+        transport.measurement_repository(lambda: metadata)
