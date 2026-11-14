@@ -32,7 +32,7 @@ def binding(env, product, tool, *, git, system):
         or env.get("GITHUB_ACTIONS") != "true"
         or env.get("GITHUB_REPOSITORY") != "yizhiteamo/Clytie"
         or env.get("GITHUB_RUN_ATTEMPT") != "1"
-        or env.get("GITHUB_RUN_NUMBER") != "1"
+        or env.get("GITHUB_RUN_NUMBER") != "2"
         or env.get("GITHUB_REF") != "refs/heads/main"
         or env.get("GITHUB_WORKFLOW_REF") != WORKFLOW
         or product != PRODUCT
@@ -91,10 +91,16 @@ def main(argv=None):
         sqlite=sqlite3.sqlite_version,
     )
     recipient = public["recipient"]
+    temporary = archive.prep._safe(Path(os.environ["RUNNER_TEMP"]))
+    parent = temporary / "a43-environment"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    archive.prep._safe(parent)
+    if parent.resolve().parent != temporary.resolve():
+        raise ValueError("environment_output_outside_temporary_root")
     archive.seal(
         runtime,
         expected,
-        Path(os.environ["RUNNER_TEMP"]) / "a43-environment" / expected["platform"],
+        parent / expected["platform"],
         recipient,
     )
     # The dedicated workflow uploads exactly the two fixed files, only after success.
