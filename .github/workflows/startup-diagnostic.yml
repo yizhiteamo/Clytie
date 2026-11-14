@@ -15,7 +15,7 @@ jobs:
     if: >-
       github.repository == 'yizhiteamo/Clytie' &&
       github.ref == 'refs/heads/main' &&
-      github.run_number == 1 && github.run_attempt == 1
+      github.run_number == 2 && github.run_attempt == 1
     runs-on: windows-latest
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 003a001d7078513d360d19e1a400c52d990451e2
+          ref: 23b0c773529c8f0957a0b5c818bfe0cdcf8a42dc
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
@@ -37,15 +37,11 @@ jobs:
       - name: Verify exact test candidate
         run: >-
           python -c "import subprocess;
-          expected='003a001d7078513d360d19e1a400c52d990451e2';
+          expected='23b0c773529c8f0957a0b5c818bfe0cdcf8a42dc';
           actual=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip();
           assert actual==expected;
           assert not subprocess.check_output(['git','diff','--name-only']);
           print('startup_diagnostic_candidate='+actual)"
       - name: One targeted diagnostic invocation
         run: >-
-          uv run --no-sync pytest -p tests.startup_diagnostic_plugin -q -s --tb=no
-          tests/test_backup_maintenance.py::test_real_maintenance_empty_or_invalid_home_never_starts_business
-          tests/test_api_startup_read.py::test_read_denial_then_readiness_sends_one_ack
-          tests/test_api_startup_read.py::test_other_read_io_errors_fail_explicitly_without_retry
-          tests/test_api_startup_read.py::test_real_windows_read_denial_then_release_without_permission_changes
+          uv run --no-sync python -m scripts.startup_diagnostic
