@@ -112,6 +112,13 @@ def prepare_manifest(frozen, execution_id, *, source_inventory, tools, runtime, 
         plan_tools.digest(runtime) == expected["environments"][row["platform"]],
         "mechanism_environment_mismatch",
     )
+    return _manifest(frozen, row, runtime=runtime, workflow=workflow, phase="mechanism")
+
+
+def _manifest(frozen, row, *, runtime, workflow, phase):
+    """Shared serialization only; callers must perform their own scope checks."""
+    expected = frozen["inputs"]["inventory"]
+    execution_id = row["execution_id"]
     metrics = copy.deepcopy(frozen["inputs"]["geometry"][row["platform"]]["scales"][row["scale"]])
     # No backup exists at preparation. Geometry values are frozen inputs, not
     # claims of observations from this execution; result remains incomplete.
@@ -130,7 +137,7 @@ def prepare_manifest(frozen, execution_id, *, source_inventory, tools, runtime, 
         scale=row["scale"],
         group=row["group"],
         arm=row["arm"],
-        phase="mechanism",
+        phase=phase,
         plan_sha256=frozen["plan_sha256"],
         parameters=copy.deepcopy(frozen["parameters"]),
         load=copy.deepcopy(row["window"]["load"]),
