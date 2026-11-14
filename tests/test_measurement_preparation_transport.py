@@ -262,6 +262,39 @@ def ci_fixture(tmp_path, monkeypatch):
     return source, binding, public, env, root, version
 
 
+@pytest.mark.parametrize("mode", ["legacy", "original"])
+def test_fixed_old_archive_identity_is_explicit_and_preparation_stays_candidate_only(
+    tmp_path, monkeypatch, mode
+):
+    _, binding, _, _, root, version = ci_fixture(tmp_path, monkeypatch)
+    original_git = transport.versions._git
+    candidate = binding["candidate"]
+    archive = original_git(root, "archive", "--format=tar", candidate)
+    commit = {"legacy": transport.versions.LEGACY, "original": transport.versions.ORIGINAL}[mode]
+    path = version / "source-inventory.json"
+    inventory = json.loads(path.read_bytes())
+    inventory.update(mode=mode, source_commit=commit)
+    path.write_bytes(transport.prep.canonical(inventory))
+    calls = []
+
+    def git(repository, *args):
+        calls.append(args)
+        assert repository == root and args == ("archive", "--format=tar", commit)
+        return archive
+
+    monkeypatch.setattr(transport.versions, "_git", git)
+    result = transport.fixed_source_identity(root, version, candidate, mode=mode)
+    assert result["source_inventory_sha256"] == transport.prep.plan.digest(inventory)
+    assert calls == [("archive", "--format=tar", commit)]
+    with pytest.raises(transport.Error, match="source_identity_mismatch"):
+        transport.material_identity(root, version, candidate)
+    (version / "source" / "fictional.py").write_bytes(b"forged = True\n")
+    inventory["files"]["fictional.py"] = transport.prep.digest(b"forged = True\n")
+    path.write_bytes(transport.prep.canonical(inventory))
+    with pytest.raises(transport.Error, match="source_identity_mismatch"):
+        transport.fixed_source_identity(root, version, candidate, mode=mode)
+
+
 def ci_call(tmp_path, monkeypatch, *, change=None):
     source, binding, public, env, root, version = ci_fixture(tmp_path, monkeypatch)
     if change:

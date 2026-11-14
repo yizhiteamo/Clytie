@@ -99,3 +99,90 @@ def test_unverified_matrix_cannot_be_frozen():
     assert "mechanism_pass_evidence_missing" in draft["gaps"]
     with pytest.raises(ValueError):
         plan.freeze_plan(draft)
+
+
+def registered(tmp_path, monkeypatch):
+    data = prepared()
+    monkeypatch.setattr(matrix, "ROOT", tmp_path)
+    workflow = dict(run_id=123, attempt=1, jobs=matrix.jobs(data[0]))
+    matrix.register_plan(data[0], workflow)
+    return data, workflow
+
+
+def test_matrix_registration_has_24_fixed_serial_groups(tmp_path, monkeypatch):
+    data, workflow = registered(tmp_path, monkeypatch)
+    jobs = matrix.jobs(data[0])
+    assert len(jobs) == 24 and len(set(jobs.values())) == 24
+    assert list(jobs) == [matrix.group_key(row) for row in data[0]["runs"] if row["position"] == 0]
+    assert matrix.register_plan(data[0], workflow)["workflow"] == workflow
+    with pytest.raises(ValueError):
+        matrix.register_plan(data[0], dict(workflow, run_id=124))
+
+
+def test_matrix_slot_claim_is_exclusive_and_group_ordered(tmp_path, monkeypatch):
+    data, workflow = registered(tmp_path, monkeypatch)
+    frozen = data[0]
+
+    def inputs(index):
+        kwargs = arguments(data, index)
+        kwargs["workflow"] = dict(
+            run_id=123, attempt=1, job_id=workflow["jobs"][matrix.group_key(frozen["runs"][index])]
+        )
+        return kwargs
+
+    with pytest.raises(ValueError, match="earlier_slot_not_complete"):
+        matrix.register_started(frozen, frozen["runs"][1]["execution_id"], **inputs(1))
+    first = frozen["runs"][0]["execution_id"]
+    manifest = matrix.register_started(frozen, first, **inputs(0))
+    with pytest.raises(ValueError, match="already_started"):
+        matrix.register_started(frozen, first, **inputs(0))
+    # Driver success by itself is not a completed encrypted handoff.
+    with pytest.raises(ValueError, match="earlier_slot_not_complete"):
+        matrix.register_started(frozen, frozen["runs"][1]["execution_id"], **inputs(1))
+    assert manifest["job_id"] == workflow["jobs"][matrix.group_key(frozen["runs"][0])]
+
+
+def test_matrix_registration_rejects_retries_and_changed_jobs(tmp_path, monkeypatch):
+    data = prepared()
+    monkeypatch.setattr(matrix, "ROOT", tmp_path)
+    jobs = matrix.jobs(data[0])
+    for workflow in (
+        dict(run_id=123, attempt=2, jobs=jobs),
+        dict(run_id=123, attempt=1, jobs=dict(jobs, extra="matrix_other")),
+        dict(run_id=True, attempt=1, jobs=jobs),
+    ):
+        with pytest.raises(ValueError):
+            matrix.register_plan(data[0], workflow)
+
+
+@pytest.mark.parametrize("changed", [None, "plan_sha256", "manifest_sha256", "workflow", "state"])
+def test_next_arm_requires_exact_previous_handoff(tmp_path, monkeypatch, changed):
+    data, workflow = registered(tmp_path, monkeypatch)
+    frozen = data[0]
+    rows = frozen["runs"]
+    kwargs = arguments(data, 0)
+    kwargs["workflow"] = dict(
+        run_id=123, attempt=1, job_id=workflow["jobs"][matrix.group_key(rows[0])]
+    )
+    manifest = matrix.register_started(frozen, rows[0]["execution_id"], **kwargs)
+    record = dict(
+        format=1,
+        plan_sha256=frozen["plan_sha256"],
+        execution_id=rows[0]["execution_id"],
+        manifest_sha256=plan.digest(manifest),
+        state="driver_success_encrypted_pending_verification",
+        workflow=kwargs["workflow"],
+    )
+    if changed:
+        record[changed] = "fictional_invalid"
+    # Synthetic local handoff; this test does not grant production admission.
+    matrix.mechanism._write_exclusive(
+        matrix._registry() / (rows[0]["execution_id"] + ".completed.json"), record
+    )
+    if changed:
+        with pytest.raises(ValueError, match="earlier_slot_not_complete"):
+            matrix.register_started(frozen, rows[1]["execution_id"], **kwargs)
+    else:
+        next_manifest = matrix.register_started(frozen, rows[1]["execution_id"], **kwargs)
+        assert next_manifest["execution"]["position"] == 1
+        assert next_manifest["job_id"] == manifest["job_id"]
