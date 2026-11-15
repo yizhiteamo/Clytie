@@ -58,6 +58,18 @@ class OpenAIBackend:
         if not valid:
             raise self._error("invalid_request")
         self.base_url = self.base_url.rstrip("/")
+        self.options = {key: config[key] for key in ("quality", "size") if key in config}
+        if "quality" in self.options and self.options["quality"] not in (
+            "low",
+            "medium",
+            "high",
+            "auto",
+        ):
+            raise self._error("invalid_request")
+        if "size" in self.options and (
+            not isinstance(self.options["size"], str) or not 1 <= len(self.options["size"]) <= 64
+        ):
+            raise self._error("invalid_request")
 
     def _error(self, code, *, http_status=None, credential_code=None):
         error = BackendError(code)
@@ -72,7 +84,13 @@ class OpenAIBackend:
     def _fields(self, prompt):
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32_000:
             raise self._error("invalid_request")
-        return {"model": self.model, "prompt": prompt, "n": 1, "output_format": "png"}
+        return {
+            "model": self.model,
+            "prompt": prompt,
+            "n": 1,
+            "output_format": "png",
+            **self.options,
+        }
 
     async def generate(self, prompt, cancel):
         cancel.raise_if_cancelled()

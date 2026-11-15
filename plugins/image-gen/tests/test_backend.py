@@ -102,6 +102,75 @@ async def test_edit_multipart(module):
     assert fields["image[]"].get_content_type() == "image/png"
     assert fields["prompt"].get_payload(decode=True) == b"add clouds"
     assert fields["model"].get_payload(decode=True) == b"test-image-model"
+    assert "quality" not in fields and "size" not in fields
+
+
+@pytest.mark.parametrize(
+    "options", [{}, {"quality": "high"}, {"size": "1234x567"}, {"quality": "auto", "size": "auto"}]
+)
+async def test_optional_image_fields_generate_and_edit(module, options):
+    ctx, _ = setup(module)
+    backend = module.OpenAIBackend(
+        ctx, {"model": "test-image-model", "api_key_ref": "image_test", **options}
+    )
+    await backend.generate("fictional garden", CancelToken())
+    generated = json.loads(ctx.http.calls[-1][2]["body"])
+    await backend.edit("add clouds", PNG, "image/png", CancelToken())
+    args = ctx.http.calls[-1][2]
+    message = BytesParser(policy=policy.default).parsebytes(
+        b"Content-Type: " + args["headers"]["Content-Type"].encode() + b"\r\n\r\n" + args["body"]
+    )
+    edited = {
+        part.get_param("name", header="Content-Disposition"): part.get_payload(decode=True).decode()
+        for part in message.iter_parts()
+        if part.get_param("name", header="Content-Disposition") != "image[]"
+    }
+    for field in ("quality", "size"):
+        if field in options:
+            assert generated[field] == edited[field] == options[field]
+        else:
+            assert field not in generated and field not in edited
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("quality", 1),
+        ("quality", None),
+        ("quality", "other"),
+        ("size", 1),
+        ("size", None),
+        ("size", ""),
+        ("size", "x" * 65),
+    ],
+)
+def test_invalid_image_options_config(field, value):
+    from jsonschema import Draft202012Validator
+
+    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text(encoding="utf-8"))
+    config = {
+        "backends": [{"model": "test-image-model", "api_key_ref": "image_test", field: value}]
+    }
+    assert list(Draft202012Validator(manifest["config"]).iter_errors(config))
+
+
+@pytest.mark.parametrize("quality", ["low", "medium", "high", "auto"])
+@pytest.mark.parametrize("size", ["x", "x" * 64, "1234x567", "auto"])
+def test_valid_image_options_config(quality, size):
+    from jsonschema import Draft202012Validator
+
+    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text(encoding="utf-8"))
+    config = {
+        "backends": [
+            {
+                "model": "test-image-model",
+                "api_key_ref": "image_test",
+                "quality": quality,
+                "size": size,
+            }
+        ]
+    }
+    Draft202012Validator(manifest["config"]).validate(config)
 
 
 @pytest.mark.parametrize(
