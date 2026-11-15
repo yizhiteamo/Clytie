@@ -213,14 +213,14 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 **范围**
 1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。预期账号用 `ctx.identity.self_account()` 读取（ADR 0032）；未绑定账号时 `start` 抛出 `PluginUnavailable("auth_invalid")`。连上后用 `get_login_info` 取协议端登录的账号，与预期账号按字符串比较；不一致就断开，状态为 `auth_invalid`，在重启前不再重连。之后每个事件的 `self_id` 也要等于预期账号，不等的事件丢弃并计数。断线后按退避间隔重连，上限来自配置。
-2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。发送者等于预期账号的消息不进入对话。消息段映射：`text`→text，`at`→mention（`qq` 等于预期账号时 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
+2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。发送者等于预期账号的消息不进入对话。消息段映射：`text`→text，`at`→mention（`qq` 等于预期账号时 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。`file` 和 `mface` 不是标准消息段，按兼容契约第 3 节处理。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
 3. **出站**：用 `send_private_msg` 或 `send_group_msg` 发送消息段数组，用 `echo` 对应请求和回复。收据按 kernel-spec §5–§6 判定：
    - `status=ok` 且带 `message_id`：`sent`；
-   - 协议端明确返回失败：`failed`，并按返回码分为 `rate_limited`、`transient` 或永久错误；
+   - 协议端明确返回失败：`failed`。只有配置 `retcode_classes` 里列出的返回码算 `rate_limited` 或 `transient`，其余都是永久错误（默认配置为空，见 [qq-onebot 兼容契约](plugins/qq-onebot-compat.md) 第 5 节）；
    - 超时、断线、`echo` 对不上、成功回复里没有 `message_id`：`unknown`，不重发。
 
    超出 `media_limits` 的产物由插件拒绝，记为 `failed`。
-4. **表情回应**：用 `set_msg_emoji_like` 映射 👌⏳✅❌，表情编号来自配置。协议端不支持这个动作时，`features().supports_react = false`；运行中收到"不支持"的回复时降级并记录，不报错退出。
+4. **表情回应**：用 `set_msg_emoji_like` 映射 👌⏳✅❌，表情编号来自配置。请求字段、"不支持"的判定和降级规则见兼容契约第 2 节；不报错退出。
 5. **状态**：`state()` 报告 online、connecting、offline、auth_invalid 或 unknown。协议端的心跳超时视为假在线，状态改为 unknown，并主动断开重连。
 6. **测试**：手写录制格式的假事件，覆盖每种消息段、私聊、群聊、自身消息和畸形数据。另用一个假协议端，在 `127.0.0.1` 上跑真实的 WebSocket 往返，不访问外网。
 
@@ -231,6 +231,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 - `self_account()` 的契约测试通过（ADR 0032）；账号不一致、事件 `self_id` 不一致、自身消息和 @ 自己各有测试。
 - channel 扩展点的契约测试全部通过。
 - 每种消息段的入站和出站映射都有测试。
+- 兼容契约第 6 节列出的测试都有。
 - 收据三种结果各有测试，包括超时、断线、`echo` 错配和迟到回复。
 - 账号不一致、令牌缺失、心跳超时、重连上限各有测试。
 - 插件只 import `clytie.sdk`；双平台 CI 通过；真实平台连接和发送次数为 0。
