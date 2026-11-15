@@ -749,6 +749,10 @@ class Agent:
                 raise TimeoutError("model deadline")
             result = task.result()
             result_observed = True
+            if token.cancelled:
+                finalization.track(self.track(late()))
+                watched = True
+                raise asyncio.CancelledError
 
             def audit_on_time_model_result():
                 with self.ledger.transaction():

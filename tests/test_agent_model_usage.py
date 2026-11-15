@@ -169,3 +169,20 @@ async def test_usage_cancel_late_once(tmp_path):
     finally:
         release.set()
         await finish(agent)
+
+
+async def test_usage_cancel_already_received_before_result_is_late(tmp_path):
+    token = CancelToken()
+
+    async def response(req, cancel):
+        token.cancel("test")
+        return ModelTurn(finish="stop", usage={"output_tokens": 3})
+
+    agent, _, _ = await make_agent(tmp_path, response)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await direct(agent, token)
+        await asyncio.gather(*tuple(agent.kernel.delivery.background))
+        assert [r["timing"] for r in usages(agent)] == ["late"]
+    finally:
+        await finish(agent)
