@@ -1,4 +1,5 @@
 import json
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+SCOPE = runpy.run_path(str(ROOT / "scripts/ci_scope.py"))
 
 
 @pytest.mark.parametrize(
@@ -32,9 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
     ],
 )
 def test_classify_changed_files(files, expected):
-    from scripts.ci_scope import classify_files
-
-    assert classify_files(files) == expected
+    assert SCOPE["classify_files"](files) == expected
 
 
 def test_cli_file_list_and_invalid_input():
@@ -50,7 +50,7 @@ def test_cli_file_list_and_invalid_input():
 
 
 def test_github_compare_fails_closed_and_checks_both_rename_paths(tmp_path):
-    from scripts.ci_scope import github_scope
+    github_scope = SCOPE["github_scope"]
 
     def git(*args):
         return subprocess.check_output(["git", *args], cwd=tmp_path).decode().strip()
