@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from clytie.sdk.cancellation import CancelToken
-from clytie.sdk.context import RevisionConflict, ServiceUnavailable
+from clytie.sdk.context import CredentialUnavailable, RevisionConflict, ServiceUnavailable
 from clytie.sdk.immutable import thaw
 from clytie.sdk.types import (
     ApiResponse,
@@ -217,6 +217,20 @@ async def assert_http_contract(http):
     assert isinstance(result, HttpResponse)
     assert_roundtrip(result)
     await assert_task_cancellation(lambda: http.request("GET", "https://example.invalid/"))
+
+
+async def assert_credentials_contract(credentials, reference, value, *, errors):
+    """调用方提供虚构凭据及错误引用，不读取任何环境凭据。"""
+    assert await credentials.read(reference) == value
+    for ref, code in errors.items():
+        try:
+            await credentials.read(ref)
+        except CredentialUnavailable as exc:
+            assert exc.code == code
+            assert value not in str(exc)
+        else:
+            raise AssertionError("credential error was not reported")
+    await assert_task_cancellation(lambda: credentials.read(reference))
 
 
 async def assert_proactive_contract(proactive, parts):

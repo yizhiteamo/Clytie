@@ -4,7 +4,7 @@ import pytest
 
 from clytie.plugin_host.credentials import Credentials
 from clytie.sdk import CredentialUnavailable
-from clytie.sdk.testing import assert_plugin_context_contract
+from clytie.sdk.testing import assert_credentials_contract, assert_plugin_context_contract
 
 from .host_helpers import SOURCE, enable, host, plugin
 
@@ -23,6 +23,9 @@ async def test_credentials_read_fresh_and_strip(tmp_path):
     path = tmp_path / "secrets/key.txt"
     path.write_text("  fictional-marker-first\n", encoding="utf-8")
     assert await credentials.read("example") == "fictional-marker-first"
+    await assert_credentials_contract(
+        credentials, "example", "fictional-marker-first", errors={"absent": "unknown_ref"}
+    )
     path.write_text("fictional-marker-second", encoding="utf-8")
     assert await credentials.read("example") == "fictional-marker-second"
 
