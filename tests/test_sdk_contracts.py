@@ -271,6 +271,7 @@ def test_fake_context_has_only_granted_fields_and_deeply_readonly_config():
         "peer",
         "model",
         "http",
+        "websocket",
         "proactive",
         "subprocess",
     ):

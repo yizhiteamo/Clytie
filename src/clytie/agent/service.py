@@ -694,6 +694,23 @@ class Agent:
         cancelled = asyncio.create_task(token.wait())
         watched = False
         result_observed = False
+        usage_recorded = False
+
+        def audit_usage(result, timing):
+            nonlocal usage_recorded
+            if usage_recorded:
+                return
+            self.ledger.audit(
+                "model.usage",
+                trace_id=trace,
+                purpose="rewrite" if rewrite else "reply",
+                plugin=self.config["model"]["plugin"],
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                finish=result.finish,
+                timing=timing,
+            )
+            usage_recorded = True
 
         async def late():
             try:
@@ -703,6 +720,7 @@ class Agent:
 
             def audit_late_model_result():
                 with self.ledger.transaction():
+                    audit_usage(result, "late")
                     self.ledger.audit(
                         "model.late_result", trace_id=trace, content=result.model_dump(mode="json")
                     )
@@ -731,6 +749,16 @@ class Agent:
                 raise TimeoutError("model deadline")
             result = task.result()
             result_observed = True
+            if token.cancelled:
+                finalization.track(self.track(late()))
+                watched = True
+                raise asyncio.CancelledError
+
+            def audit_on_time_model_result():
+                with self.ledger.transaction():
+                    audit_usage(result, "on_time")
+
+            await finalization.persist(audit_on_time_model_result)
             if token.cancelled:
                 finalization.track(self.track(late()))
                 watched = True

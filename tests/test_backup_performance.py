@@ -235,7 +235,17 @@ async def test_benchmark_real_online_capture_and_fixed_load(tmp_path):
         interval=0.01,
         scale_override=(16, 2, 128),
     )
-    assert result["backup"]["completeness"] == "complete"
+    assert result["backup"]["completeness"] == "complete", {
+        "missing": result["backup"]["missing"],
+        "capture_seconds": next(
+            (
+                phase["end_s"] - phase["start_s"]
+                for phase in result["phases"]
+                if phase["name"] == "instance_capture"
+            ),
+            None,
+        ),
+    }
     assert result["backup"]["verified_files"] > 2
     assert result["response_ms"]["count"] == 30
     assert result["write_wait_ms"]["count"] == 30

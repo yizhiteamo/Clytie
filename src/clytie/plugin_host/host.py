@@ -107,6 +107,7 @@ class Runtime:
     unit_role: str | None = None
     account_ref: str | None = None
     owned_http: object = None
+    owned_websocket: object = None
 
 
 class PluginHost(MigrationMixin):
@@ -119,6 +120,7 @@ class PluginHost(MigrationMixin):
 
         self.asset_store = AssetStore(self.home, self.clock)
         self.credentials = {}
+        self.accounts = {}
 
         def resolve_backends(cid, pid):
             bound = self.asset_store.bind(cid)
@@ -132,6 +134,10 @@ class PluginHost(MigrationMixin):
                 from .http import HttpBackend
 
                 result["http"] = HttpBackend(self.clock, self.log)
+            if manifest and "network" in manifest.data["permissions"] and "websocket" not in result:
+                from .websocket import WebSocketBackend
+
+                result["websocket"] = WebSocketBackend(self.clock, self.log)
             return result
 
         self.backends = resolve_backends
@@ -208,6 +214,7 @@ class PluginHost(MigrationMixin):
 
         self.timezone = report.instance["timezone"]
         self.credentials = thaw(report.instance.get("credentials", {}))
+        self.accounts = thaw(report.instance.get("accounts", {}))
         for cid, result in report.plugin_configs.items():
             config = result["config"]
             self.memory_config[cid] = (thaw(config), thaw(report.instance))
@@ -633,7 +640,10 @@ class PluginHost(MigrationMixin):
                 unit.unit_role, unit.account_ref = layout["role"], layout.get("account")
                 backends = dict(self.backends(*key))
                 from .http import HttpBackend
+                from .websocket import WebSocketBackend
 
+                if isinstance(backends.get("websocket"), WebSocketBackend):
+                    unit.owned_websocket = backends["websocket"]
                 if isinstance(backends.get("http"), HttpBackend):
                     unit.owned_http = backends["http"]
                 if key in self.recollection_models:
@@ -692,6 +702,8 @@ class PluginHost(MigrationMixin):
                     if unit.plugin is None:
                         if unit.owned_http is not None:
                             await unit.owned_http.close()
+                        if unit.owned_websocket is not None:
+                            await unit.owned_websocket.close()
                         continue
                     try:
                         with bind_scene():
@@ -701,6 +713,8 @@ class PluginHost(MigrationMixin):
                     finally:
                         if unit.owned_http is not None:
                             await unit.owned_http.close()
+                        if unit.owned_websocket is not None:
+                            await unit.owned_websocket.close()
                 runtime.status, runtime.registrations = (
                     ("disabled" if metadata_timeout else "start_failed"),
                     (),
@@ -812,6 +826,8 @@ class PluginHost(MigrationMixin):
             for unit in reversed(runtime.units or [runtime]):
                 if unit.owned_http is not None:
                     await unit.owned_http.close()
+                if unit.owned_websocket is not None:
+                    await unit.owned_websocket.close()
             runtime.status, runtime.registrations = "disabled", ()
 
     def registrations(self, companion_id, point=None):

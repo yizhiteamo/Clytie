@@ -8,7 +8,7 @@
 
 - 阶段一（A1 至 A4.3）已全部合入 `main`。A4.3 经 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71) 合并，tag `a4-3`。
 - A4.3 的已知限制：备份结束后约 699 ms 的尾部停顿、loop_delay 观测不足，以及延期的其余三场性能测量，见 [Issue #77](https://github.com/yizhiteamo/Clytie/issues/77)。不宣称 Linux 或大资产场景的性能已通过。
-- 下一步是阶段二第一段「最小完整链路」（B1 画图 → B2 QQ → B3a/B3b 模型），范围见下文。
+- 阶段二第一段：B1（tag `b1`）、B2（tag `b2`）、B3a 已完成。下一步是 B4a 会话准入，完成后在测试会话跑真实链路，范围见下文。
 
 ## 每个里程碑都要提供
 
@@ -173,8 +173,10 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 | 1 | B1 画图能力插件 `image-gen`（含运行时服务补充） | 2–3 天 |
 | 2 | B2 QQ 平台插件精简版 `qq-onebot`（对接 NapCat 等 OneBot 协议端） | 2–3 天 |
 | 3 | B3a 模型插件 `openai-api` | 1–2 天 |
-| → | 经用户当次同意，在测试会话跑真实链路，随后上线 | |
-| 4 | B3b 模型插件 `codex-cli`（MCP 接入规格确认后再定范围） | 待定 |
+| 4 | B4a 会话准入：测试会话与登记会话（真实测试前必须完成） | 1 天 |
+| → | 经用户当次同意，在测试会话跑真实链路 | |
+| 5 | B4b owner 在场判断与工具使用范围，随后上线 | 1–2 天 |
+| 6 | B3b 模型插件 `codex-cli`（MCP 接入规格确认后再定范围） | 待定 |
 
 预估指 Codex 的实际工作日，包括测试、CI 和一轮审查修复，不包括等待用户的时间。超过 1.5 倍时按 AGENTS.md 4.2 停下来报告。MCP 接入规格由设计审查会话与 B1–B3a 并行起草。
 
@@ -184,6 +186,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 - 协议端（NapCat 等实现 OneBot 的程序）不属于本仓库。Clytie 只依据 OneBot v11 公开标准和协议端公开的接口文档，不打开协议端源码，不复制其代码。
 - **能力插件不直接接触协议端，也不知道自己运行在哪个平台。** 产物由本体交给平台插件发送；需要平台数据（如群历史）的能力，依赖与平台无关的服务接口，由平台插件实现。这样以后更换平台插件或协议端，能力插件不用改。
 - 实现中如果发现还需要新的扩展点或 SDK 接口，停下来报告，先改文档，不在代码里自行添加。
+- **插件仓库（用户已确认，2026-11-15）**：官方插件暂时留在本仓库 `plugins/` 下。SDK 到 1.0、不再频繁变化，或者开始接受第三方插件时，再拆成单独的官方插件仓库。
 - **模型与计费（用户已确认）**：模型入口是两个独立的插件，`codex-cli` 使用 coding plan 额度，`openai-api` 按 API 用量计费。伴侣用哪个，由配置明确写出，本体不自动切换计费方式。上线初期临时使用 `openai-api`，B3b 完成后再由用户决定切回。
 
 ### B1 画图能力插件 `image-gen`
@@ -212,15 +215,15 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 **SDK 补充**：现有 `ctx` 只有一次性 HTTP 请求，无法维持长连接。按 [ADR 0030](adr/0030-websocket-client.md) 增加 `ctx.websocket` WebSocket 客户端（需要 `network` 权限），按 runtime-services-spec §4 接好生产后端，并实现 §1.5 的账号密钥读取。先完成并通过契约测试，再写插件。
 
 **范围**
-1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。连上后核对协议端报告的账号与配置一致，不一致按 `auth_invalid` 处理。断线后按退避间隔重连，上限来自配置。
-2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。自己发出的消息不进入对话。消息段映射：`text`→text，`at`→mention（按配置账号判断 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
+1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。预期账号用 `ctx.identity.self_account()` 读取（ADR 0032）；未绑定账号时 `start` 抛出 `PluginUnavailable("auth_invalid")`。连上后用 `get_login_info` 取协议端登录的账号，与预期账号按字符串比较；不一致就断开，状态为 `auth_invalid`，在重启前不再重连。之后每个事件的 `self_id` 也要等于预期账号，不等的事件丢弃并计数。断线后按配置的退避间隔重连（默认 1、2、4、8、16、30 秒），用完后按最后一个间隔一直重试，直到连上或插件停止；`auth_invalid` 不重连。确定没有发出的消息和表情回应，收据为 `failed` 加 `transient`，由本体有限重发。
+2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。发送者等于预期账号的消息不进入对话。消息段映射：`text`→text，`at`→mention（`qq` 等于预期账号时 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。`file` 和 `mface` 不是标准消息段，按兼容契约第 3 节处理。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
 3. **出站**：用 `send_private_msg` 或 `send_group_msg` 发送消息段数组，用 `echo` 对应请求和回复。收据按 kernel-spec §5–§6 判定：
    - `status=ok` 且带 `message_id`：`sent`；
-   - 协议端明确返回失败：`failed`，并按返回码分为 `rate_limited`、`transient` 或永久错误；
+   - 协议端明确返回失败：`failed`。只有配置 `retcode_classes` 里列出的返回码算 `rate_limited` 或 `transient`，其余都是永久错误（默认配置为空，见 [qq-onebot 兼容契约](plugins/qq-onebot-compat.md) 第 5 节）；
    - 超时、断线、`echo` 对不上、成功回复里没有 `message_id`：`unknown`，不重发。
 
    超出 `media_limits` 的产物由插件拒绝，记为 `failed`。
-4. **表情回应**：用 `set_msg_emoji_like` 映射 👌⏳✅❌，表情编号来自配置。协议端不支持这个动作时，`features().supports_react = false`；运行中收到"不支持"的回复时降级并记录，不报错退出。
+4. **表情回应**：用 `set_msg_emoji_like` 映射 👌⏳✅❌，表情编号来自配置。请求字段、"不支持"的判定和降级规则见兼容契约第 2 节；不报错退出。
 5. **状态**：`state()` 报告 online、connecting、offline、auth_invalid 或 unknown。协议端的心跳超时视为假在线，状态改为 unknown，并主动断开重连。
 6. **测试**：手写录制格式的假事件，覆盖每种消息段、私聊、群聊、自身消息和畸形数据。另用一个假协议端，在 `127.0.0.1` 上跑真实的 WebSocket 往返，不访问外网。
 
@@ -228,8 +231,10 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 **验收**
 - `ctx.websocket` 的契约测试通过，ADR 0030 与 sdk-spec 同步。
+- `self_account()` 的契约测试通过（ADR 0032）；账号不一致、事件 `self_id` 不一致、自身消息和 @ 自己各有测试。
 - channel 扩展点的契约测试全部通过。
 - 每种消息段的入站和出站映射都有测试。
+- 兼容契约第 6 节列出的测试都有。
 - 收据三种结果各有测试，包括超时、断线、`echo` 错配和迟到回复。
 - 账号不一致、令牌缺失、心跳超时、重连上限各有测试。
 - 插件只 import `clytie.sdk`；双平台 CI 通过；真实平台连接和发送次数为 0。
@@ -241,7 +246,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 **范围**
 1. 兼容 OpenAI 接口格式：先实现 Chat Completions 格式（兼容的服务最多），接口地址和模型名都是必填配置，不设默认值。API 密钥通过 `ctx.credentials` 读取。
 2. 支持工具调用和图片输入，`features()` 如实报告。
-3. **费用**：不在本体或插件里设次数和 token 上限，费用上限由平台侧设置（runtime-services-spec §2）。平台返回额度用完时如实报告，不改用其他模型。`quota()` 能拿到准确数据时如实报告，拿不到时返回 `QUOTA_UNKNOWN`，不为此调用模型。每次调用的 token 数写进账本。
+3. **费用**：不在本体或插件里设次数和 token 上限，费用上限由平台侧设置（runtime-services-spec §2）。平台返回额度用完时如实报告，不改用其他模型。`quota()` 能拿到准确数据时如实报告，拿不到时返回 `QUOTA_UNKNOWN`，不为此调用模型。每次调用的 token 数由本体写进账本（agent-spec §11.1）。
 4. 错误映射：限流、临时错误、额度用完、认证失败分别报告；认证失败不重试。
 5. **测试**：假 HTTP 服务覆盖正常回复、工具调用、多轮工具循环、各种错误、超时和取消。另有一条离线端到端测试：B2 的假协议端 → `openai-api`（假 HTTP）→ `image-gen`（假后端）→ B2 的假协议端。
 
@@ -254,6 +259,15 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 - 密钥不出现在日志、账本和错误信息中；双平台 CI 通过；线上模型调用次数为 0。
 
 **之后的真实验证**（需要用户当次同意）：在测试会话中，用几种不同的说法请求画图和修改图片，确认都进入了画图，收据和表情回应正确。测试密钥建议使用单独设置了预算上限的项目密钥。
+
+### B4a 会话准入（用户已确认，2026-11-15）
+
+现有代码只在启动时校验 `test_conversation` 的格式，运行时没有限制真实消息只进出测试会话。B4a 在本体里加入会话准入：`test_only` 和 `registered` 两种模式、陌生人私聊静默、入站和出站两道检查。范围、静默的含义和验收见 [admission-spec](architecture/admission-spec.md)。不需要修改平台插件。
+
+### B4b owner 在场判断与工具使用范围（范围待细化）
+
+- `owner_present` 准入模式：平台插件按可选能力回答成员查询，qq-onebot 用 OneBot v11 标准接口实现（admission-spec §5）。
+- `tool_scopes`：按工具设置使用范围。私聊只有 owner 能用画图；群里默认所有人可用，可以排除个别人。开始前先补规格。
 
 ### B3b 模型插件 `codex-cli`（范围待定）
 

@@ -47,7 +47,9 @@ async read(ref: str) -> str
 
 ### 1.5 平台账号的密钥（B2 实现）
 
-平台插件读取自己绑定账号的 `accounts.<ref>.secret`：`ctx.credentials.account_secret() -> str`，只对实现了 channel 扩展点的插件出现，只能读取伴侣配置里 `channels[].account` 绑定的那个账号。错误码与 1.2 相同。
+平台插件读取自己绑定账号的 `accounts.<ref>.secret`：`ctx.credentials.account_secret() -> str`，只对实现了 channel 扩展点的插件出现，只能读取伴侣配置里 `channels[].account` 绑定的那个账号。错误码与 1.2 相同；未绑定账号时为 `unknown_ref`。
+
+绑定的是哪个平台账号，用 `ctx.identity.self_account()` 读取（ADR 0032），不从协议端的报告或插件配置中获取。
 
 ## 2. 工具每日额度（已撤回，用户决定 2026-11-15）
 

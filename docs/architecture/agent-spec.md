@@ -307,6 +307,24 @@
 - 每条记录的摘要日志（kernel.md §7）增加：模型调用次数、工具轮数、是否改写、出站检查结果（只记类别，不记命中的词和正文）。
 - 本体工具调用、出站拦截、边界计数、暂停与解除都写审计。
 
+### 11.1 模型用量（B3a，Issue #97，用户已确认 2026-11-15）
+
+对话主干每拿到一个模型结果，就写一条 `model.usage` 审计。复用现有 audit，不迁移账本，不新增查询接口；用量的读取和提醒放到「额度感知」里程碑。
+
+**范围**：只在 `_generate` 里记录，覆盖普通回复、工具循环的每一轮和出站改写。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
+
+**字段**：`trace_id`、`purpose`（`reply` 或 `rewrite`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
+
+**时点**：
+- 每个返回的 `ModelTurn` 恰好记录一次，在本体第一次拿到它的时候记。
+- 按时拿到结果（包括 `finish = error` 的结果）：在 `_generate` 拿到结果后立刻记，`timing = on_time`。之后即使记录被取消，也不再重复记录。
+- 取消或截止之后才到的结果：由现有的 `late()` 记，`timing = late`。`model.late_result` 照旧保存完整内容，它不参与用量统计，所以两者不会重复计入。
+- 调用抛出异常、超时后也没有迟到结果：不写 `model.usage`。调用次数已经由 `record.model_calls` 记录；这种情况下平台可能已经计费，但本体不编造数字。
+
+**未知**：服务没有返回用量时，`input_tokens` / `output_tokens` 为 `null`，不写成 0。
+
+**测试**：单轮回复、多轮工具循环、改写各有记录；`finish = error` 有记录；取消后迟到只记一次 `late`；按时拿到结果后被取消只记一次 `on_time`；异常无记录；用量未知为 `null`；回想不重复；审计中不出现消息正文和虚构凭据标记值。
+
 ## 12. 离线验收
 
 对应 roadmap A3.2 的验收清单。全部使用假模型（按脚本返回）、假平台、假通知渠道和 MockClock。

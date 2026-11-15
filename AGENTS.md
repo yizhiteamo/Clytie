@@ -146,6 +146,7 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/design/conversation.md` | 上下文预算、人设分层、群聊行为、多伴侣协作 |
 | `docs/design/boundary.md` | 权限、关系边界保护、保障模式、过滤与出站检查 |
 | `docs/architecture/storage-spec.md` | Issue #72：存储 I/O 所有者、事务、容量、捕获、取消及性能验收 |
+| `docs/architecture/admission-spec.md` | 会话准入：测试会话、登记会话、owner 在场、静默与出站检查 |
 | `docs/architecture/runtime-services-spec.md` | 阶段二运行时服务：插件凭据、生产 HTTP/WebSocket |
 | `docs/architecture/backup-spec.md` | A4.3 备份与维护：在线快照、保留与容量、副本、恢复切换、旧实例与密钥 |
 | `docs/architecture/api-spec.md` | A4.2 本机 API、登录、审计、CLI、后台运行与插件路由 |
@@ -156,5 +157,6 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/design/lessons.md` | 必须防止复发的设计问题 |
 | `docs/plugins/catalog.md` | 预设的官方插件（可调整） |
 | `docs/plugins/sleep.md` | 睡眠作息插件（行为插件的参考设计） |
+| `docs/plugins/qq-onebot-compat.md` | qq-onebot 的 OneBot 兼容契约：参考资料范围、标准之外的扩展、收据与返回码 |
 | `docs/adr/` | 决策记录 |
 | `docs/process/history.md` | 2026-11-15 之前的审查流程原文（历史，非现行规则） |
