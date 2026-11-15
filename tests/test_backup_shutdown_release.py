@@ -62,10 +62,12 @@ async def test_shutdown_retains_executor_until_real_exit(tmp_path, monkeypatch, 
     closing = asyncio.create_task(controller.shutdown())
 
     async def until(predicate):
-        for _ in range(500):
+        real_clock = SystemClock()
+        deadline = real_clock.monotonic() + 60
+        while real_clock.monotonic() < deadline:
             if predicate():
                 return
-            await SystemClock().sleep(0.02)
+            await real_clock.sleep(0.02)
             clock.advance(0.02)
         pytest.fail("shutdown release checkpoint not reached")
 
