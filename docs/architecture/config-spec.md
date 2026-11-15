@@ -115,6 +115,7 @@
 | `categories` | `{romance, persona_change, scripted_intimacy, intimate_images, owner_privacy}`，各为布尔值（全部 `true`） |
 | `never_publish` | 字符串列表（空）：对外场景中不允许出现的词句 |
 | `notify_owner` | 布尔值（`true`） |
+| `admission` | `test_only` / `registered` / `owner_present`（`registered`）：哪些会话可以处理，见 admission-spec |
 
 **`memory`**（全部可选，括号内为默认值）：
 | 字段 | 类型 |
