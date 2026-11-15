@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -198,6 +199,8 @@ class _Reader:
     def issue(
         self, file: Path, parts: Any, expected: str, actual: Any, *, code: str | None = None
     ) -> None:
+        if file.name == "clytie.local.yaml" and parts and parts[0] == "credentials":
+            actual = "invalid credential declaration" if code is None else actual
         self.errors.append(ConfigIssue(str(file), _pointer(parts), expected, actual, code))
 
     def read(self, file: Path) -> Any:
@@ -447,6 +450,34 @@ def _safe_child(parent: Path, relative: Any) -> Path | None:
         return None
 
 
+def credential_reference_state(directory: Path, relative: Any) -> str:
+    """Check file metadata only, rejecting links in every path component."""
+    if not isinstance(relative, str) or not relative or PureWindowsPath(relative).drive:
+        return "invalid"
+    supplied = Path(relative.replace("\\", "/"))
+    if supplied.is_absolute() or ".." in supplied.parts:
+        return "invalid"
+    secret_root = directory / "secrets"
+    candidate = secret_root / supplied
+    try:
+        if not candidate.resolve().is_relative_to(secret_root.resolve()):
+            return "invalid"
+        for component in (candidate, *candidate.parents):
+            if component.is_symlink() or (
+                component.exists()
+                and getattr(component.lstat(), "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            ):
+                return "invalid"
+            if component == directory:
+                break
+        if candidate.is_file():
+            return "found"
+        return "invalid" if candidate.exists() else "missing"
+    except (OSError, RuntimeError, ValueError):
+        return "invalid"
+
+
 def load_home(
     home: str | Path | None = None,
     *,
@@ -522,38 +553,20 @@ def load_home(
     people = _entries(instance.get("people"))
     accounts = _entries(instance.get("accounts"))
     account_users: dict[str, str] = {}
-    for account_ref, account in accounts.items():
-        if not isinstance(account, dict) or "secret" not in account:
-            continue
-        relative = account["secret"]
-        secret_root = (directory / "secrets").resolve()
-        valid = False
-        missing = False
-        if isinstance(relative, str) and relative and not PureWindowsPath(relative).drive:
-            supplied = Path(relative.replace("\\", "/"))
-            try:
-                candidate = (secret_root / supplied).resolve()
-                valid = (
-                    not supplied.is_absolute()
-                    and candidate.is_relative_to(secret_root)
-                    and candidate.is_file()
+    credentials = instance.get("credentials", {})
+    for group, references in (("accounts", accounts), ("credentials", credentials)):
+        for reference, value in references.items() if isinstance(references, dict) else ():
+            if not isinstance(value, dict) or "secret" not in value:
+                continue
+            state = credential_reference_state(directory, value["secret"])
+            if state != "found":
+                reader.issue(
+                    instance_file,
+                    (group, reference, "secret"),
+                    "existing file relative to secrets",
+                    state if group == "credentials" else value["secret"],
+                    code=f"credential_reference_{state}",
                 )
-                missing = (
-                    not supplied.is_absolute()
-                    and candidate.is_relative_to(secret_root)
-                    and not candidate.exists()
-                    and not candidate.is_symlink()
-                )
-            except (OSError, RuntimeError, ValueError):
-                valid = False
-        if not valid:
-            reader.issue(
-                instance_file,
-                ("accounts", account_ref, "secret"),
-                "existing file relative to secrets",
-                relative,
-                code="credential_reference_missing" if missing else "credential_reference_invalid",
-            )
     owners = [
         key
         for key, value in people.items()
@@ -686,6 +699,13 @@ def load_home(
         manifest_errors[plugin_id] = tuple(reader.errors[manifest_start:])
         manifests[plugin_id] = result
         return result
+
+    for reference, value in credentials.items() if isinstance(credentials, dict) else ():
+        allowed = value.get("plugins", []) if isinstance(value, dict) else []
+        for index, pid in enumerate(allowed if isinstance(allowed, list) else []):
+            manifest(pid, instance_file, ("credentials", reference, "plugins", index))
+    instance_errors = len(reader.errors)
+    global_errors = list(reader.errors)
 
     statuses: list[Mapping[str, Any]] = []
     configurations: dict[str, Any] = {}

@@ -127,6 +127,7 @@ def assert_plugin_context_contract(context: Any, *, granted: Sequence[str] = ())
     for name in ("log", "clock", "random", "storage", "events", "state", "assets"):
         assert getattr(context, name) is not None
     optional = (
+        "credentials",
         "memory",
         "asset_writer",
         "services",

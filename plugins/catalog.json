@@ -101,6 +101,25 @@
       "version": "0.2.0"
     },
     {
+      "category": "tool",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "image-gen",
+      "name": "image-gen",
+      "permissions": [
+        "network",
+        "assets.write"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "通过配置的图像模型生成和修改图片",
+      "version": "0.1.0"
+    },
+    {
       "category": "memory",
       "conflicts": [],
       "dependencies": {},

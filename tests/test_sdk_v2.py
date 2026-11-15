@@ -288,6 +288,7 @@ async def test_cancel_grace_uses_injected_clock_and_accepts_running_cancel_resul
 def test_context_protocol_inventory_is_covered():
     # 新增协议却没有契约入口时本测试失败。
     expected = {
+        "Credentials": "credentials",
         "Logger": "logger",
         "Storage": "storage",
         "Events": "events",

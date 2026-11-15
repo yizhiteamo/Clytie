@@ -14,6 +14,7 @@ from .context_contracts import (
     assert_asset_writer_contract,
     assert_assets_contract,
     assert_candidate_reader_contract,
+    assert_credentials_contract,
     assert_events_contract,
     assert_http_contract,
     assert_identity_contract,
@@ -102,6 +103,7 @@ from .helpers import (
 from .lifecycle import assert_plugin_contract, plugin_from_manifest
 
 __all__ = [
+    "assert_credentials_contract",
     "FakeAfterGeneration",
     "FakeApiClient",
     "FakeAttention",
