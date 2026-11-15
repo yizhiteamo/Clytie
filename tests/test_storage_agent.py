@@ -108,7 +108,7 @@ async def model_agent(storage):
     )
     record = await run_sync(ledger, ledger.open_record, conversation=conversation)
     agent = Agent.__new__(Agent)
-    agent.ledger, agent.clock, agent.config = ledger, clock, {}
+    agent.ledger, agent.clock, agent.config = ledger, clock, {"model": {"plugin": "fake-model"}}
     agent.protection = SimpleNamespace(update=lambda _: None)
     agent.background = set()
     agent.kernel = SimpleNamespace(
@@ -187,6 +187,10 @@ async def test_late_model_keeps_finalizer_until_audit_under_full_queue(storage):
         await asyncio.gather(*tuple(agent.background))
     assert owner.status()["finalizers"] == 0
     audits = await run_sync(ledger, ledger.rows, "audit")
+    usage = [row for row in audits if row["kind"] == "model.usage"]
+    assert len(usage) == 1
+    assert usage[0]["plugin"] == "fake-model" and usage[0]["timing"] == "late"
+    assert usage[0]["input_tokens"] is None and usage[0]["output_tokens"] is None
     assert [row["content"]["text"] for row in audits if row["kind"] == "model.late_result"] == [
         "fictional late reply"
     ]
