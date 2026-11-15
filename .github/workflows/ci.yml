@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [a1-sdk]
 
 permissions:
   contents: read
@@ -26,6 +24,15 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+      - name: Determine CI scope
+        id: scope
+        shell: bash
+        run: |
+          scope=full
+          if result=$(python scripts/ci_scope.py --github); then
+            if [ "$result" = "docs" ]; then scope=docs; fi
+          fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
       - name: Install locked development environment
         run: |
           python -m pip install uv==0.9.5
@@ -33,28 +40,30 @@ jobs:
       - name: Public content scan
         run: uv run --no-sync pre-commit run check-public-files --all-files
       - name: Ruff
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync ruff check .
       - name: Format
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync ruff format --check .
       - name: SDK boundary and clock checks
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync python scripts/check_architecture.py
       - name: Official plugin catalog
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync python scripts/build_catalog.py --check
       - name: Supervisor subprocess smoke
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync pytest tests/test_supervisor_smoke.py
       - name: API and management subprocess smoke
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync pytest tests/test_api_smoke.py tests/test_api_startup_read.py tests/test_management_journal.py tests/test_management_workers.py tests/test_management_start_integration.py tests/test_management_http_integration.py -k "real_ or parent_loss or restart_verification"
       - name: Offline tests
+        if: steps.scope.outputs.scope != 'docs'
         id: offline_tests
-        # Preserve per-case outcomes for the local mechanism evidence map.
-        # This is the same suite; no additional runs or public artifacts.
         run: uv run --no-sync pytest -v
-      # Issue #72: the approved next measurement is a frozen, one-time mechanism
-      # round followed by one three-arm matrix. A normal PR push must not rerun it.
-      # Keep prior scripts/results; this functional CI is not performance acceptance.
-      - name: Performance acceptance remains pending
-        run: python -c "print('A4.3 mechanism and frozen matrix pending; functional CI only')"
       - name: Validate fictional home
+        if: steps.scope.outputs.scope != 'docs'
         run: uv run --no-sync python -m clytie status --home examples/home --json
       - name: Build wheel and source distribution
+        if: steps.scope.outputs.scope != 'docs'
         run: uv build --no-sources --no-build-isolation
