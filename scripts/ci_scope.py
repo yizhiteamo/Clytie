@@ -8,12 +8,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 测试读取仓库文档时，要写完整的字面路径，不要分段拼接。
+TEST_DOCUMENTS = frozenset({"docs/architecture/agent-spec.md"})
+
 
 def classify_files(files):
     if not isinstance(files, list) or not files:
         return "full"
     for path in files:
         if not isinstance(path, str) or "\\" in path:
+            return "full"
+        if path in TEST_DOCUMENTS:
             return "full"
         parts = path.split("/")
         if any(part in ("", ".", "..") for part in parts):

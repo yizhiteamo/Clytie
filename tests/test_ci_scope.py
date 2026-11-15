@@ -15,6 +15,7 @@ SCOPE = runpy.run_path(str(ROOT / "scripts/ci_scope.py"))
     [
         (["README.md", "AGENTS.md", "docs/design/topic.md"], "docs"),
         (["docs/image.svg", "docs/nested/schema.json"], "docs"),
+        (["docs/architecture/agent-spec.md"], "full"),
         (["README.md", "src/clytie/main.py"], "full"),
         (["plugins/example/README.md"], "full"),
         ([], "full"),
@@ -35,6 +36,23 @@ SCOPE = runpy.run_path(str(ROOT / "scripts/ci_scope.py"))
 )
 def test_classify_changed_files(files, expected):
     assert SCOPE["classify_files"](files) == expected
+
+
+def test_repository_documents_mentioned_in_tests_require_full_ci():
+    documents = sorted(
+        path.relative_to(ROOT).as_posix() for path in (ROOT / "docs").rglob("*") if path.is_file()
+    )
+    test_roots = [ROOT / "tests", *sorted((ROOT / "plugins").glob("*/tests"))]
+    missing = []
+    for test_root in test_roots:
+        for source in sorted(test_root.rglob("*.py")):
+            for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+                for document in documents:
+                    if document in line and document not in SCOPE["TEST_DOCUMENTS"]:
+                        missing.append(
+                            f"{document}: {source.relative_to(ROOT).as_posix()}:{line_number}"
+                        )
+    assert not missing, "Add test document dependencies to TEST_DOCUMENTS:\n" + "\n".join(missing)
 
 
 def test_cli_file_list_and_invalid_input():
