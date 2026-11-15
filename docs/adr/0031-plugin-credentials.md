@@ -24,6 +24,6 @@
 
 ## 影响
 
-- `schemas/instance.schema.json` 增加 `credentials`；`schemas/companion.schema.json` 增加 `tool_quotas`。
+- `schemas/instance.schema.json` 增加 `credentials`。
 - SDK 次版本号升级：新增 `ctx.credentials` 和 `CredentialUnavailable`。
 - `status` 和本地 API 只显示引用名、允许的插件和文件是否存在。
