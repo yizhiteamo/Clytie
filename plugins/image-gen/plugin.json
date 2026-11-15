@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "id": "image-gen",
+  "name": "image-gen",
+  "summary": "通过配置的图像模型生成和修改图片",
+  "category": "tool",
+  "version": "0.1.0",
+  "requires": {
+    "sdk": ">=0.10,<0.11"
+  },
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": [],
+  "permissions": [
+    "network",
+    "assets.write"
+  ],
+  "contributes": {
+    "tools": [
+      {
+        "name": "draw_image",
+        "factory": "create_draw",
+        "description": "根据明确的描述生成图片",
+        "when_not_to_use": "否定、转述、讨论画图，或要求编辑其他图片时不用",
+        "examples": [
+          {
+            "input": "请画一只虚构的蓝色小鸟",
+            "call": true
+          },
+          {
+            "input": "不要画图",
+            "call": false,
+            "note": "否定"
+          },
+          {
+            "input": "有人让我画图",
+            "call": false,
+            "note": "转述"
+          },
+          {
+            "input": "讨论一下画图功能",
+            "call": false,
+            "note": "讨论"
+          }
+        ],
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "additionalProperties": false
+        },
+        "audience": [
+          "owner",
+          "member"
+        ],
+        "heavy": true,
+        "risk": "low",
+        "delivery": "image"
+      },
+      {
+        "name": "edit_image",
+        "factory": "create_edit",
+        "description": "修改本会话上一张生成的图片；不读取用户上传图片",
+        "when_not_to_use": "否定、转述、讨论画图，或要求编辑其他图片时不用",
+        "examples": [
+          {
+            "input": "请画一只虚构的蓝色小鸟",
+            "call": true
+          },
+          {
+            "input": "不要画图",
+            "call": false,
+            "note": "否定"
+          },
+          {
+            "input": "有人让我画图",
+            "call": false,
+            "note": "转述"
+          },
+          {
+            "input": "讨论一下画图功能",
+            "call": false,
+            "note": "讨论"
+          }
+        ],
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "prompt"
+          ],
+          "additionalProperties": false
+        },
+        "audience": [
+          "owner",
+          "member"
+        ],
+        "heavy": true,
+        "risk": "low",
+        "delivery": "image"
+      }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "properties": {
+      "backends": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "openai",
+              "default": "openai"
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "api_key_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "base_url": {
+              "type": "string",
+              "default": "https://api.openai.com/v1"
+            }
+          },
+          "required": [
+            "model",
+            "api_key_ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "fallback_on_refusal": {
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "required": [
+      "backends"
+    ],
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}
+
