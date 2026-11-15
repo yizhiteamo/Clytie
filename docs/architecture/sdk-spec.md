@@ -49,7 +49,7 @@
 | `image` / `audio` / `video` / `file` | `asset: AssetRef?`，`raw_ref: str?`（尚未下载时） |
 | `link` | `url: str`，`title: str?` |
 | `quote` | `message_ref: MessageRef` |
-| `sticker` | `sticker_id: str`，`asset: AssetRef?` |
+| `sticker` | `sticker_id: str`，`asset: AssetRef?`，`raw_ref: str?`，`summary: str?`（最多 100 字，ADR 0033） |
 | `card` | `title: str`，`body: str`（发送用：阅读卡片） |
 | `unknown` | `raw_type: str` |
 
