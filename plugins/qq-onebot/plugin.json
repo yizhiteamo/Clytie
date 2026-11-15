@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "id": "qq-onebot",
+  "name": "QQ OneBot 平台",
+  "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
+  "category": "channel",
+  "version": "0.1.0",
+  "requires": {
+    "sdk": ">=0.11,<0.12"
+  },
+  "dependencies": {},
+  "conflicts": [],
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "contributes": {
+    "channel": {
+      "factory": "create_channel",
+      "platform": "qq"
+    }
+  },
+  "permissions": [
+    "network"
+  ],
+  "config": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "pattern": "^wss?://",
+        "minLength": 6
+      },
+      "connect_timeout_s": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 60,
+        "default": 10
+      },
+      "request_timeout_s": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 60,
+        "default": 10
+      },
+      "heartbeat_timeout_s": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "maximum": 3600,
+        "default": 60
+      },
+      "reconnect_delays": {
+        "type": "array",
+        "items": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "maxItems": 20,
+        "default": [
+          1,
+          2,
+          4
+        ]
+      },
+      "queue_limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4096,
+        "default": 128
+      },
+      "max_message_bytes": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "max_text_chars": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 4000
+      },
+      "emoji_ids": {
+        "type": "object",
+        "properties": {
+          "👌": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "⏳": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "✅": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          },
+          "❌": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        "additionalProperties": false,
+        "default": {}
+      },
+      "retcode_classes": {
+        "type": "object",
+        "patternProperties": {
+          "^-?[0-9]+$": {
+            "enum": [
+              "rate_limited",
+              "transient"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "default": {}
+      },
+      "media_limits": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "object",
+            "properties": {
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "formats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "max_bytes",
+              "formats"
+            ],
+            "additionalProperties": false
+          },
+          "audio": {
+            "type": "object",
+            "properties": {
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "formats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "max_bytes",
+              "formats"
+            ],
+            "additionalProperties": false
+          },
+          "video": {
+            "type": "object",
+            "properties": {
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "formats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "max_bytes",
+              "formats"
+            ],
+            "additionalProperties": false
+          },
+          "file": {
+            "type": "object",
+            "properties": {
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "formats": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "max_bytes",
+              "formats"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "default": {}
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "additionalProperties": false
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {}
+}
