@@ -414,6 +414,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | `peer` | `peer` | `async send(companion_id, kind, payload) -> str`、`async request(companion_id, kind, payload, timeout_s) -> JsonObject` |
 | `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
 | `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
+| `websocket` | `network` | 只有客户端：`async connect(url, *, headers=None, timeout_s=10, max_message_bytes=16 MB) -> WebSocketConnection`（`send_text`、`receive(cancel)`、`close`、`closed`、`close_code`）。只收发文本帧，插件停止时宿主关闭全部连接。详见 ADR 0030（阶段二 B2，用户已确认） |
 | `proactive` | `message.proactive` | `async submit(conversation_id, *, topic: str \| None = None, material: JsonObject \| None = None, parts: list[MessagePart] \| None = None, reason: str) -> str`（返回 `trace_id`；话题与直接发送二选一，仍经过边界和出站检查，见下） |
 | `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
 | `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`；映射来自实例配置 |
