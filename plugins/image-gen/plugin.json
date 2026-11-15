@@ -22,7 +22,7 @@
         "name": "draw_image",
         "factory": "create_draw",
         "description": "根据明确的描述生成图片",
-        "when_not_to_use": "否定、转述、讨论画图，或要求编辑其他图片时不用",
+        "when_not_to_use": "否定、转述、讨论画图，或要求编辑其他图片时不用；修改刚生成的图时用 edit_image",
         "examples": [
           {
             "input": "请画一只虚构的蓝色小鸟",
@@ -69,24 +69,29 @@
         "name": "edit_image",
         "factory": "create_edit",
         "description": "修改本会话上一张生成的图片；不读取用户上传图片",
-        "when_not_to_use": "否定、转述、讨论画图，或要求编辑其他图片时不用",
+        "when_not_to_use": "新画图片时用 draw_image；否定、转述、讨论修改，或要求编辑非本会话上一张生成图片时不用",
         "examples": [
           {
-            "input": "请画一只虚构的蓝色小鸟",
+            "input": "把刚才那张改成红色",
             "call": true
           },
           {
-            "input": "不要画图",
+            "input": "重新画一只猫（新画，用 draw_image）",
+            "call": false,
+            "note": "新画图片"
+          },
+          {
+            "input": "不要修改刚才那张图",
             "call": false,
             "note": "否定"
           },
           {
-            "input": "有人让我画图",
+            "input": "有人让我修改刚才那张图",
             "call": false,
             "note": "转述"
           },
           {
-            "input": "讨论一下画图功能",
+            "input": "讨论一下修改图片的功能",
             "call": false,
             "note": "讨论"
           }
@@ -163,4 +168,3 @@
   },
   "failure_default": {}
 }
-

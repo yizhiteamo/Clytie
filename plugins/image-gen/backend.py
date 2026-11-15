@@ -42,7 +42,7 @@ class OpenAIBackend:
                 self.base_url,
             )
         ):
-            raise BackendError("invalid_request")
+            raise self._error("invalid_request")
         try:
             parsed = urlsplit(self.base_url)
             valid = (
@@ -56,12 +56,22 @@ class OpenAIBackend:
         except ValueError:
             valid = False
         if not valid:
-            raise BackendError("invalid_request")
+            raise self._error("invalid_request")
         self.base_url = self.base_url.rstrip("/")
+
+    def _error(self, code, *, http_status=None, credential_code=None):
+        error = BackendError(code)
+        fields = {"error_code": error.code}
+        if http_status is not None:
+            fields["http_status"] = http_status
+        if credential_code is not None:
+            fields["credential_code"] = credential_code
+        self.ctx.log.warning("image_backend_error", **fields)
+        return error
 
     def _fields(self, prompt):
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 32_000:
-            raise BackendError("invalid_request")
+            raise self._error("invalid_request")
         return {"model": self.model, "prompt": prompt, "n": 1, "output_format": "png"}
 
     async def generate(self, prompt, cancel):
@@ -79,7 +89,7 @@ class OpenAIBackend:
             or len(image_bytes) > MAX_IMAGE_BYTES
             or media_type not in extensions
         ):
-            raise BackendError("invalid_request")
+            raise self._error("invalid_request")
         values = [(key, str(value).encode("utf-8")) for key, value in fields.items()]
         boundary = b"clytie-image-boundary"
         while any(boundary in value for _, value in values) or boundary in image_bytes:
@@ -116,7 +126,10 @@ class OpenAIBackend:
         )
 
     async def _request(self, endpoint, body, content_type, cancel):
+        http_status = None
+
         async def operation():
+            nonlocal http_status
             key = await self.ctx.credentials.read(self.api_key_ref)
             cancel.raise_if_cancelled()
             response = await self.ctx.http.request(
@@ -127,6 +140,7 @@ class OpenAIBackend:
                 timeout_s=TIMEOUT_S,
                 max_bytes=MAX_RESPONSE_BYTES,
             )
+            http_status = response.status
             cancel.raise_if_cancelled()
             return self._decode(response)
 
@@ -136,13 +150,15 @@ class OpenAIBackend:
             await asyncio.wait((task, cancelled), return_when=asyncio.FIRST_COMPLETED)
             cancel.raise_if_cancelled()
             return await task
-        except BackendError:
-            raise
-        except (CredentialUnavailable, ValueError, TypeError, AttributeError):
-            raise BackendError("invalid_request") from None
+        except BackendError as error:
+            raise self._error(error.code, http_status=http_status) from None
+        except CredentialUnavailable as error:
+            raise self._error("invalid_request", credential_code=error.code) from None
+        except (ValueError, TypeError, AttributeError):
+            raise self._error("invalid_request", http_status=http_status) from None
         except Exception:
             # 网络异常可能包含完整 URL 或响应，不能传出原异常文本。
-            raise BackendError("transient") from None
+            raise self._error("transient", http_status=http_status) from None
         finally:
             for pending in (task, cancelled):
                 if not pending.done():

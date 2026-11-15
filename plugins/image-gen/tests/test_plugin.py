@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,19 @@ from clytie.sdk.immutable import FrozenDict
 from clytie.sdk.testing import FakeContext, MockClock, assert_capability_contract
 from clytie.sdk.testing.samples import sample_call, sample_invocation
 from clytie.sdk.types import Denial
+
+
+def test_manifest_examples_distinguish_draw_from_edit():
+    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in manifest["contributes"]["tools"]}
+    draw, edit = tools["draw_image"], tools["edit_image"]
+    assert draw["examples"] != edit["examples"]
+    assert [example["input"] for example in edit["examples"] if example["call"]] == [
+        "把刚才那张改成红色"
+    ]
+    negatives = {example["input"] for example in edit["examples"] if not example["call"]}
+    assert {"重新画一只猫（新画，用 draw_image）", "不要修改刚才那张图"} <= negatives
+    assert "修改刚生成的图时用 edit_image" in draw["when_not_to_use"]
 
 
 def load_plugin():

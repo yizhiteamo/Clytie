@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from clytie.sdk import Cancelled, CancelToken, CredentialUnavailable
+from clytie.sdk.testing import FakeLog
 from clytie.sdk.types import HttpResponse
 
 
@@ -63,7 +64,7 @@ class Http:
 
 
 def setup(module, result=None):
-    ctx = SimpleNamespace(credentials=Credentials(), http=Http(result))
+    ctx = SimpleNamespace(credentials=Credentials(), http=Http(result), log=FakeLog())
     return ctx, module.OpenAIBackend(
         ctx, {"model": "test-image-model", "api_key_ref": "image_test"}
     )
@@ -122,17 +123,25 @@ async def test_safe_error_mapping(module, status, code, expected):
     assert str(caught.value) == expected
     assert MARKER not in "".join(traceback.format_exception(caught.value))
     assert len(ctx.http.calls) == 1
+    assert ctx.log.entries == [
+        ("warning", "image_backend_error", {"error_code": expected, "http_status": status})
+    ]
+    assert MARKER not in repr(ctx.log.entries)
 
 
 @pytest.mark.parametrize("error", [TimeoutError(MARKER), OSError(MARKER), ValueError(MARKER)])
 async def test_safe_transport_errors(module, error):
-    _, backend = setup(module, error)
+    ctx, backend = setup(module, error)
     with pytest.raises(module.BackendError) as caught:
         await backend.generate("garden", CancelToken())
     assert caught.value.code == (
         "invalid_request" if isinstance(error, ValueError) else "transient"
     )
     assert MARKER not in "".join(traceback.format_exception(caught.value))
+    assert ctx.log.entries == [
+        ("warning", "image_backend_error", {"error_code": caught.value.code})
+    ]
+    assert MARKER not in repr(ctx.log.entries)
 
 
 @pytest.mark.parametrize(
@@ -194,8 +203,12 @@ async def test_precancel_does_not_read_credentials(module):
 
 
 def test_model_required(module):
+    ctx = SimpleNamespace(log=FakeLog())
     with pytest.raises(module.BackendError, match="invalid_request"):
-        module.OpenAIBackend(SimpleNamespace(), {"api_key_ref": "image_test"})
+        module.OpenAIBackend(ctx, {"api_key_ref": "image_test"})
+    assert ctx.log.entries == [
+        ("warning", "image_backend_error", {"error_code": "invalid_request"})
+    ]
 
 
 async def test_decoded_image_size_limit(module, monkeypatch):
@@ -226,16 +239,25 @@ async def test_task_cancellation_interrupts_credential_read(module):
     assert not ctx.http.calls
 
 
-async def test_credential_failure_does_not_start_request(module):
+@pytest.mark.parametrize("code", ["unknown_ref", "not_permitted", "missing", "empty", "unreadable"])
+async def test_credential_failure_does_not_start_request(module, code):
     ctx, backend = setup(module)
 
     async def read(ref):
-        raise CredentialUnavailable("missing")
+        raise CredentialUnavailable(code)
 
     ctx.credentials.read = read
     with pytest.raises(module.BackendError, match="invalid_request"):
         await backend.generate("garden", CancelToken())
     assert not ctx.http.calls
+    assert ctx.log.entries == [
+        (
+            "warning",
+            "image_backend_error",
+            {"error_code": "invalid_request", "credential_code": code},
+        )
+    ]
+    assert MARKER not in repr(ctx.log.entries)
 
 
 @pytest.mark.parametrize("payload", [{"error": []}, {"error": {"code": ["bad"]}}, []])
