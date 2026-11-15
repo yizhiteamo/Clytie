@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "openai-api",
+  "name": "openai-api",
+  "summary": "通过兼容 Chat Completions 的接口调用普通模型",
+  "category": "model",
+  "version": "0.1.0",
+  "requires": {"sdk": ">=0.11,<0.12"},
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": [],
+  "permissions": ["network"],
+  "contributes": {"model": {"factory": "create_model"}},
+  "config": {
+    "type": "object",
+    "properties": {
+      "base_url": {"type": "string", "minLength": 1},
+      "model": {"type": "string", "minLength": 1},
+      "api_key_ref": {"type": "string", "minLength": 1},
+      "context_chars": {"type": "integer", "minimum": 1},
+      "supports_tools": {"type": "boolean", "default": true},
+      "supports_images": {"type": "boolean", "default": true}
+    },
+    "required": ["base_url", "model", "api_key_ref", "context_chars"],
+    "additionalProperties": false
+  },
+  "data": {"version": 1, "on_uninstall": "keep"},
+  "failure_default": {}
+}

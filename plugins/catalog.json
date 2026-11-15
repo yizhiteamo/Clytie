@@ -136,6 +136,24 @@
       "version": "0.2.0"
     },
     {
+      "category": "model",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "openai-api",
+      "name": "openai-api",
+      "permissions": [
+        "network"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "通过兼容 Chat Completions 的接口调用普通模型",
+      "version": "0.1.0"
+    },
+    {
       "category": "channel",
       "conflicts": [],
       "dependencies": {},
