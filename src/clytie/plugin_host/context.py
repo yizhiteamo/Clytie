@@ -237,6 +237,30 @@ class Model:
         return ModelTurn.model_validate(await self._backend.generate(req, cancel, purpose=purpose))
 
 
+class WebSocket:
+    def __init__(self, backend):
+        self._backend = backend
+
+    async def connect(self, url, *, headers=None, timeout_s=10, max_message_bytes=16 * 1024 * 1024):
+        connection = await self._backend.connect(
+            url, headers=headers, timeout_s=timeout_s, max_message_bytes=max_message_bytes
+        )
+        methods = surface(connection, ("send_text", "receive", "close"))
+
+        class Connection:
+            __slots__ = ()
+
+            def __getattribute__(self, name):
+                if name in {"closed", "close_code"}:
+                    return getattr(connection, name)
+                return getattr(methods, name)
+
+            def __dir__(self):
+                return ["close", "close_code", "closed", "receive", "send_text"]
+
+        return Connection()
+
+
 def build_context(host, runtime, config, backends, *, permissions=None, migration=False):
     manifest = runtime.manifest
     declared = frozenset(manifest.data["permissions"])
@@ -258,7 +282,18 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "state": State(host, runtime.companion_id, manifest.id),
         "assets": ReadAssets(backends.get("assets")),
     }
-    if not migration and any(
+    channel = (
+        not migration
+        and "channel" in manifest.data["contributes"]
+        and runtime.unit_role in {None, "channel"}
+    )
+    if channel:
+        from .credentials import ChannelCredentials
+
+        values["credentials"] = ChannelCredentials(
+            host.home, manifest.id, host.credentials, host.accounts.get(runtime.account_ref)
+        )
+    elif not migration and any(
         manifest.id in entry["plugins"] for entry in host.credentials.values()
     ):
         from .credentials import Credentials
@@ -291,6 +326,10 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         elif name == "proactive":
             backend = Proactive(backend)
         values[name] = backend
+    if "network" in granted:
+        if "websocket" not in backends:
+            raise BackendUnavailable("network")
+        values["websocket"] = WebSocket(backends["websocket"])
     if any(p.startswith("memory.") for p in granted):
         if "memory" not in backends:
             raise BackendUnavailable("memory")
@@ -325,12 +364,19 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "services": ("get",),
         "subprocess": ("run",),
         "http": ("request",),
-        "credentials": ("read",),
+        "credentials": ("read", "account_secret") if channel else ("read",),
+        "websocket": ("connect",),
         "model": ("generate",),
         "asset_writer": ("put",),
         "peer": ("send", "request"),
         "proactive": ("submit",),
-        "identity": ("resolve_actor", "resolve_conversation", "account_for", "platform_id_for"),
+        "identity": (
+            "resolve_actor",
+            "resolve_conversation",
+            "account_for",
+            "platform_id_for",
+            "self_account",
+        ),
     }
     for name, members in exposed.items():
         if name in values:

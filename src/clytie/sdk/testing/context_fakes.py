@@ -398,12 +398,16 @@ class FakeSubprocess:
 
 
 class FakeIdentity:
-    def __init__(self, channel_id, *, actors=None, conversations=None):
+    def __init__(self, channel_id, *, actors=None, conversations=None, self_account=None):
+        self._self_account = self_account
         self.channel_id, self.actors, self.conversations = (
             channel_id,
             dict(actors or {}),
             dict(conversations or {}),
         )
+
+    def self_account(self):
+        return self._self_account
 
     def resolve_actor(self, account):
         if account in self.actors:
@@ -483,7 +487,10 @@ class FakeContext:
         if "model.invoke" in permissions:
             self.model = FakeModelInvoker(self)
         if "network" in permissions:
+            from .websocket import FakeWebSocket
+
             self.http = FakeHttp(self.clock)
+            self.websocket = FakeWebSocket()
         if "message.proactive" in permissions:
             self.proactive = FakeProactive(self.clock)
         if "subprocess" in permissions:

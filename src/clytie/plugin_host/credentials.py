@@ -44,3 +44,19 @@ class Credentials:
         if not value:
             raise CredentialUnavailable("empty")
         return value
+
+
+class ChannelCredentials(Credentials):
+    """平台单元只读取宿主绑定账号的密钥，绑定在生命周期内固定。"""
+
+    def __init__(self, home, plugin_id, declarations, account=None):
+        super().__init__(home, plugin_id, declarations)
+        self._account_bound = account is not None
+        self._account_secret = account.get("secret") if account is not None else None
+
+    async def account_secret(self):
+        if not self._account_bound:
+            raise CredentialUnavailable("unknown_ref")
+        if self._account_secret is None:
+            raise CredentialUnavailable("missing")
+        return await asyncio.to_thread(self._read, self._account_secret)

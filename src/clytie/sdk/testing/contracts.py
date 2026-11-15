@@ -134,6 +134,7 @@ def assert_plugin_context_contract(context: Any, *, granted: Sequence[str] = ())
         "peer",
         "model",
         "http",
+        "websocket",
         "proactive",
         "subprocess",
         "identity",
