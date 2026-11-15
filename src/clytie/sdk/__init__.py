@@ -4,11 +4,11 @@ from .backup import BackupEntry, BackupProvider, BackupRequest, BackupSink, Back
 from .cancellation import Cancelled, CancelToken
 from .channel import ChannelUnavailable
 from .clock import Clock
-from .context import PluginContext
+from .context import CredentialUnavailable, PluginContext
 from .plugin import PluginUnavailable
 from .types import QUOTA_UNKNOWN, ChannelState
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 __all__ = [
     "BackupEntry",
     "BackupProvider",
@@ -24,5 +24,6 @@ __all__ = [
     "Cancelled",
     "Clock",
     "PluginContext",
+    "CredentialUnavailable",
     "__version__",
 ]

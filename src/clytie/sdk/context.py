@@ -30,6 +30,20 @@ class ServiceUnavailable(Exception):
     """服务当前不可用。"""
 
 
+class CredentialUnavailable(Exception):
+    """凭据不可用；异常不包含路径或凭据内容。"""
+
+    def __init__(self, code):
+        if code not in {"unknown_ref", "not_permitted", "missing", "empty", "unreadable"}:
+            raise ValueError("invalid credential error code")
+        self.code = code
+        super().__init__(code)
+
+
+class Credentials(Protocol):
+    async def read(self, ref: str) -> str: ...
+
+
 class Logger(Protocol):
     def debug(self, msg: str, **fields: JsonValue) -> None: ...
     def info(self, msg: str, **fields: JsonValue) -> None: ...

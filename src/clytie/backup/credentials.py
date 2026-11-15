@@ -44,17 +44,18 @@ def document_exclusions(
     if reader.errors:
         raise ValueError("opaque_credential_config")
     result = []
-    accounts = document.get("accounts", {}) if document_kind == "instance" else {}
-    for name, account in accounts.items() if isinstance(accounts, dict) else ():
-        if isinstance(account, dict) and "secret" in account:
-            result.append(
-                dict(
-                    file=file,
-                    pointer=pointer(("accounts", name, "secret")),
-                    kind="file_reference",
-                    schema_sha256=schema_hash(schema),
+    for group in ("accounts", "credentials") if document_kind == "instance" else ():
+        references = document.get(group, {})
+        for name, reference in references.items() if isinstance(references, dict) else ():
+            if isinstance(reference, dict) and "secret" in reference:
+                result.append(
+                    dict(
+                        file=file,
+                        pointer=pointer((group, name, "secret")),
+                        kind="file_reference",
+                        schema_sha256=schema_hash(schema),
+                    )
                 )
-            )
 
     def plugin_config(file, prefix, pid, value):
         try:

@@ -106,6 +106,7 @@ class Runtime:
     stop_errors: list = field(default_factory=list)
     unit_role: str | None = None
     account_ref: str | None = None
+    owned_http: object = None
 
 
 class PluginHost(MigrationMixin):
@@ -117,14 +118,21 @@ class PluginHost(MigrationMixin):
         from clytie.assets import AssetStore
 
         self.asset_store = AssetStore(self.home, self.clock)
+        self.credentials = {}
 
         def resolve_backends(cid, pid):
             bound = self.asset_store.bind(cid)
-            return {
+            result = {
                 "assets": bound,
                 "asset_writer": bound,
                 **(backends(cid, pid) if backends is not None else {}),
             }
+            manifest = self.manifests.get(pid)
+            if manifest and "network" in manifest.data["permissions"] and "http" not in result:
+                from .http import HttpBackend
+
+                result["http"] = HttpBackend(self.clock, self.log)
+            return result
 
         self.backends = resolve_backends
         self.memory_resources = {}
@@ -199,6 +207,7 @@ class PluginHost(MigrationMixin):
         from .identity import IdentityResolver
 
         self.timezone = report.instance["timezone"]
+        self.credentials = thaw(report.instance.get("credentials", {}))
         for cid, result in report.plugin_configs.items():
             config = result["config"]
             self.memory_config[cid] = (thaw(config), thaw(report.instance))
@@ -623,6 +632,10 @@ class PluginHost(MigrationMixin):
                 runtime.units.append(unit)
                 unit.unit_role, unit.account_ref = layout["role"], layout.get("account")
                 backends = dict(self.backends(*key))
+                from .http import HttpBackend
+
+                if isinstance(backends.get("http"), HttpBackend):
+                    unit.owned_http = backends["http"]
                 if key in self.recollection_models:
                     backends["model"] = self.recollection_models[key]
                 if "memory" not in backends and (
@@ -677,12 +690,17 @@ class PluginHost(MigrationMixin):
             async def cleanup_start():
                 for unit in reversed(runtime.units or [runtime]):
                     if unit.plugin is None:
+                        if unit.owned_http is not None:
+                            await unit.owned_http.close()
                         continue
                     try:
                         with bind_scene():
                             await timed(unit.plugin.stop(), self.clock, 10)
                     except (Exception, asyncio.CancelledError) as cleanup_error:
                         self._failure(runtime, "start_cleanup", cleanup_error)
+                    finally:
+                        if unit.owned_http is not None:
+                            await unit.owned_http.close()
                 runtime.status, runtime.registrations = (
                     ("disabled" if metadata_timeout else "start_failed"),
                     (),
@@ -791,6 +809,9 @@ class PluginHost(MigrationMixin):
             runtime.stop_errors.append(type(exc).__name__)
             self._failure(runtime, "stop", exc)
         finally:
+            for unit in reversed(runtime.units or [runtime]):
+                if unit.owned_http is not None:
+                    await unit.owned_http.close()
             runtime.status, runtime.registrations = "disabled", ()
 
     def registrations(self, companion_id, point=None):

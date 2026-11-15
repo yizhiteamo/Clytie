@@ -1,4 +1,4 @@
-"""仅暴露声明且授权的方法；所有外部能力由本体注入，宿主不创建真实后端。"""
+"""仅暴露声明且授权的方法；外部能力由本体注入。"""
 
 from random import Random
 from types import SimpleNamespace
@@ -258,6 +258,12 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "state": State(host, runtime.companion_id, manifest.id),
         "assets": ReadAssets(backends.get("assets")),
     }
+    if not migration and any(
+        manifest.id in entry["plugins"] for entry in host.credentials.values()
+    ):
+        from .credentials import Credentials
+
+        values["credentials"] = Credentials(host.home, manifest.id, host.credentials)
     options = {
         "assets.write": "asset_writer",
         "peer": "peer",
@@ -319,6 +325,7 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "services": ("get",),
         "subprocess": ("run",),
         "http": ("request",),
+        "credentials": ("read",),
         "model": ("generate",),
         "asset_writer": ("put",),
         "peer": ("send", "request"),
