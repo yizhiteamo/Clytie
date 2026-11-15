@@ -87,6 +87,7 @@ async def test_all_context_protocols_have_functional_contracts(ctx):
             "peer",
             "model",
             "http",
+            "websocket",
             "proactive",
             "subprocess",
             "identity",
@@ -289,6 +290,9 @@ def test_context_protocol_inventory_is_covered():
     # 新增协议却没有契约入口时本测试失败。
     expected = {
         "Credentials": "credentials",
+        "ChannelCredentials": "channel_credentials",
+        "WebSocket": "websocket",
+        "WebSocketConnection": "websocket_connection",
         "Logger": "logger",
         "Storage": "storage",
         "Events": "events",

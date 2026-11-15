@@ -8,6 +8,7 @@ from clytie.sdk.types import Actor, Conversation
 class IdentityResolver:
     def __init__(self, channel_id, plugin_id, instance):
         self._channel = channel_id
+        self._self_account = instance.get("accounts", {}).get(channel_id, {}).get("account")
         self._actors, self._conversations = {}, {}
         for actor_id, person in instance.get("people", {}).items():
             if actor_id.startswith("x-"):
@@ -26,6 +27,9 @@ class IdentityResolver:
                 scene=conversation["scene"],
                 channel_id=channel_id,
             )
+
+    def self_account(self):
+        return self._self_account
 
     def resolve_actor(self, account):
         if account in self._actors:

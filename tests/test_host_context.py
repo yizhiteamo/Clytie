@@ -50,6 +50,7 @@ async def test_host_context_contracts_with_injected_backends_only(tmp_path):
             "peer",
             "model",
             "http",
+            "websocket",
             "proactive",
             "identity",
         )
@@ -92,6 +93,7 @@ async def test_host_context_contracts_with_injected_backends_only(tmp_path):
             "peer",
             "model",
             "http",
+            "websocket",
             "proactive",
             "subprocess",
         ),

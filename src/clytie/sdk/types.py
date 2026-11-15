@@ -157,6 +157,8 @@ class StickerPart(SDKModel):
     type: Literal["sticker"] = "sticker"
     sticker_id: str
     asset: AssetRef | None = None
+    raw_ref: str | None = None
+    summary: str | None = Field(default=None, max_length=100)
 
 
 class CardPart(SDKModel):

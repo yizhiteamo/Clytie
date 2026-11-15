@@ -264,3 +264,32 @@ def assert_identity_contract(identity, account, actor, platform_id, conversation
     assert identity.platform_id_for(conversation.conversation_id) == platform_id
     assert identity.account_for("fictional-missing") is None
     assert identity.platform_id_for("fictional-missing") is None
+
+
+async def assert_channel_credentials_contract(credentials, *, expected=None, error=None):
+    if error is not None:
+        try:
+            await credentials.account_secret()
+        except CredentialUnavailable as exc:
+            assert exc.code == error
+        else:
+            raise AssertionError("expected credential failure")
+    else:
+        assert await credentials.account_secret() == expected
+
+
+async def assert_websocket_connection_contract(connection, cancel, expected):
+    assert not connection.closed
+    await connection.send_text("fictional outgoing")
+    assert await connection.receive(cancel) == expected
+    await connection.close()
+    assert connection.closed
+    from clytie.sdk import WebSocketClosed
+
+    await rejects_async(WebSocketClosed, lambda: connection.send_text("closed"))
+    await rejects_async(WebSocketClosed, lambda: connection.receive(cancel))
+
+
+async def assert_websocket_contract(websocket, cancel, expected):
+    connection = await websocket.connect("ws://example.invalid/")
+    await assert_websocket_connection_contract(connection, cancel, expected)

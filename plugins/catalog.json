@@ -134,6 +134,24 @@
       },
       "summary": "仅使用虚构数据验证扩展点的参考插件",
       "version": "0.2.0"
+    },
+    {
+      "category": "channel",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "qq-onebot",
+      "name": "QQ OneBot 平台",
+      "permissions": [
+        "network"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
+      "version": "0.1.0"
     }
   ],
   "schema_version": 1
