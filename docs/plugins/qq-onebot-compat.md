@@ -20,9 +20,11 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 
 ## 3. 标准之外的入站消息段
 
-- `file` 映射为 file 类型，`mface` 映射为 sticker 类型。只按 `type` 判断，不要求 `data` 里有任何字段。
-- `raw_ref` 保存这个段的 `data` 原样内容，按 JSON 序列化后不超过 4 KB；超过或不是对象时，`raw_ref` 为空对象，并记一次畸形段计数。
-- 文字说明只在 `mface` 的 `data.summary` 是字符串时使用，长度截到 100 字；否则不给说明。
+- `file` 映射为 `FilePart`，`mface` 映射为 `StickerPart`（ADR 0033）。只按 `type` 判断，不要求 `data` 里有任何字段。
+- `raw_ref` 是这个段的 `data` 按 JSON 序列化得到的字符串（键排序、UTF-8），不超过 4 KB。超过 4 KB 或 `data` 不是对象时，`raw_ref` 为 `None`，并记一次畸形段计数。
+- `mface` 的 `sticker_id`：有 `raw_ref` 时为 `"mface:"` 加 `raw_ref` 的 SHA-256 前 16 位十六进制；没有时为 `"mface:unknown"`。插件不从 `data` 中挑选字段当编号。
+- `summary` 只在 `mface` 的 `data.summary` 是字符串时填写，截到 100 字；否则为 `None`。
+- 标准消息段 `face` 映射为 `StickerPart`，`sticker_id` 为 `"face:"` 加 `data.id`；`data.id` 缺失或不是数字/数字字符串时，映射为 unknown 段并计数。
 - 出站不发送 `file` 和 `mface`。
 
 ## 4. 出站图片
@@ -49,5 +51,6 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 ## 6. 测试
 
 - 表情回应：成功；1404 降级且本连接内不再发送；其他失败只记日志；配置缺编号时不发送。
-- `file`、`mface`：有数据、没有数据、`data` 不是对象、超过 4 KB。
+- `file`、`mface`：有数据、没有数据、`data` 不是对象、超过 4 KB；同一份 `mface` 数据得到相同的 `sticker_id`；`summary` 截断。
+- `face`：正常编号、缺失编号。
 - 收据：上表每一行一个测试；`retcode_classes` 配置为限流和临时失败各一个；未配置的码为永久错误。
