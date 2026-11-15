@@ -130,7 +130,7 @@ async def test_real_host_onebot_credentials_event_and_asset_send(tmp_path):
             "account": "example_bot",
             "config": {
                 "url": str(server.make_url("/")).replace("http://", "ws://"),
-                "reconnect_delays": [],
+                "reconnect_delays": [1],
                 "media_limits": {"image": {"max_bytes": 1024, "formats": ["image/png"]}},
             },
         }

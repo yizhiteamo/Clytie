@@ -7,8 +7,8 @@ B2 正向 WebSocket 平台插件。按 OneBot v11 标准与仓库 `docs/plugins/
 平台单元绑定 `accounts` 中的账号。预期账号由 `ctx.identity.self_account()` 提供；令牌由 `ctx.credentials.account_secret()` 每次连接时读取。插件配置不存账号和令牌；登录账号不符时进入 auth_invalid，重启前不再重连。
 
 - `url` 必填：协议端同时支持事件和 API 的正向 ws/wss 地址。
-- `connect_timeout_s`、`request_timeout_s` 默认 10 秒；`heartbeat_timeout_s` 默认 60 秒。
-- `reconnect_delays` 默认按 1、2、4 秒最多重连三次；成功核验连接后下一次断线重新按这组间隔处理。
+- `connect_timeout_s` 默认 10 秒，`request_timeout_s` 默认 30 秒；`heartbeat_timeout_s` 默认 60 秒。
+- `reconnect_delays` 至少一项，默认按 1、2、4、8、16、30 秒重连，耗尽后持续按最后一项间隔重试；成功核验连接后下一次断线重新按这组间隔处理。auth_invalid 或插件停止时退出重连。
 - `queue_limit` 默认 128，溢出丢弃并记录告警和状态计数；不无限积压。
 - `max_message_bytes` 默认 16 MiB；`max_text_chars` 默认 4000。
 - `emoji_ids` 没有默认编号，四项 👌⏳✅❌ 都有编号才启用回应；接口不存在时仅当前连接降级。

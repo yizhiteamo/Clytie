@@ -9,6 +9,8 @@ from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, Receipt
 
 from .mapping import encode_parts, normalize_event
 
+_NOT_SENT = object()
+
 
 class OneBotChannel:
     def __init__(self, ctx):
@@ -125,8 +127,10 @@ class OneBotChannel:
                     return
                 if self._state.status != "unknown":
                     await self._publish("offline")
-                for delay in self._config.get("reconnect_delays", (1, 2, 4)):
-                    await self.ctx.clock.sleep(delay)
+                delays = self._config.get("reconnect_delays", (1, 2, 4, 8, 16, 30))
+                attempt = 0
+                while not self._stop.is_set():
+                    await self.ctx.clock.sleep(delays[min(attempt, len(delays) - 1)])
                     if self._stop.is_set():
                         return
                     try:
@@ -138,11 +142,10 @@ class OneBotChannel:
                         raise
                     except Exception:
                         await self._disconnect()
+                        await self._publish("offline")
+                        attempt = min(attempt + 1, len(delays) - 1)
                         continue
                     break
-                else:
-                    await self._publish("offline")
-                    return
         except asyncio.CancelledError:
             raise
         finally:
@@ -215,7 +218,7 @@ class OneBotChannel:
         cancel.raise_if_cancelled()
         ws = self._ws
         if ws is None or ws.closed:
-            return None
+            return _NOT_SENT
         self._sequence += 1
         echo = str(self._sequence)
         future = asyncio.get_running_loop().create_future()
@@ -228,7 +231,7 @@ class OneBotChannel:
             return await future
 
         operation = asyncio.create_task(exchange())
-        timer = asyncio.create_task(self.ctx.clock.sleep(self._config.get("request_timeout_s", 10)))
+        timer = asyncio.create_task(self.ctx.clock.sleep(self._config.get("request_timeout_s", 30)))
         cancelled = asyncio.create_task(cancel.wait())
         try:
             done, _ = await asyncio.wait(
@@ -270,7 +273,7 @@ class OneBotChannel:
         cancel.raise_if_cancelled()
         await self.ctx.clock.sleep(0)
         if self._state.status != "online":
-            return self._receipt(intent, "unknown")
+            return self._receipt(intent, "failed", "transient")
         platform_id = self.ctx.identity.platform_id_for(intent.conversation_id)
         if intent.channel_id != self._channel_id or platform_id is None:
             return self._receipt(intent, "failed", "invalid_request")
@@ -301,6 +304,8 @@ class OneBotChannel:
             {"group_id" if kind == "group" else "user_id": platform_id, "message": parts},
             cancel,
         )
+        if result is _NOT_SENT:
+            return self._receipt(intent, "failed", "transient")
         self._log_result(action, result)
         if (
             isinstance(result, dict)
@@ -321,7 +326,7 @@ class OneBotChannel:
         cancel.raise_if_cancelled()
         await self.ctx.clock.sleep(0)
         if self._state.status != "online":
-            return self._receipt(intent, "unknown")
+            return self._receipt(intent, "failed", "transient")
         if not self._reaction_enabled or intent.emoji not in self._config.get("emoji_ids", {}):
             return self._receipt(intent, "failed", "unsupported")
         if (
@@ -339,6 +344,8 @@ class OneBotChannel:
             },
             cancel,
         )
+        if result is _NOT_SENT:
+            return self._receipt(intent, "failed", "transient")
         self._log_result("set_msg_emoji_like", result)
         if isinstance(result, dict) and result.get("status") == "ok":
             return self._receipt(intent, "sent", message_id=intent.target.platform_message_id)

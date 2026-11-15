@@ -80,7 +80,7 @@ def make(tmp_path, protocol=None, **config):
         permissions=["network"],
         config={
             "url": "ws://127.0.0.1:1",
-            "reconnect_delays": [],
+            "reconnect_delays": [1],
             "emoji_ids": {"👌": "1", "⏳": "2", "✅": "3", "❌": "4"},
             **config,
         },
@@ -176,12 +176,23 @@ async def test_receipt_classification(tmp_path, reply, status, error):
         await channel.close()
 
 
-@pytest.mark.parametrize("mode", ["timeout", "mismatch", "disconnect", "cancel"])
-async def test_pending_unknown_no_resend_or_late_receipt(tmp_path, mode):
+@pytest.mark.parametrize("react", [False, True])
+@pytest.mark.parametrize(
+    "mode", ["timeout", "late", "mismatch", "disconnect", "send_error", "cancel"]
+)
+async def test_pending_unknown_no_resend_or_late_receipt(tmp_path, mode, react):
     ctx, channel, protocol = make(tmp_path, Protocol(reply="silence"), request_timeout_s=2)
     await channel.connect()
     token = CancelToken()
-    task = asyncio.create_task(channel.send(intent(), token))
+    if mode == "send_error":
+
+        async def fail_after_call(text):
+            protocol.actions.append(json.loads(text))
+            raise ConnectionError("fictional failure")
+
+        protocol.send_text = fail_after_call
+    invoke = channel.react if react else channel.send
+    task = asyncio.create_task(invoke(intent(react=react), token))
     await ctx.clock.drain()
     request = protocol.actions[-1]
     try:
@@ -259,8 +270,10 @@ async def test_missing_reaction_config_skips_action(tmp_path):
         await channel.close()
 
 
-async def test_heartbeat_unknown_and_reconnect_budget(tmp_path):
+async def test_heartbeat_reconnect_repeats_last_delay_and_recovers(tmp_path):
     ctx, channel, protocol = make(tmp_path, heartbeat_timeout_s=5, reconnect_delays=[1, 2])
+
+    restored = Protocol()
 
     class FailingSocket:
         def __init__(self):
@@ -270,6 +283,8 @@ async def test_heartbeat_unknown_and_reconnect_budget(tmp_path):
             self.calls += 1
             if self.calls == 1:
                 return protocol
+            if self.calls >= 4:
+                return restored
             raise ConnectionError("fictional-secret")
 
     ctx.websocket = FailingSocket()
@@ -278,10 +293,16 @@ async def test_heartbeat_unknown_and_reconnect_budget(tmp_path):
     assert channel.state().status == "unknown"
     await ctx.clock.advance_and_drain(3)
     assert ctx.websocket.calls == 3
-    assert channel.state().status == "offline"
-    await ctx.clock.advance_and_drain(100)
+    assert not channel._manager.done()
+    await ctx.clock.advance_and_drain(1)
     assert ctx.websocket.calls == 3
+    await ctx.clock.advance_and_drain(1)
+    assert ctx.websocket.calls == 4
+    assert channel.state().status == "online"
     await channel.close()
+    await ctx.clock.advance_and_drain(100)
+    assert ctx.websocket.calls == 4
+    assert ctx.clock.pending_sleep_count == 0
     assert "fictional-secret" not in repr(ctx.log.entries)
 
 
@@ -297,8 +318,11 @@ async def test_no_outbound_before_login_verification(tmp_path):
     await ctx.clock.drain()
     try:
         assert channel.state().status == "connecting"
-        assert (await channel.send(intent(), CancelToken())).status == "unknown"
-        assert (await channel.react(intent(react=True), CancelToken())).status == "unknown"
+        for receipt in (
+            await channel.send(intent(), CancelToken()),
+            await channel.react(intent(react=True), CancelToken()),
+        ):
+            assert receipt.status == "failed" and receipt.error.code == "transient"
         assert len(protocol.actions) == 1
     finally:
         opening.cancel()
@@ -427,6 +451,83 @@ async def test_only_matching_heartbeat_renews_liveness(tmp_path):
         await ctx.clock.drain()
         await ctx.clock.advance_and_drain(1)
         assert protocol.closed
-        assert channel.state().status == "offline"
+        assert channel.state().status == "unknown"
     finally:
         await channel.close()
+
+
+@pytest.mark.parametrize("react", [False, True])
+@pytest.mark.parametrize("state", ["offline", "connecting", "unknown", "auth_invalid"])
+async def test_not_online_is_definitely_unsent(tmp_path, react, state):
+    _, channel, protocol = make(tmp_path)
+    await channel._publish(state)
+    invoke = channel.react if react else channel.send
+    result = await invoke(intent(react=react), CancelToken())
+    assert result.status == "failed" and result.error.code == "transient"
+    assert not protocol.sent and not protocol.actions
+    await channel.close()
+
+
+@pytest.mark.parametrize("react", [False, True])
+@pytest.mark.parametrize("connection", ["missing", "closed"])
+async def test_connection_unavailable_before_send_is_transient(tmp_path, react, connection):
+    _, channel, protocol = make(tmp_path)
+    await channel._publish("online")
+    if connection == "closed":
+        await protocol.close()
+        channel._ws = protocol
+    invoke = channel.react if react else channel.send
+    result = await invoke(intent(react=react), CancelToken())
+    assert result.status == "failed" and result.error.code == "transient"
+    assert not protocol.sent and not protocol.actions
+    assert not channel._pending
+    await channel.close()
+
+
+async def test_request_default_timeout_is_thirty_seconds(tmp_path):
+    ctx, channel, protocol = make(tmp_path, Protocol(reply="silence"))
+    await channel.connect()
+    task = asyncio.create_task(channel.send(intent(), CancelToken()))
+    try:
+        await ctx.clock.drain()
+        await ctx.clock.advance_and_drain(29)
+        assert not task.done()
+        await ctx.clock.advance_and_drain(1)
+        assert (await task).status == "unknown"
+        assert len(protocol.actions) == 2
+    finally:
+        await channel.close()
+
+
+def test_reconnect_and_request_defaults():
+    schema = json.loads((Path(__file__).parents[1] / "plugin.json").read_text(encoding="utf-8"))[
+        "config"
+    ]
+    assert schema["properties"]["request_timeout_s"]["default"] == 30
+    delays = schema["properties"]["reconnect_delays"]
+    assert delays["default"] == [1, 2, 4, 8, 16, 30]
+    assert delays["minItems"] == 1
+
+
+async def test_close_stops_repeated_reconnect_wait(tmp_path):
+    ctx, channel, protocol = make(tmp_path, reconnect_delays=[1])
+
+    class FailingSocket:
+        calls = 0
+
+        async def connect(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return protocol
+            raise ConnectionError("fictional failure")
+
+    ctx.websocket = FailingSocket()
+    await channel.connect()
+    await protocol.close()
+    await ctx.clock.advance_and_drain(3)
+    assert ctx.websocket.calls == 4
+    assert not channel._manager.done()
+    await channel.close()
+    await ctx.clock.advance_and_drain(100)
+    assert ctx.websocket.calls == 4
+    assert ctx.clock.pending_sleep_count == 0
