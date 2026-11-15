@@ -170,7 +170,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 | 顺序 | 里程碑 | 预估 |
 |---|---|---|
-| 1 | B1 画图能力插件 `image-gen` | 1–2 天 |
+| 1 | B1 画图能力插件 `image-gen`（含运行时服务补充） | 3–4 天 |
 | 2 | B2 QQ 平台插件精简版 `qq-onebot`（对接 NapCat 等 OneBot 协议端） | 2–3 天 |
 | 3 | B3a 模型插件 `openai-api` | 1–2 天 |
 | → | 经用户当次同意，在测试会话跑真实链路，随后上线 | |
@@ -190,11 +190,13 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 画图是独立的能力插件，与平台插件之间没有任何依赖。
 
+**本体补充**（Issue #83）：插件要读取 API 密钥、本体要限制每日次数、插件要有真实的网络访问，这三项现在都还没有。B1 先按 [runtime-services-spec](architecture/runtime-services-spec.md) 第 1–3 节和 [ADR 0031](adr/0031-plugin-credentials.md) 实现它们，并通过测试，再写插件。
+
 **范围**
 1. **工具**：`draw_image`（根据描述生成）和 `edit_image`（修改本会话上一张生成的图）。插件在自己的存储里按会话记录最近几次生成的结果。两个工具都标为 `heavy`，走 ⏳✅❌ 回应。
 2. **后端适配层**：插件内部定义统一的后端接口（生成、修改、错误码），错误码包括 `content_refused`、`rate_limited`、`transient`、`quota_exceeded`、`invalid_request`。本里程碑只实现一个真实后端：OpenAI 图像接口，通过 `ctx.http` 调用，图片经 `ctx.asset_writer` 写入资产库后作为 `ToolResult.assets` 返回。
 3. **后端顺序与回退**：配置里按顺序列出后端。某个后端返回 `content_refused` 时，只有配置 `fallback_on_refusal: true`（默认 `false`）才尝试下一个后端。本里程碑只用假后端测试这套回退逻辑。回退只换图像模型，本体的边界规则照常生效。
-4. **配置与费用**：模型名是必填配置，不设默认值，由用户选定；API 密钥按 `accounts` 文件引用配置。每日生成上限来自配置，用本体现有的额度检查执行。
+4. **配置与费用**：模型名是必填配置，不设默认值，由用户选定。API 密钥通过 `ctx.credentials` 读取，插件配置里只写凭据引用名。每日生成上限用 `tool_quotas` 配置，`draw_image` 和 `edit_image` 共用一个额度组。
 5. **测试**：假 HTTP 后端覆盖成功、各种错误码、超时、取消和超大返回。另有一条离线端到端测试：假模型调用 `draw_image`，经 `fake-channel` 发出图片，账本状态和表情回应都正确。
 
 **不做**：本地生图后端（以后作为扩展）；以用户发来的图片或旧消息里的图片为底图（依赖入站媒体下载，以后再做）；图片内容审核（出站检查不检查图片内容，见 agent-spec）。
@@ -207,10 +209,10 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 ### B2 QQ 平台插件精简版 `qq-onebot`
 
-**SDK 补充**：现有 `ctx` 只有一次性 HTTP 请求，无法维持长连接。按 [ADR 0030](adr/0030-websocket-client.md) 增加 `ctx.websocket` WebSocket 客户端（需要 `network` 权限），先完成并通过契约测试，再写插件。
+**SDK 补充**：现有 `ctx` 只有一次性 HTTP 请求，无法维持长连接。按 [ADR 0030](adr/0030-websocket-client.md) 增加 `ctx.websocket` WebSocket 客户端（需要 `network` 权限），按 runtime-services-spec §4 接好生产后端，并实现 §1.5 的账号密钥读取。先完成并通过契约测试，再写插件。
 
 **范围**
-1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，按现有 `accounts` 文件引用配置，不写进配置正文和日志。连上后核对协议端报告的账号与配置一致，不一致按 `auth_invalid` 处理。断线后按退避间隔重连，上限来自配置。
+1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。连上后核对协议端报告的账号与配置一致，不一致按 `auth_invalid` 处理。断线后按退避间隔重连，上限来自配置。
 2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。自己发出的消息不进入对话。消息段映射：`text`→text，`at`→mention（按配置账号判断 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
 3. **出站**：用 `send_private_msg` 或 `send_group_msg` 发送消息段数组，用 `echo` 对应请求和回复。收据按 kernel-spec §5–§6 判定：
    - `status=ok` 且带 `message_id`：`sent`；
@@ -237,7 +239,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 普通模型插件（`agent_type = false`），使用本体现有的工具循环（agent-spec），不需要 MCP。
 
 **范围**
-1. 兼容 OpenAI 接口格式：先实现 Chat Completions 格式（兼容的服务最多），接口地址和模型名都是必填配置，不设默认值。API 密钥按 `accounts` 文件引用配置。
+1. 兼容 OpenAI 接口格式：先实现 Chat Completions 格式（兼容的服务最多），接口地址和模型名都是必填配置，不设默认值。API 密钥通过 `ctx.credentials` 读取。
 2. 支持工具调用和图片输入，`features()` 如实报告。
 3. **费用护栏**：每日调用次数和 token 上限来自配置，达到上限后拒绝调用并如实报告，不改用其他模型。`quota()` 报告已用量，不为此调用模型。每次调用的 token 数写进账本。
 4. 错误映射：限流、临时错误、额度用完、认证失败分别报告；认证失败不重试。
