@@ -212,8 +212,8 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 **SDK 补充**：现有 `ctx` 只有一次性 HTTP 请求，无法维持长连接。按 [ADR 0030](adr/0030-websocket-client.md) 增加 `ctx.websocket` WebSocket 客户端（需要 `network` 权限），按 runtime-services-spec §4 接好生产后端，并实现 §1.5 的账号密钥读取。先完成并通过契约测试，再写插件。
 
 **范围**
-1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。连上后核对协议端报告的账号与配置一致，不一致按 `auth_invalid` 处理。断线后按退避间隔重连，上限来自配置。
-2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。自己发出的消息不进入对话。消息段映射：`text`→text，`at`→mention（按配置账号判断 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
+1. **连接**：使用正向 WebSocket，由 Clytie 主动连接协议端的地址（来自配置）。令牌放在 Authorization 请求头里以 Bearer 方式发送，令牌放在绑定账号的 `accounts.<ref>.secret` 文件里，用 `ctx.credentials.account_secret()` 读取（runtime-services-spec §1.5），不写进配置正文和日志。预期账号用 `ctx.identity.self_account()` 读取（ADR 0032）；未绑定账号时 `start` 抛出 `PluginUnavailable("auth_invalid")`。连上后用 `get_login_info` 取协议端登录的账号，与预期账号按字符串比较；不一致就断开，状态为 `auth_invalid`，在重启前不再重连。之后每个事件的 `self_id` 也要等于预期账号，不等的事件丢弃并计数。断线后按退避间隔重连，上限来自配置。
+2. **入站**：私聊和群聊的 message 事件转成 `EventEnvelope`，`event_id = "{channel_id}:{message_id}"`。发送者等于预期账号的消息不进入对话。消息段映射：`text`→text，`at`→mention（`qq` 等于预期账号时 `is_self`），`image`/`record`/`video`/`file`→对应类型（只给 `raw_ref`，不下载），`reply`→quote，`face`/`mface`→sticker，其余→unknown（保留 `raw_type`）。账号和会话的映射只用 `ctx.identity`。入站队列有上限；溢出的事件被丢弃，但必须记告警和计数，并在状态中可见。
 3. **出站**：用 `send_private_msg` 或 `send_group_msg` 发送消息段数组，用 `echo` 对应请求和回复。收据按 kernel-spec §5–§6 判定：
    - `status=ok` 且带 `message_id`：`sent`；
    - 协议端明确返回失败：`failed`，并按返回码分为 `rate_limited`、`transient` 或永久错误；
@@ -228,6 +228,7 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 
 **验收**
 - `ctx.websocket` 的契约测试通过，ADR 0030 与 sdk-spec 同步。
+- `self_account()` 的契约测试通过（ADR 0032）；账号不一致、事件 `self_id` 不一致、自身消息和 @ 自己各有测试。
 - channel 扩展点的契约测试全部通过。
 - 每种消息段的入站和出站映射都有测试。
 - 收据三种结果各有测试，包括超时、断线、`echo` 错配和迟到回复。

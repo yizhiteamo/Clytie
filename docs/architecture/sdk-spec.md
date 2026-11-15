@@ -418,7 +418,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | `websocket` | `network` | 只有客户端：`async connect(url, *, headers=None, timeout_s=10, max_message_bytes=16 MB) -> WebSocketConnection`（`send_text`、`receive(cancel)`、`close`、`closed`、`close_code`）。只收发文本帧，插件停止时宿主关闭全部连接。详见 ADR 0030（阶段二 B2，用户已确认） |
 | `proactive` | `message.proactive` | `async submit(conversation_id, *, topic: str \| None = None, material: JsonObject \| None = None, parts: list[MessagePart] \| None = None, reason: str) -> str`（返回 `trace_id`；话题与直接发送二选一，仍经过边界和出站检查，见下） |
 | `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
-| `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`；映射来自实例配置 |
+| `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`、`self_account() -> str \| None`（本单元绑定的平台账号，未绑定为 `None`，见 ADR 0032）；映射来自实例配置 |
 
 - `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
 - `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
