@@ -36,6 +36,7 @@ async def test_context_contains_only_authorized_methods(tmp_path, permissions, m
     runtime = await enable(h, "reader")
     for name in (
         "http",
+        "websocket",
         "subprocess",
         "model",
         "peer",

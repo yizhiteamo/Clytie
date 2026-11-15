@@ -14,6 +14,7 @@ from .context_contracts import (
     assert_asset_writer_contract,
     assert_assets_contract,
     assert_candidate_reader_contract,
+    assert_channel_credentials_contract,
     assert_credentials_contract,
     assert_events_contract,
     assert_http_contract,
@@ -30,6 +31,8 @@ from .context_contracts import (
     assert_state_contract,
     assert_storage_contract,
     assert_subprocess_contract,
+    assert_websocket_connection_contract,
+    assert_websocket_contract,
 )
 from .context_fakes import (
     FakeAssets,
@@ -101,9 +104,15 @@ from .helpers import (
     checkpoint,
 )
 from .lifecycle import assert_plugin_contract, plugin_from_manifest
+from .websocket import FakeWebSocket, FakeWebSocketConnection
 
 __all__ = [
+    "FakeWebSocket",
+    "FakeWebSocketConnection",
     "assert_credentials_contract",
+    "assert_channel_credentials_contract",
+    "assert_websocket_contract",
+    "assert_websocket_connection_contract",
     "FakeAfterGeneration",
     "FakeApiClient",
     "FakeAttention",
