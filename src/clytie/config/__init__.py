@@ -828,6 +828,21 @@ def load_home(
             ):
                 reader.issue(file, ("protection", "exit_ratio"), "greater than enter_ratio", leave)
         boundary = data.get("boundary", {})
+        if isinstance(boundary, dict):
+            if boundary.get("admission") == "owner_present":
+                reader.issue(
+                    file,
+                    ("boundary", "admission"),
+                    "尚未支持 owner_present（B4b）",
+                    "owner_present",
+                )
+            if boundary.get("admission") == "test_only" and not instance.get("test_conversation"):
+                reader.issue(
+                    file,
+                    ("boundary", "admission"),
+                    "test_only requires test_conversation",
+                    "test_only",
+                )
         filters = boundary.get("input_filter", {}) if isinstance(boundary, dict) else {}
         patterns = filters.get("patterns", []) if isinstance(filters, dict) else []
         for index, pattern in enumerate(patterns if isinstance(patterns, list) else []):

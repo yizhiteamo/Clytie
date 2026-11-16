@@ -204,6 +204,7 @@ class Companion:
             **deepcopy(self._health_data),
             channels=states,
             model=self.agent.model_health,
+            admission=self.agent.admission.status(),
             quota=(
                 [
                     dict(

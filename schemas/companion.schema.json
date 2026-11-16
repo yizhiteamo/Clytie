@@ -320,6 +320,11 @@
     "boundary": {
       "type": "object",
       "properties": {
+        "admission": {
+          "type": "string",
+          "enum": ["test_only", "registered", "owner_present"],
+          "default": "registered"
+        },
         "pause_hours": {
           "type": "integer",
           "default": 24,

@@ -97,6 +97,10 @@ class Agent:
         memory_context=None,
     ):
         self.kernel, self.host, self.config, self.instance = kernel, host, config, instance
+        from clytie.admission import Admission
+
+        self.admission = Admission(config, instance)
+        kernel.delivery.admission = self.admission
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
         self.model_registration = (
@@ -353,6 +357,8 @@ class Agent:
     async def receive(self, event):
         if event.companion_id != self.cid:
             raise ValueError("wrong companion")
+        if not self.admission.accept(event):
+            return None
         finalization = OwnedFinalization(self.kernel.delivery)
         state = {"accepted": False, "handed": False}
 
