@@ -250,6 +250,25 @@ class Supervisor:
                             else "unknown"
                         )
                         row["silenced"] = bool(msg.get("silenced", False))
+                        from clytie.admission import REASONS
+
+                        admission = msg.get("admission", {})
+                        counts = (
+                            admission.get("rejected", {}) if isinstance(admission, dict) else {}
+                        )
+                        row["admission"] = {
+                            "mode": admission.get("mode")
+                            if isinstance(admission, dict)
+                            and admission.get("mode") in {"registered", "test_only"}
+                            else "unknown",
+                            "rejected": {
+                                key: value
+                                for key, value in counts.items()
+                                if key in REASONS and type(value) is int and value >= 0
+                            }
+                            if isinstance(counts, dict)
+                            else {},
+                        }
                         row["warnings"] = list(msg.get("warnings", []))
                         row["quota"] = msg.get("quota", "unknown")
                         if (

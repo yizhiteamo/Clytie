@@ -3,6 +3,9 @@
 import base64
 import json
 
+import pytest
+
+from clytie.admission import Admission
 from clytie.plugin_host.identity import IdentityResolver
 from clytie.sdk.testing import FakeWebSocket, FakeWebSocketConnection
 from clytie.sdk.types import HttpResponse
@@ -23,7 +26,8 @@ class Protocol(FakeWebSocketConnection):
         )
 
 
-async def test_onebot_model_image_tool_usage_and_credentials(tmp_path):
+@pytest.mark.parametrize("test_only", [False, True])
+async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only):
     agent, _, _ = await make_agent(tmp_path)
     h = agent.host
     marker = "fictional-b3a-credential"
@@ -53,6 +57,20 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path):
             }
         },
     }
+    if test_only:
+        instance["test_conversation"] = "test_group"
+        for cid, platform_id in (("test_group", "1000000003"), ("other_group", "1000000004")):
+            instance["conversations"][cid] = {
+                "channel": "qq-onebot",
+                "kind": "group",
+                "platform_id": platform_id,
+                "scene": "public_group",
+                "members_expected": ["owner"],
+            }
+        agent.config["boundary"] = {"admission": "test_only"}
+    agent.instance = instance
+    agent.admission = Admission(agent.config, instance)
+    agent.kernel.delivery.admission = agent.admission
     h.identities[agent.cid, "qq-onebot", "fake"] = IdentityResolver("fake", "qq-onebot", instance)
     protocol = Protocol()
     model_requests = []
@@ -148,20 +166,42 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path):
         )
         agent.kernel.delivery.channels["fake"] = channel
         await channel.connect()
+        stream = channel.events()
+        if test_only:
+            protocol.messages.put_nowait(
+                json.dumps(
+                    {
+                        "post_type": "message",
+                        "message_type": "group",
+                        "self_id": "1000000001",
+                        "user_id": "1000000002",
+                        "group_id": "1000000004",
+                        "message_id": 3,
+                        "time": 0,
+                        "message": [{"type": "text", "data": {"text": "draw a fictional bird"}}],
+                    }
+                )
+            )
+            assert await agent.receive(await anext(stream)) is None
+            assert not model_requests and not agent.ledger.rows("inbound")
+            assert agent.admission.counts["not_test_conversation"] == 1
         protocol.messages.put_nowait(
             json.dumps(
                 {
                     "post_type": "message",
-                    "message_type": "private",
+                    "message_type": "group" if test_only else "private",
+                    **({"group_id": "1000000003"} if test_only else {}),
                     "self_id": "1000000001",
                     "user_id": "1000000002",
                     "message_id": 1,
                     "time": 0,
-                    "message": [{"type": "text", "data": {"text": "draw a fictional bird"}}],
+                    "message": [
+                        *([{"type": "at", "data": {"qq": "1000000001"}}] if test_only else []),
+                        {"type": "text", "data": {"text": "draw a fictional bird"}},
+                    ],
                 }
             )
         )
-        stream = channel.events()
         incoming = await anext(stream)
         trace = await agent.receive(incoming)
         await agent.drain()
@@ -171,13 +211,19 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path):
         images = [
             p
             for s in sent
-            if s["action"] == "send_private_msg"
+            if s["action"] == ("send_group_msg" if test_only else "send_private_msg")
             for p in s["params"]["message"]
             if p["type"] == "image"
         ]
         assert images == [
             {"type": "image", "data": {"file": "base64://" + base64.b64encode(png).decode()}}
         ]
+        if test_only:
+            assert all(
+                s["params"]["group_id"] == "1000000003"
+                for s in sent
+                if s["action"] == "send_group_msg"
+            )
         usage = [r for r in agent.ledger.rows("audit") if r["kind"] == "model.usage"]
         assert len(usage) == 2 and all(
             r["plugin"] == "openai-api" and r["input_tokens"] == 17 and r["output_tokens"] == 4

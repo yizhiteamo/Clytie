@@ -86,6 +86,9 @@ async def test_cross_group_boundary_pause_skips_all_behavior_and_model(tmp_path)
         BOUNDARY,
         REFUSAL,
         changes={"boundary": {"refusal_threshold": 2}},
+        conversations={
+            "another_group": {"kind": "group", "scene": "public_group", "channel": "fake-channel"}
+        },
     )
     notices = []
 

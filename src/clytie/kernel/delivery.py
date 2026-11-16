@@ -135,6 +135,7 @@ class Delivery:
         self.session_ending = False
         self.channel_errors = {}
         self.workers = set()
+        self.admission = None
 
     async def persist(self, function, *args, **kwargs):
         """收据/执行结果一旦到达，取消调用者也不能丢弃等待提交的结果。"""
@@ -177,6 +178,17 @@ class Delivery:
             blocked = self._blocked(intent.channel_id)
             if blocked:
                 return self._receipt(intent, "failed", blocked)
+            if self.admission is not None:
+                record = await finalization.persist(self.ledger.get, "record", intent.trace_id)
+                inbound = (
+                    await finalization.persist(
+                        self.ledger.get, "inbound", record["source_event_id"]
+                    )
+                    if record.get("source_event_id")
+                    else None
+                )
+                if not self.admission.allows_delivery(intent, inbound):
+                    return self._receipt(intent, "failed", "not_admitted")
             return await function(intent, token)
 
         task = asyncio.create_task(invoke())

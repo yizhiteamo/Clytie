@@ -77,7 +77,7 @@ class Channel:
         return Receipt(intent_id=intent.intent_id, status="sent", at=self.clock.now())
 
 
-async def make_agent(tmp_path, *turns, changes=None):
+async def make_agent(tmp_path, *turns, changes=None, conversations=None):
     clock = MockClock()
     h = host(tmp_path, clock=clock)
     await enable(h, "echo-tool")
@@ -98,6 +98,13 @@ async def make_agent(tmp_path, *turns, changes=None):
         for key, value in changes.items():
             config[key] = value
     instance = {
+        "people": {
+            "owner": {
+                "role": "owner",
+                "accounts": [{"channel": "fake-channel", "account": "fictional-owner_private"}],
+            },
+            "member": {"role": "member", "accounts": []},
+        },
         "conversations": {
             "test_group": {"kind": "group", "scene": "public_group", "channel": "fake-channel"},
             "owner_private": {
@@ -105,8 +112,9 @@ async def make_agent(tmp_path, *turns, changes=None):
                 "scene": "owner_private",
                 "channel": "fake-channel",
             },
-        }
+        },
     }
+    instance["conversations"].update(conversations or {})
     for cid, conversation in instance["conversations"].items():
         conversation["platform_id"] = "fictional-" + cid
     persona = tmp_path / "companions/companion_a/persona"
