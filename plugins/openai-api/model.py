@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import re
 from urllib.parse import urlsplit
 
 from clytie.sdk import CredentialUnavailable
@@ -45,10 +46,15 @@ class OpenAIModel:
         # Chat Completions has no reliable remaining-credit query.
         return "unknown"
 
-    def _error(self, code, *, status=None, usage=None):
+    def _error(self, code, *, status=None, usage=None, provider_error=None):
         fields = {"error_code": code}
         if status is not None:
             fields["http_status"] = status
+        if provider_error is not None:
+            for key in ("code", "type", "param"):
+                value = provider_error.get(key)
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._\[\]-]{1,64}", value):
+                    fields["openai_error_" + key] = value
         self.ctx.log.warning("model_backend_error", **fields)
         return ModelTurn(finish="error", usage=usage or {}, error={"code": code, "message": code})
 
@@ -211,7 +217,7 @@ class OpenAIModel:
                 code = "transient"
             else:
                 code = "invalid_request"
-            return self._error(code, status=response.status)
+            return self._error(code, status=response.status, provider_error=error)
         usage = {}
         raw_usage = data.get("usage")
         if isinstance(raw_usage, dict):

@@ -122,6 +122,67 @@ async def test_transport_errors_are_safe(setup, error):
     assert MARKER not in turn.model_dump_json() + repr(ctx.log.entries)
 
 
+@pytest.mark.parametrize("status", [400, 429, 503])
+async def test_error_diagnostics_allowlisted_fields(setup, status):
+    fields = {
+        "code": "invalid_schema",
+        "type": "invalid_request_error",
+        "param": "tools[0].function.parameters",
+    }
+    ctx, model = setup(response(status=status, data={"error": {**fields, "message": MARKER}}))
+    turn = await model.generate(sample_request(ctx.clock), CancelToken())
+    logged = ctx.log.entries[-1][2]
+    assert {k: logged["openai_error_" + k] for k in fields} == fields
+    assert logged["http_status"] == status
+    assert MARKER not in repr(ctx.log.entries) + turn.model_dump_json()
+    assert len(ctx.http.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        1,
+        True,
+        {},
+        [],
+        "",
+        "a" * 65,
+        "a\nb",
+        "a\n",
+        "a b",
+        "a/b",
+        "é",
+        "Ａ",
+        "value:" + MARKER,
+    ],
+)
+@pytest.mark.parametrize("field", ["code", "type", "param"])
+async def test_error_diagnostics_reject_invalid_values(setup, value, field):
+    ctx, model = setup(response(status=400, data={"error": {field: value, "message": MARKER}}))
+    turn = await model.generate(sample_request(ctx.clock), CancelToken())
+    assert "openai_error_" + field not in ctx.log.entries[-1][2]
+    assert turn.error.code == "invalid_request"
+    assert MARKER not in repr(ctx.log.entries) + turn.model_dump_json()
+
+
+async def test_error_diagnostics_length_boundary_and_success_ignored(setup):
+    fields = {"code": "A" * 64, "type": "a-z_09.[]", "param": "messages[0].content"}
+    ctx, model = setup(response(status=400, data={"error": fields}))
+    await model.generate(sample_request(ctx.clock), CancelToken())
+    assert all(ctx.log.entries[-1][2]["openai_error_" + k] == v for k, v in fields.items())
+    ctx, model = setup(
+        response(
+            data={
+                "error": fields,
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            }
+        )
+    )
+    assert (await model.generate(sample_request(ctx.clock), CancelToken())).finish == "stop"
+    assert not ctx.log.entries
+
+
 async def test_cancel_and_deadline_release_http(setup):
     for reason in ("cancelled", "deadline"):
         started, closed = asyncio.Event(), asyncio.Event()
