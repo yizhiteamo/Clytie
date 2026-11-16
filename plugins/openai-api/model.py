@@ -1,9 +1,10 @@
-"""Chat Completions through host HTTP, assets and credential capabilities."""
+"""Chat Completions and Responses through host capabilities."""
 
 import asyncio
 import base64
 import json
 import re
+from copy import deepcopy
 from urllib.parse import urlsplit
 
 from clytie.sdk import CredentialUnavailable
@@ -31,7 +32,18 @@ class OpenAIModel:
             or parsed.fragment
         ):
             raise ValueError("invalid base_url")
-        self.url = self.url.rstrip("/") + "/chat/completions"
+        self.api = config.get("api", "chat_completions")
+        self.effort = config.get("reasoning_effort")
+        if self.api not in {"chat_completions", "responses"}:
+            raise ValueError("invalid api")
+        if "reasoning_effort" in config and (
+            not isinstance(self.effort, str) or not re.fullmatch(r"[a-z]{1,16}", self.effort)
+        ):
+            raise ValueError("invalid reasoning_effort")
+        self.url = self.url.rstrip("/") + (
+            "/responses" if self.api == "responses" else "/chat/completions"
+        )
+        self._reasoning = {}
         self._features = ModelFeatures(
             supports_tools=config.get("supports_tools", True),
             supports_images=config.get("supports_images", True),
@@ -143,7 +155,66 @@ class OpenAIModel:
                 }
                 for t in req.tools
             ]
+        if self.api == "responses":
+            body = self._responses_body(body, req.trace_id)
+        elif self.effort is not None:
+            body["reasoning_effort"] = self.effort
         return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+    def _expire_reasoning(self):
+        now = self.ctx.clock.monotonic()
+        for key, (created, _) in list(self._reasoning.items()):
+            if now - created >= 600:
+                del self._reasoning[key]
+
+    def _responses_body(self, chat, trace_id):
+        self._expire_reasoning()
+        items = []
+        for message in chat["messages"]:
+            role, content = message["role"], message["content"]
+            if role == "tool":
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message["tool_call_id"],
+                        "output": content,
+                    }
+                )
+                continue
+            if role != "assistant" or content:
+                if role == "user":
+                    content = (
+                        [{"type": "input_text", "text": content}]
+                        if isinstance(content, str)
+                        else [
+                            {"type": "input_text", "text": p["text"]}
+                            if p["type"] == "text"
+                            else {"type": "input_image", "image_url": p["image_url"]["url"]}
+                            for p in content
+                        ]
+                    )
+                items.append(
+                    {"role": "developer" if role == "system" else role, "content": content}
+                )
+            for call in message.get("tool_calls", []):
+                cached = self._reasoning.pop((trace_id, call["id"]), None)
+                if cached is not None:
+                    items.extend(cached[1])
+                items.append({"type": "function_call", "call_id": call["id"], **call["function"]})
+        body = {
+            "model": self.model,
+            "input": items,
+            "stream": False,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        if "tools" in chat:
+            body["tools"] = [
+                {"type": "function", **t["function"], "strict": False} for t in chat["tools"]
+            ]
+        if self.effort is not None:
+            body["reasoning"] = {"effort": self.effort}
+        return body
 
     async def generate(self, req, cancel):
         cancel.raise_if_cancelled()
@@ -167,7 +238,7 @@ class OpenAIModel:
                 timeout_s=remaining,
                 max_bytes=MAX_BYTES,
             )
-            return self._decode(response)
+            return self._decode(response, trace_id=req.trace_id)
 
         task = asyncio.create_task(operation())
         cancelled = asyncio.create_task(cancel.wait())
@@ -192,7 +263,7 @@ class OpenAIModel:
                     pending.cancel()
             await asyncio.gather(task, cancelled, timer, return_exceptions=True)
 
-    def _decode(self, response):
+    def _decode(self, response, *, trace_id=None):
         if len(response.body) > MAX_BYTES:
             return self._error("invalid_response")
         try:
@@ -218,6 +289,8 @@ class OpenAIModel:
             else:
                 code = "invalid_request"
             return self._error(code, status=response.status, provider_error=error)
+        if self.api == "responses":
+            return self._decode_responses(data, trace_id)
         usage = {}
         raw_usage = data.get("usage")
         if isinstance(raw_usage, dict):
@@ -248,5 +321,72 @@ class OpenAIModel:
             if reason not in {"stop", "tool_calls"} or bool(calls) != (reason == "tool_calls"):
                 return self._error("incomplete_response", usage=usage)
             return ModelTurn(text=text, tool_calls=calls, finish=reason, usage=TokenUsage(**usage))
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+            return self._error("invalid_response", usage=usage)
+
+    def _decode_responses(self, data, trace_id):
+        usage = {}
+        raw_usage = data.get("usage")
+        if isinstance(raw_usage, dict):
+            usage = {
+                key: raw_usage[key]
+                for key in ("input_tokens", "output_tokens")
+                if type(raw_usage.get(key)) is int and raw_usage[key] >= 0
+            }
+        if data.get("status") != "completed":
+            return self._error("incomplete_response", usage=usage)
+        try:
+            text, calls, pending, staged = [], [], [], []
+            if not isinstance(data["output"], list):
+                raise ValueError
+            for item in data["output"]:
+                kind = item["type"]
+                if kind == "reasoning":
+                    pending.append(
+                        deepcopy(
+                            {
+                                k: item[k]
+                                for k in ("type", "id", "encrypted_content", "summary")
+                                if k in item
+                            }
+                        )
+                    )
+                elif kind == "message":
+                    for part in item["content"]:
+                        if part["type"] == "refusal":
+                            return self._error("incomplete_response", usage=usage)
+                        if part["type"] != "output_text" or not isinstance(part["text"], str):
+                            raise ValueError
+                        text.append(part["text"])
+                elif kind == "function_call":
+                    if not self._features.supports_tools:
+                        raise ValueError
+                    arguments = json.loads(item["arguments"])
+                    if not isinstance(arguments, dict):
+                        raise ValueError
+                    calls.append(
+                        ToolCall(call_id=item["call_id"], tool=item["name"], arguments=arguments)
+                    )
+                    if pending:
+                        staged.append((item["call_id"], pending))
+                        pending = []
+                elif kind == "refusal":
+                    return self._error("incomplete_response", usage=usage)
+                else:
+                    raise ValueError
+            turn = ModelTurn(
+                text="".join(text),
+                tool_calls=calls,
+                finish="tool_calls" if calls else "stop",
+                usage=TokenUsage(**usage),
+            )
+            self._expire_reasoning()
+            for call_id, reasoning in staged:
+                key = (trace_id, call_id)
+                self._reasoning.pop(key, None)
+                self._reasoning[key] = (self.ctx.clock.monotonic(), reasoning)
+                while len(self._reasoning) > 64:
+                    del self._reasoning[next(iter(self._reasoning))]
+            return turn
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             return self._error("invalid_response", usage=usage)
