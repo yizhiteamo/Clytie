@@ -158,5 +158,6 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/plugins/catalog.md` | 预设的官方插件（可调整） |
 | `docs/plugins/sleep.md` | 睡眠作息插件（行为插件的参考设计） |
 | `docs/plugins/qq-onebot-compat.md` | qq-onebot 的 OneBot 兼容契约：参考资料范围、标准之外的扩展、收据与返回码 |
+| `docs/plugins/openai-api-responses.md` | openai-api 的 Responses 模式：请求与响应转换、推理连续性、验收 |
 | `docs/adr/` | 决策记录 |
 | `docs/process/history.md` | 2026-11-15 之前的审查流程原文（历史，非现行规则） |

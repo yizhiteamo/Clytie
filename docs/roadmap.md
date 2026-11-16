@@ -4,11 +4,11 @@
 
 每个里程碑一个分支、一个 PR，在 PR 描述中按验收清单逐项给出证据。现行协作与审查流程以 [AGENTS.md](../AGENTS.md) 为准；验收、合并及打 tag 不因仓库公开而自动获批。
 
-## 当前状态（2026-11-15）
+## 当前状态（2026-11-16）
 
 - 阶段一（A1 至 A4.3）已全部合入 `main`。A4.3 经 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71) 合并，tag `a4-3`。
 - A4.3 的已知限制：备份结束后约 699 ms 的尾部停顿、loop_delay 观测不足，以及延期的其余三场性能测量，见 [Issue #77](https://github.com/yizhiteamo/Clytie/issues/77)。不宣称 Linux 或大资产场景的性能已通过。
-- 阶段二第一段：B1（tag `b1`）、B2（tag `b2`）、B3a 已完成。下一步是 B4a 会话准入，完成后在测试会话跑真实链路，范围见下文。
+- 阶段二第一段：B1（tag `b1`）、B2（tag `b2`）、B3a、B4a 已完成。第一次真实测试发现聊天模型在 Chat Completions 接口下不能同时使用推理和工具，下一步是 B3c（Responses 模式）和 B3d（上下文占位），完成后重新跑真实链路，范围见下文。
 
 ## 每个里程碑都要提供
 
@@ -174,7 +174,10 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 | 2 | B2 QQ 平台插件精简版 `qq-onebot`（对接 NapCat 等 OneBot 协议端） | 2–3 天 |
 | 3 | B3a 模型插件 `openai-api` | 1–2 天 |
 | 4 | B4a 会话准入：测试会话与登记会话（真实测试前必须完成） | 1 天 |
-| → | 经用户当次同意，在测试会话跑真实链路 | |
+| → | 经用户当次同意，在测试会话跑真实链路（2026-11-16 第一次：准入生效，模型请求被拒，见 B3c） | |
+| 4a | B3c `openai-api` 的 Responses 模式 | 1.5 天 |
+| 4b | B3d 上下文中的非文字占位（Issue #101 第 1 项） | 0.5 天 |
+| → | 经用户当次同意，重新跑真实链路：聊天、画图、改图 | |
 | 5 | B4b owner 在场判断与工具使用范围，随后上线 | 1–2 天 |
 | 6 | B3b 模型插件 `codex-cli`（MCP 接入规格确认后再定范围） | 待定 |
 
@@ -263,6 +266,19 @@ Issue #72 增补：storage-spec.md 已获用户确认，存储所有者及重 I/
 ### B4a 会话准入（用户已确认，2026-11-15）
 
 现有代码只在启动时校验 `test_conversation` 的格式，运行时没有限制真实消息只进出测试会话。B4a 在本体里加入会话准入：`test_only` 和 `registered` 两种模式、陌生人私聊静默、入站和出站两道检查。范围、静默的含义和验收见 [admission-spec](architecture/admission-spec.md)。不需要修改平台插件。
+
+### B3c `openai-api` 的 Responses 模式（草案，2026-11-16）
+
+第一次真实测试中，聊天模型在 Chat Completions 接口下带工具调用时返回 400（`param=reasoning_effort`）；关闭推理或改用 Responses 接口都能成功。用户要求效果优先，不用关闭推理换取可用。openai-api 增加 `api: responses` 和可选的 `reasoning_effort`，推理内容在工具循环中保持连续，只改插件，不改本体和 SDK。范围、不做项和验收见 [openai-api-responses](plugins/openai-api-responses.md)。
+
+### B3d 上下文中的非文字占位（草案，2026-11-16）
+
+图片、表情包、@ 等非文字消息段在交给模型的上下文中用占位文字表示，不再被当成空消息；出站检查、快速取消和记忆检索不受影响。规则见 [agent-spec](architecture/agent-spec.md) §4.4。不下载入站图片（Issue #101 第 2 项另行决定）。
+
+**验收**
+- 占位表的每一行都有测试，覆盖聊天记录、本次消息和被引用原文，入站和出站都覆盖。
+- 出站检查、快速取消识别和记忆检索查询的输入与修改前相同。
+- 占位中不出现平台账号、逻辑 ID 和 `raw_ref`；双平台 CI 通过。
 
 ### B4b owner 在场判断与工具使用范围（范围待细化）
 
