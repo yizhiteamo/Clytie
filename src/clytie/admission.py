@@ -16,13 +16,19 @@ class Admission:
     def __init__(self, config, instance):
         self.mode = config.get("boundary", {}).get("admission", "registered")
         self.test = instance.get("test_conversation")
-        self.conversations = deepcopy(instance.get("conversations", {}))
+        self.conversations = {
+            cid: deepcopy(value)
+            for cid, value in instance.get("conversations", {}).items()
+            if not cid.startswith("x-")
+        }
         self.counts = dict.fromkeys(REASONS, 0)
         self.private_actors = {}
         for cid, conversation in self.conversations.items():
             if conversation.get("kind") != "private":
                 continue
             for actor_id, person in instance.get("people", {}).items():
+                if actor_id.startswith("x-"):
+                    continue
                 if any(
                     a.get("channel") == conversation.get("channel")
                     and a.get("account") == conversation.get("platform_id")

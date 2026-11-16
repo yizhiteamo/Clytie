@@ -261,3 +261,31 @@ async def test_companion_health_reports_actual_agent_denials(tmp_path):
         assert agent.ledger.rows("inbound") == []
     finally:
         await finish(agent)
+
+
+def test_admission_ignores_configuration_extension_entries():
+    instance = {
+        "conversations": {
+            "x-metadata": False,
+            "x-not-a-conversation": {"kind": "group"},
+            "owner_private": {
+                "kind": "private",
+                "channel": "fake",
+                "platform_id": "fictional-owner",
+            },
+        },
+        "people": {
+            "x-metadata": False,
+            "owner": {
+                "role": "owner",
+                "accounts": [{"channel": "fake", "account": "fictional-owner"}],
+            },
+        },
+    }
+    p = Admission({}, instance)
+    assert set(p.conversations) == {"owner_private"}
+    assert p.private_actors["owner_private"].actor_id == "owner"
+    assert (
+        p.reason(SimpleNamespace(kind="group", conversation_id="x-not-a-conversation"), None)
+        == "not_registered"
+    )
