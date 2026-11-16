@@ -34,6 +34,36 @@ class Context:
     def __init__(self, agent):
         self.agent = agent
 
+    def render_parts(self, parts):
+        """Model context only; policy and retrieval retain text_parts semantics."""
+        rendered = []
+        labels = {
+            "image": "[图片]",
+            "audio": "[语音]",
+            "video": "[视频]",
+            "file": "[文件]",
+            "quote": "[引用]",
+            "unknown": "[不支持的消息]",
+        }
+        people = self.agent.instance.get("people", {})
+        for part in parts:
+            if part.type == "mention":
+                label = (
+                    "你"
+                    if part.is_self
+                    else (
+                        "主人" if people.get(part.actor_id, {}).get("role") == "owner" else "某人"
+                    )
+                )
+                rendered.append(f"[@{label}]")
+            elif part.type == "sticker":
+                rendered.append(f"[表情：{part.summary}]" if part.summary else "[表情]")
+            elif part.type in labels:
+                rendered.append(labels[part.type])
+            else:
+                rendered.append(text_parts([part]))
+        return "\n".join(rendered)
+
     def visible(self, row, conversation):
         return visible(
             row,
@@ -53,7 +83,7 @@ class Context:
                 if row.get("reason") != "boundary_paused" and self.visible(row, conversation):
                     if authors is not None:
                         authors.append(Actor.model_validate(row["message"]["sender"]))
-                    return text_parts(
+                    return self.render_parts(
                         [PART.validate_python(p) for p in row["message"]["parts"] or []]
                     )
                 return "引用了一条看不到的消息"
@@ -68,7 +98,7 @@ class Context:
                 and row["conversation_id"] == ref.conversation_id
                 and self.visible(record, conversation)
             ):
-                return text_parts([PART.validate_python(p) for p in row.get("parts") or []])
+                return self.render_parts([PART.validate_python(p) for p in row.get("parts") or []])
         return "引用了一条看不到的消息"
 
     def _read_tables(self):
@@ -203,13 +233,15 @@ class Context:
             ):
                 continue
             sender = Actor.model_validate(row["message"]["sender"])
-            content = text_parts([PART.validate_python(p) for p in row["message"]["parts"] or []])
+            parts = [PART.validate_python(p) for p in row["message"]["parts"] or []]
+            content = self.render_parts(parts)
             history.append(
                 (
                     row["received_at"],
                     "user",
                     f"{sender.role} {actor_label(sender)}：{content}",
                     sender,
+                    f"{sender.role} {actor_label(sender)}：{text_parts(parts)}",
                 )
             )
         for row in ledger.rows("intent"):
@@ -222,19 +254,21 @@ class Context:
             record = ledger.get("record", row["trace_id"])
             if not self.visible(record, conversation):
                 continue
-            content = text_parts([PART.validate_python(p) for p in row.get("parts") or []])
+            parts = [PART.validate_python(p) for p in row.get("parts") or []]
+            content = self.render_parts(parts)
             history.append(
                 (
                     row.get("created_at", record["created_at"]),
                     "assistant",
                     ("[不确定是否发出]" if row["status"] == "unknown" else "") + content,
                     None,
+                    ("[不确定是否发出]" if row["status"] == "unknown" else "") + text_parts(parts),
                 )
             )
         limits = agent.config.get("context", {})
         memory_query = "\n".join(
             [text_parts(e.message.parts) for e in events if e.message]
-            + [text for _, _, text, _ in sorted(history, key=lambda r: r[0])[-3:]]
+            + [query for _, _, _, _, query in sorted(history, key=lambda r: r[0])[-3:]]
         )
         if agent.memory_context:
             memory_messages = await agent.memory_context(conversation, actor)
@@ -244,7 +278,7 @@ class Context:
             )
         result[memory_position:memory_position] = memory_messages
         remaining, kept = limits.get("max_chars", 20_000), []
-        for _, role, content, sender in sorted(history, key=lambda r: r[0])[
+        for _, role, content, sender, _ in sorted(history, key=lambda r: r[0])[
             -limits.get("max_messages", 100) :
         ][::-1]:
             content = content[: limits.get("max_single_message_chars", 2000)]
@@ -257,7 +291,7 @@ class Context:
         result.extend(msg for msg, _ in reversed(kept))
         for event in events:
             msg = event.message
-            text = f"{msg.sender.role} {actor_label(msg.sender)}：" + text_parts(msg.parts)
+            text = f"{msg.sender.role} {actor_label(msg.sender)}：" + self.render_parts(msg.parts)
             if msg.reply_to:
                 text += "\n引用：" + await self.quote(
                     msg.reply_to, conversation, authors, ledger=ledger
