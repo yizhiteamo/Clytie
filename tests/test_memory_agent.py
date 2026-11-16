@@ -346,7 +346,8 @@ async def test_recall_reference_survives_agent_round_and_core_reordering(tmp_pat
     [
         ("owner", "owner_private"),
         ("member", "public_group"),
-        ("stranger", "stranger_private"),
+        # B4a rejects stranger private messages before any model request.
+        ("stranger", "public_group"),
         ("peer", "public_group"),
     ],
 )
