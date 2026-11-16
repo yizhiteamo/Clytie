@@ -334,6 +334,7 @@ python -m clytie task <task_id> [--companion <cid>] [--json] [--full]
 - 状态变化时，用新表情替换上一个：DeliveryIntent 的 `replaces_emoji` 填上一个**确定发出**的状态表情。平台支持撤掉表情时（`ChannelFeatures.supports_react_remove`），插件先撤旧的再加新的；不支持时只加新的。
 - 两次状态变化间隔小于 `task_reactions.min_interval_seconds`（默认 2 秒）时，合并为后一个状态。例如接单后马上开始执行，只显示"执行中"。终态（`done` / `failed`）总是发出，不会被合并掉。
 - 平台不支持表情回应（`supports_react = false`）时，静默跳过。
+- **重量级工具失败时显示失败**（B2b，草案 2026-11-17）：任务以 `task.completed` 结束，但本记录中最后一次 `heavy` 工具调用的结果是错误（包括 `denied`、内容被拒、超时和后端错误），并且之后没有成功的 `heavy` 调用时，最终状态回应用 `failed` 的表情，不用 `done`。只影响状态回应：任务事件、账本状态和模型的文字回复不变；审计中记 `reaction_outcome = tool_failed`。
 
 **适用范围**：
 - 只用于有来源入站消息的 task 记录，表情加在那条入站消息上。定时任务、主动任务没有来源消息，不加。
