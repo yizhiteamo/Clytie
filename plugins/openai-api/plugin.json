@@ -19,6 +19,8 @@
       "model": {"type": "string", "minLength": 1},
       "api_key_ref": {"type": "string", "minLength": 1},
       "context_chars": {"type": "integer", "minimum": 1},
+      "api": {"type": "string", "enum": ["chat_completions", "responses"], "default": "chat_completions"},
+      "reasoning_effort": {"type": "string", "minLength": 1, "maxLength": 16, "pattern": "^[a-z]+(?![\\s\\S])"},
       "supports_tools": {"type": "boolean", "default": true},
       "supports_images": {"type": "boolean", "default": true}
     },
