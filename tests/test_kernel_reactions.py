@@ -22,7 +22,7 @@ from clytie.sdk.types import (
 class Channel:
     def __init__(self, clock, *, remove=True, supports=True, status="sent"):
         self.clock, self.remove, self.supports, self.status = clock, remove, supports, status
-        self.calls, self.markers, self.text = [], [], []
+        self.calls, self.markers, self.text, self.times = [], [], [], []
 
     def features(self):
         return ChannelFeatures(
@@ -36,6 +36,7 @@ class Channel:
 
     async def react(self, intent, cancel):
         self.calls.append(intent)
+        self.times.append(self.clock.monotonic())
         if self.status == "sent":
             if self.remove and intent.replaces_emoji in self.markers:
                 self.markers.remove(intent.replaces_emoji)
@@ -105,19 +106,91 @@ async def test_four_states_replace_last_confirmed_marker(tmp_path):
     ledger.close()
 
 
-async def test_merge_within_two_seconds_and_terminal_not_delayed(tmp_path):
+async def test_first_immediate_running_at_two_and_done_at_ten(tmp_path):
     ledger, reactions, channel, clock, trace = fixture(tmp_path)
     await reactions.request(trace, "accepted")
     await clock.drain()
-    clock.advance(1)
+    assert [i.emoji for i in channel.calls] == ["👌"]
+    await clock.advance_and_drain(0.5)
     await reactions.request(trace, "running")
-    await clock.drain()
-    assert not channel.calls
-    await clock.advance_and_drain(2)
-    assert [i.emoji for i in channel.calls] == ["⏳"]
+    await clock.advance_and_drain(1.4)
+    assert len(channel.calls) == 1
+    await clock.advance_and_drain(0.1)
+    assert [i.emoji for i in channel.calls] == ["👌", "⏳"]
+    await clock.advance_and_drain(8)
     await reactions.request(trace, "done")
     await reactions.drain()
-    assert [i.emoji for i in channel.calls] == ["⏳", "✅"]
+    assert channel.times == [0, 2, 10]
+    assert [i.emoji for i in channel.calls] == ["👌", "⏳", "✅"]
+    ledger.close()
+
+
+async def test_fast_terminal_waits_but_text_delivery_does_not(tmp_path):
+    from clytie.sdk.types import DeliveryIntent
+
+    ledger, reactions, channel, clock, trace = fixture(tmp_path)
+
+    async def send(intent, cancel):
+        channel.text.append(intent)
+        return Receipt(intent_id=intent.intent_id, status="sent", at=clock.now())
+
+    channel.send = send
+    await reactions.request(trace, "accepted")
+    await clock.drain()
+    await clock.advance_and_drain(0.5)
+    await reactions.request(trace, "done")
+    record = ledger.get("record", trace)
+    text = DeliveryIntent(
+        intent_id=uuid4().hex,
+        trace_id=trace,
+        companion_id="companion_a",
+        channel_id="fake",
+        conversation_id=record["conversation_id"],
+        kind="reply",
+        parts=[{"type": "text", "text": "Fictional reply"}],
+    )
+    ledger.register_intents(trace, [text])
+    assert await reactions.delivery.send_one(text.intent_id) == "sent"
+    assert clock.monotonic() == 0.5 and len(channel.text) == 1
+    assert [i.emoji for i in channel.calls] == ["👌"]
+    await clock.advance_and_drain(1.5)
+    await reactions.drain()
+    assert [i.emoji for i in channel.calls] == ["👌", "✅"]
+    assert channel.times == [0, 2]
+    ledger.close()
+
+
+async def test_updates_while_waiting_keep_only_latest(tmp_path):
+    ledger, reactions, channel, clock, trace = fixture(tmp_path)
+    await reactions.request(trace, "accepted")
+    # No scheduler turn is required between the first two state requests.
+    await reactions.request(trace, "running")
+    await clock.drain()
+    assert [i.emoji for i in channel.calls] == ["👌"]
+    await clock.advance_and_drain(0.5)
+    await reactions.request(trace, "done")
+    await clock.advance_and_drain(0.5)
+    await reactions.request(trace, "failed")
+    await clock.advance_and_drain(1)
+    await reactions.drain()
+    assert [i.emoji for i in channel.calls] == ["👌", "❌"]
+    assert channel.times == [0, 2]
+    ledger.close()
+
+
+@pytest.mark.parametrize("state", ["done", "failed"])
+async def test_stopping_flushes_waiting_terminal_without_clock_advance(tmp_path, state):
+    ledger, reactions, channel, clock, trace = fixture(tmp_path)
+    await reactions.request(trace, "accepted")
+    await clock.drain()
+    await clock.advance_and_drain(0.5)
+    await reactions.request(trace, state)
+    await clock.drain()
+    assert len(channel.calls) == 1
+    reactions.begin_stop()
+    await reactions.drain()
+    assert channel.times == [0, 0.5]
+    assert channel.calls[-1].emoji == reactions.emojis[state]
     ledger.close()
 
 

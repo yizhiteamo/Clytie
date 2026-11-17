@@ -50,7 +50,12 @@ async def owned_kernel(tmp_path):
 
     channel = Channel(clock)
     kernel = Kernel(
-        ledger, clock, {"fake": channel}, permissions=lambda *_: True, quota=lambda *_: True
+        ledger,
+        clock,
+        {"fake": channel},
+        config={"task_reactions": {"min_interval_seconds": 0}},
+        permissions=lambda *_: True,
+        quota=lambda *_: True,
     )
     try:
         yield kernel, channel

@@ -292,6 +292,8 @@ class Companion:
                     kernel.ledger.fail_intent, row["intent_id"], code, trace=row["trace_id"]
                 )
 
+        kernel.reactions.begin_stop()
+
         async def delivery_idle():
             while (kernel.delivery.active_tokens or kernel.delivery.workers) and not self.orphan:
                 await self.clock.sleep(0.01)

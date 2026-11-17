@@ -23,6 +23,8 @@ class Reactions:
         self.pending, self.workers, self.changed = {}, {}, {}
         self.finalizations, self.owners = {}, {}
         self.heavy_results = {}
+        self.last_sent = {}
+        self.stopping = False
 
     async def eligible(self, trace, *, finalization=None):
         finalization = finalization or self.finalizations.get(trace)
@@ -60,7 +62,9 @@ class Reactions:
         self.pending[trace] = state
         self.changed.setdefault(trace, asyncio.Event()).set()
         if trace not in self.workers:
-            self.workers[trace] = background(self._run(trace))
+            # Reserve the first state before a subsequent request can replace it.
+            first = self.pending.pop(trace) if trace not in self.last_sent else None
+            self.workers[trace] = background(self._run(trace, first))
         if finalization is not None:
             self.owners[trace] = finalization
             finalization.track(self.workers[trace])
@@ -70,28 +74,46 @@ class Reactions:
             self.ledger.audit("task.reaction", trace_id=trace, reaction_outcome="tool_failed")
         return "failed"
 
-    async def _run(self, trace):
+    def begin_stop(self):
+        self.stopping = True
+        for changed in self.changed.values():
+            changed.set()
+
+    async def _run(self, trace, state=None):
         try:
-            while trace in self.pending:
-                self.changed[trace].clear()
-                state = self.pending[trace]
-                if state not in {"done", "failed"} and self.interval:
-                    timer = asyncio.create_task(self.clock.sleep(self.interval))
-                    changed = asyncio.create_task(self.changed[trace].wait())
-                    done, _ = await asyncio.wait(
-                        {timer, changed}, return_when=asyncio.FIRST_COMPLETED
+            while state is not None or trace in self.pending:
+                if state is None:
+                    self.changed[trace].clear()
+                    remaining = max(
+                        0,
+                        self.last_sent.get(trace, -self.interval)
+                        + self.interval
+                        - self.clock.monotonic(),
                     )
-                    for task in (timer, changed):
-                        if task not in done:
-                            task.cancel()
-                    await asyncio.gather(timer, changed, return_exceptions=True)
-                    if changed in done:
+                    if self.stopping and self.pending[trace] in {"done", "failed"}:
+                        remaining = 0
+                    if remaining:
+                        timer = asyncio.create_task(self.clock.sleep(remaining))
+                        changed = asyncio.create_task(self.changed[trace].wait())
+                        try:
+                            await asyncio.wait(
+                                {timer, changed}, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        finally:
+                            for task in (timer, changed):
+                                task.cancel()
+                            await asyncio.gather(timer, changed, return_exceptions=True)
                         continue
-                state = self.pending.pop(trace)
-                await self._send(trace, state)
+                    state = self.pending.pop(trace)
+                if await self._send(trace, state) == "sent":
+                    self.last_sent[trace] = self.clock.monotonic()
+                if state in {"done", "failed"}:
+                    self.last_sent.pop(trace, None)
+                state = None
         finally:
             self.workers.pop(trace, None)
             self.owners.pop(trace, None)
+            self.changed.pop(trace, None)
 
     def _source(self, trace):
         record = self.ledger.get("record", trace)
@@ -128,10 +150,10 @@ class Reactions:
 
         async def send():
             intent = await finalization.persist(self._register, trace, state)
-            await self.delivery.send_one(intent.intent_id, finalization=finalization)
+            return await self.delivery.send_one(intent.intent_id, finalization=finalization)
 
         follow = finalization.follow if parent is not None else finalization.run
-        await follow(send(), cancel=lambda: None)
+        return await follow(send(), cancel=lambda: None)
 
     async def restart(self, interrupted):
         for trace in interrupted:
