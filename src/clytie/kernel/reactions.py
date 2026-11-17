@@ -43,6 +43,12 @@ class Reactions:
         finalization = finalization or self.finalizations.get(trace)
         if not await self.eligible(trace, finalization=finalization):
             return
+        if state == "done":
+            state = (
+                await finalization.persist(self._outcome, trace)
+                if finalization is not None
+                else await run_sync(self.ledger, self._outcome, trace)
+            )
         self.pending[trace] = state
         self.changed.setdefault(trace, asyncio.Event()).set()
         if trace not in self.workers:
@@ -50,6 +56,20 @@ class Reactions:
         if finalization is not None:
             self.owners[trace] = finalization
             finalization.track(self.workers[trace])
+
+    def _outcome(self, trace):
+        import json
+
+        with self.ledger.transaction():
+            row = self.ledger.db.execute(
+                "SELECT data FROM audit WHERE json_extract(data,'$.trace_id')=? "
+                "AND json_extract(data,'$.kind')='tool.heavy_result' ORDER BY rowid DESC LIMIT 1",
+                (trace,),
+            ).fetchone()
+            if row is not None and json.loads(row[0])["status"] != "ok":
+                self.ledger.audit("task.reaction", trace_id=trace, reaction_outcome="tool_failed")
+                return "failed"
+        return "done"
 
     async def _run(self, trace):
         try:

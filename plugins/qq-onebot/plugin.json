@@ -16,7 +16,27 @@
     "channel": {
       "factory": "create_channel",
       "platform": "qq"
-    }
+    },
+    "api_routes": [
+      {
+        "method": "POST",
+        "path": "/plugins/qq-onebot/emoji/start",
+        "handler": "capture_start",
+        "audit": true
+      },
+      {
+        "method": "GET",
+        "path": "/plugins/qq-onebot/emoji/status",
+        "handler": "capture_status",
+        "audit": false
+      },
+      {
+        "method": "POST",
+        "path": "/plugins/qq-onebot/emoji/cancel",
+        "handler": "capture_cancel",
+        "audit": true
+      }
+    ]
   },
   "permissions": [
     "network"
@@ -206,6 +226,10 @@
         },
         "additionalProperties": false,
         "default": {}
+      },
+      "react_remove": {
+        "type": "boolean",
+        "default": false
       }
     },
     "required": [

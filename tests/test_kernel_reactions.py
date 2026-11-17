@@ -186,3 +186,28 @@ async def test_restart_marks_interrupted_and_updates_reaction_once(tmp_path):
     assert ledger.get("record", trace)["exec_status"] == "interrupted"
     assert channel.text == []
     ledger.close()
+
+
+@pytest.mark.parametrize(
+    "statuses,expected",
+    [
+        (["error"], "❌"),
+        (["denied"], "❌"),
+        (["cancelled"], "❌"),
+        (["error", "ok"], "✅"),
+        ([], "✅"),
+    ],
+)
+async def test_final_reaction_uses_last_heavy_result_only(tmp_path, statuses, expected):
+    ledger, reactions, channel, _, trace = fixture(tmp_path, config={"min_interval_seconds": 0})
+    try:
+        for status in statuses:
+            with ledger.transaction():
+                ledger.audit("tool.heavy_result", trace_id=trace, status=status)
+        await reactions.request(trace, "done")
+        await reactions.drain()
+        assert channel.calls[-1].emoji == expected
+        outcomes = [a for a in ledger.rows("audit") if a.get("reaction_outcome") == "tool_failed"]
+        assert bool(outcomes) == (expected == "❌")
+    finally:
+        ledger.close()

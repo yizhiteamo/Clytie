@@ -953,6 +953,19 @@ class Agent:
             self.memory.sessions.pop(trace, None)
 
     async def execute(self, trace, conversation, actor, call, specs, token):
+        declaration = self.declarations().get(call.tool)
+        heavy = declaration is not None and declaration[1].get("heavy", False)
+        result = await self._execute_tool(trace, conversation, actor, call, specs, token)
+        if heavy:
+
+            def record_outcome():
+                with self.ledger.transaction():
+                    self.ledger.audit("tool.heavy_result", trace_id=trace, status=result.status)
+
+            await self.kernel.persist(trace, record_outcome)
+        return result
+
+    async def _execute_tool(self, trace, conversation, actor, call, specs, token):
         spec = next((s for s in specs if s.name == call.tool), None)
         if spec is None:
             reason = (

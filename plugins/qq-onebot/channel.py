@@ -7,6 +7,7 @@ from clytie.sdk import CancelToken, ChannelUnavailable, CredentialUnavailable
 from clytie.sdk.immutable import thaw
 from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, Receipt
 
+from .capture import Capture
 from .mapping import encode_parts, normalize_event
 
 _NOT_SENT = object()
@@ -16,6 +17,7 @@ class OneBotChannel:
     def __init__(self, ctx):
         self.ctx = ctx
         self._config = ctx.config
+        self.capture = Capture(ctx.identity, ctx.clock)
         self._expected = ctx.identity.self_account()
         self._channel_id = (
             ctx.identity.resolve_actor(self._expected).channel_id
@@ -33,6 +35,7 @@ class OneBotChannel:
         self._cancel = CancelToken()
         self._auth_invalid = False
         self._reaction_enabled = self._configured_reactions()
+        self._remove_enabled = self._config.get("react_remove", False)
         self._last_heartbeat = ctx.clock.monotonic()
 
     def _configured_reactions(self):
@@ -55,6 +58,7 @@ class OneBotChannel:
         return ChannelFeatures(
             max_text_chars=self._config.get("max_text_chars", 4000),
             supports_react=self._reaction_enabled,
+            supports_react_remove=self._reaction_enabled and self._remove_enabled,
             supports_quote=True,
             supports_card=False,
             media_limits=thaw(self._config.get("media_limits", {})),
@@ -108,6 +112,7 @@ class OneBotChannel:
         if not isinstance(data, dict) or str(data.get("user_id")) != self._expected:
             await self._invalid_auth()
         self._reaction_enabled = self._configured_reactions()
+        self._remove_enabled = self._config.get("react_remove", False)
         self._last_heartbeat = self.ctx.clock.monotonic()
         await self._publish("online")
         self._heartbeat = asyncio.create_task(self._watch_heartbeat(self._ws))
@@ -192,6 +197,12 @@ class OneBotChannel:
                     self._last_heartbeat = self.ctx.clock.monotonic()
                     continue
                 if self._state.status != "online":
+                    continue
+                if (
+                    payload.get("post_type") == "notice"
+                    and payload.get("notice_type") == "group_msg_emoji_like"
+                ):
+                    self.capture.feed(payload)
                     continue
                 event, malformed = normalize_event(self.ctx, payload, self._expected)
                 self._counts["malformed"] += malformed
@@ -336,6 +347,27 @@ class OneBotChannel:
             or intent.target.conversation_id != intent.conversation_id
         ):
             return self._receipt(intent, "failed", "invalid_request")
+        if (
+            self.features().supports_react_remove
+            and intent.replaces_emoji in self._config["emoji_ids"]
+        ):
+            removed = await self._request(
+                "set_msg_emoji_like",
+                {
+                    "message_id": intent.target.platform_message_id,
+                    "emoji_id": self._config["emoji_ids"][intent.replaces_emoji],
+                    "set": False,
+                },
+                cancel,
+            )
+            self._log_result("set_msg_emoji_like", removed)
+            if (
+                isinstance(removed, dict)
+                and removed.get("status") == "failed"
+                and removed.get("retcode") == 1404
+            ):
+                self._remove_enabled = False
+                self.ctx.log.warning("qq.reaction_remove_unsupported", retcode=1404)
         result = await self._request(
             "set_msg_emoji_like",
             {

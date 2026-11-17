@@ -11,6 +11,10 @@ from .client import Client, NotRunning
 
 
 def add_parser(commands):
+    emoji = commands.add_parser("emoji")
+    emoji.add_argument("action", choices=["capture"])
+    emoji.add_argument("cid")
+    emoji.add_argument("--seconds", type=float, default=180)
     companion = commands.add_parser("companion")
     companion.add_argument("action", choices=["start", "stop", "restart"])
     companion.add_argument("cid")
@@ -62,7 +66,7 @@ def add_parser(commands):
     backup.add_argument("--confirm-identity", action="store_true")
     backup.add_argument("--patch")
     backup.add_argument("--preserved")
-    for p in (companion, boundary, plugin, admin, backup):
+    for p in (emoji, companion, boundary, plugin, admin, backup):
         p.add_argument("--home")
         p.add_argument("--yes", action="store_true")
         p.add_argument("--json", action="store_true")
@@ -129,6 +133,10 @@ async def execute(args, client=None):
     )
     await cli.request("GET", "/status")
     command = args.command
+    if command == "emoji":
+        from .emoji import capture
+
+        return await capture(cli, args.cid, args.seconds)
     if command == "backup":
         source_binding = None
         if getattr(args, "source_repository", None):
