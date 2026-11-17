@@ -73,10 +73,13 @@ class FakeChannel:
         ctx: FakeContext | None = None,
         *,
         incoming: tuple[EventEnvelope, ...] = (),
+        membership: dict[tuple[str, str], bool | None] | None = None,
         delay: float = 0,
     ) -> None:
         self.ctx = ctx or FakeContext(plugin_id="fake-channel")
         self.incoming = incoming
+        self.membership = membership
+        self.membership_queries = []
         self.delay = delay
         self.connected = False
         self.sent: list[DeliveryIntent] = []
@@ -107,10 +110,16 @@ class FakeChannel:
     async def react(self, intent: DeliveryIntent, cancel: CancelToken) -> Receipt:
         return await self.send(intent, cancel)
 
+    async def is_member(self, conversation_id: str, actor_id: str) -> bool | None:
+        self.membership_queries.append((conversation_id, actor_id))
+        await self.ctx.clock.sleep(0)
+        return None if self.membership is None else self.membership.get((conversation_id, actor_id))
+
     def features(self) -> ChannelFeatures:
         return ChannelFeatures(
             max_text_chars=4096,
             supports_react=True,
+            supports_membership=self.membership is not None,
             supports_quote=True,
             supports_card=True,
             media_limits={},

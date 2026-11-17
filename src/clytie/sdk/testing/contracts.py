@@ -176,6 +176,10 @@ async def assert_channel_contract(
         features = channel.features()
         assert isinstance(features, ChannelFeatures)
         assert_roundtrip(features)
+        if features.supports_membership:
+            assert callable(getattr(channel, "is_member", None))
+            membership = await channel.is_member(intent.conversation_id, "owner")
+            assert membership is None or type(membership) is bool
         stream = channel.events()
         assert isinstance(stream, AsyncIterator)
         try:
