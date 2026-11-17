@@ -495,6 +495,7 @@ class ChannelFeatures(SDKModel):
     max_text_chars: int
     supports_react: bool
     supports_react_remove: bool = False
+    supports_membership: bool = False
     supports_quote: bool
     supports_card: bool
     media_limits: JsonObject

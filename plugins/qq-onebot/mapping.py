@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from clytie.sdk.types import (
     AudioPart,
@@ -87,6 +88,31 @@ def _inbound_part(ctx, segment, expected, reference):
 
 def normalize_event(ctx, payload, expected_account):
     """丢弃不属于本账号的事件；畸形段单独计数，不下载媒体。"""
+    if (
+        isinstance(payload, dict)
+        and payload.get("post_type") == "notice"
+        and payload.get("notice_type") in {"group_increase", "group_decrease"}
+    ):
+        group = _number(payload.get("group_id"))
+        actor = _number(payload.get("user_id"))
+        if _number(payload.get("self_id")) != expected_account or group is None or actor is None:
+            return None, 1
+        conversation = ctx.identity.resolve_conversation("group", group)
+        return EventEnvelope(
+            event_id=f"{conversation.channel_id}:{uuid4().hex}",
+            dedupable=False,
+            type="conversation.notice",
+            companion_id=ctx.companion_id,
+            channel_id=conversation.channel_id,
+            conversation=conversation,
+            notice={
+                "kind": "member_join"
+                if payload["notice_type"] == "group_increase"
+                else "member_leave",
+                "actor_id": ctx.identity.resolve_actor(actor).actor_id,
+            },
+            received_at=ctx.clock.now(),
+        ), 0
     if not isinstance(payload, dict) or payload.get("post_type") != "message":
         return None, 0
     kind = payload.get("message_type")

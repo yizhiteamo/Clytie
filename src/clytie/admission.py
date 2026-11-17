@@ -9,11 +9,30 @@ REASONS = (
     "stranger_private",
     "sender_not_expected",
     "unknown_kind",
+    "owner_absent",
+    "membership_unknown",
 )
 
 
 class Admission:
-    def __init__(self, config, instance):
+    def __init__(self, config, instance, *, channels=None, clock=None):
+        from clytie.clock import SystemClock
+
+        self.channels = channels if channels is not None else {}
+        self.clock = clock or SystemClock()
+        self.membership = {}
+        self.observed_groups = set()
+        self.generations = {}
+        self.owner = next(
+            (
+                key
+                for key, value in instance.get("people", {}).items()
+                if not key.startswith("x-")
+                and isinstance(value, dict)
+                and value.get("role") == "owner"
+            ),
+            None,
+        )
         self.mode = config.get("boundary", {}).get("admission", "registered")
         self.test = instance.get("test_conversation")
         self.conversations = {
@@ -53,11 +72,105 @@ class Admission:
                 "members_expected", ()
             ):
                 return "sender_not_expected"
-        elif self.mode != "registered":
+        elif self.mode not in {"registered", "owner_present"}:
             return "not_registered"
         if conversation.kind == "group" and self.conversations.get(cid, {}).get("kind") != "group":
             return "not_registered"
         return None
+
+    def invalidate(self, channel_id, conversation_id):
+        key = (channel_id, conversation_id)
+        self.membership.pop(key, None)
+        self.generations[key] = self.generations.get(key, 0) + 1
+
+    async def checked_reason(self, conversation, sender):
+        reason = self.reason(conversation, sender)
+        if (
+            self.mode != "owner_present"
+            or reason != "not_registered"
+            or conversation.kind != "group"
+        ):
+            return reason
+        key = (conversation.channel_id, conversation.conversation_id)
+        self.observed_groups.add(key)
+        channel = self.channels.get(conversation.channel_id)
+        try:
+            supported = channel is not None and channel.features().supports_membership
+        except Exception:
+            supported = False
+        if not supported or self.owner is None:
+            return "membership_unknown"
+        cached = self.membership.get(key)
+        if cached is not None and self.clock.monotonic() < cached[0]:
+            result = cached[1]
+        else:
+            from clytie.plugin_host.support import timed
+
+            generation = self.generations.get(key, 0)
+            try:
+                result = await timed(
+                    channel.is_member(conversation.conversation_id, self.owner), self.clock, 30
+                )
+                if result is not True and result is not False:
+                    result = None
+            except Exception:
+                result = None
+            if self.generations.get(key, 0) != generation:
+                return "membership_unknown"
+            self.membership[key] = (self.clock.monotonic() + 600, result)
+        return (
+            None if result is True else "owner_absent" if result is False else "membership_unknown"
+        )
+
+    async def accept_checked(self, event):
+        if getattr(event, "type", None) == "conversation.notice" and event.notice.kind in {
+            "member_join",
+            "member_leave",
+        }:
+            self.invalidate(event.channel_id, event.conversation.conversation_id)
+            return False
+        reason = await self.checked_reason(
+            event.conversation, event.message.sender if event.message else None
+        )
+        if reason:
+            self.counts[reason] += 1
+        return reason is None
+
+    async def allows_delivery_checked(self, intent, inbound):
+        if self.allows_delivery(intent, inbound):
+            return True
+        if self.mode != "owner_present":
+            return False
+        if not inbound:
+            if (intent.channel_id, intent.conversation_id) not in self.observed_groups:
+                return False
+            return (
+                await self.checked_reason(
+                    SimpleNamespace(
+                        kind="group",
+                        channel_id=intent.channel_id,
+                        conversation_id=intent.conversation_id,
+                    ),
+                    None,
+                )
+                is None
+            )
+        source = inbound.get("conversation", {})
+        if source.get("conversation_id") != intent.conversation_id:
+            return False
+        actor = (inbound.get("message") or {}).get("sender")
+        sender = SimpleNamespace(**actor) if actor else None
+        return (
+            await self.checked_reason(
+                SimpleNamespace(
+                    kind=source.get("kind"),
+                    conversation_id=intent.conversation_id,
+                    channel_id=intent.channel_id,
+                ),
+                sender,
+            )
+            is None
+        )
 
     def accept(self, event):
         sender = event.message.sender if event.message else None

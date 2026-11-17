@@ -8,7 +8,7 @@ from clytie.sdk.immutable import thaw
 from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, Receipt
 
 from .capture import Capture
-from .mapping import encode_parts, normalize_event
+from .mapping import _number, encode_parts, normalize_event
 
 _NOT_SENT = object()
 
@@ -28,6 +28,7 @@ class OneBotChannel:
         self._counts = {"self_id_mismatch": 0, "queue_overflow": 0, "malformed": 0}
         self._queue = asyncio.Queue(maxsize=self._config.get("queue_limit", 128))
         self._pending = {}
+        self._observed_groups = {}
         self._sequence = 0
         self._ws = self._reader = self._heartbeat = self._manager = None
         self._opening = None
@@ -60,6 +61,7 @@ class OneBotChannel:
             supports_react=self._reaction_enabled,
             supports_react_remove=self._reaction_enabled and self._remove_enabled,
             supports_quote=True,
+            supports_membership=True,
             supports_card=False,
             media_limits=thaw(self._config.get("media_limits", {})),
         )
@@ -207,8 +209,15 @@ class OneBotChannel:
                 event, malformed = normalize_event(self.ctx, payload, self._expected)
                 self._counts["malformed"] += malformed
                 if event is not None:
+                    if event.conversation.kind == "group":
+                        group = _number(payload.get("group_id"))
+                        if group is not None:
+                            self._observed_groups[event.conversation.conversation_id] = group
                     try:
-                        self._queue.put_nowait(event)
+                        if event.type == "conversation.notice":
+                            await self._queue.put(event)
+                        else:
+                            self._queue.put_nowait(event)
                     except asyncio.QueueFull:
                         self._counts["queue_overflow"] += 1
                         self.ctx.log.warning(
@@ -280,12 +289,44 @@ class OneBotChannel:
             retcode=retcode if type(retcode) is int else None,
         )
 
+    async def is_member(self, conversation_id, actor_id):
+        group = self.ctx.identity.platform_id_for(conversation_id) or self._observed_groups.get(
+            conversation_id
+        )
+        account = self.ctx.identity.account_for(actor_id)
+        if self._state.status != "online" or _number(group) is None or _number(account) is None:
+            return None
+        if (
+            self.ctx.identity.resolve_conversation("group", group).conversation_id
+            != conversation_id
+        ):
+            return None
+        result = await self._request(
+            "get_group_member_info",
+            {"group_id": group, "user_id": account, "no_cache": True},
+            self._cancel,
+        )
+        if (
+            not isinstance(result, dict)
+            or result.get("status") != "ok"
+            or result.get("retcode") != 0
+        ):
+            return None
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return None
+        if _number(data.get("group_id")) != group or _number(data.get("user_id")) != account:
+            return None
+        return True
+
     async def send(self, intent, cancel):
         cancel.raise_if_cancelled()
         await self.ctx.clock.sleep(0)
         if self._state.status != "online":
             return self._receipt(intent, "failed", "transient")
-        platform_id = self.ctx.identity.platform_id_for(intent.conversation_id)
+        platform_id = self.ctx.identity.platform_id_for(
+            intent.conversation_id
+        ) or self._observed_groups.get(intent.conversation_id)
         if intent.channel_id != self._channel_id or platform_id is None:
             return self._receipt(intent, "failed", "invalid_request")
         kind = next(

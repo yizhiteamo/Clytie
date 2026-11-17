@@ -69,9 +69,7 @@ def test_admission_configuration_is_startup_snapshot():
     )
 
 
-@pytest.mark.parametrize(
-    "mode,test", [("test_only", None), ("owner_present", "test_group"), ("bad", "test_group")]
-)
+@pytest.mark.parametrize("mode,test", [("test_only", None), ("bad", "test_group")])
 def test_admission_invalid_configuration(tmp_path, mode, test):
     from clytie.config import load_home
 
@@ -86,8 +84,6 @@ def test_admission_invalid_configuration(tmp_path, mode, test):
     report = load_home(home, repo_root=root)
     assert not next(row for row in report.companions if row["id"] == "companion_a")["valid"]
     assert any("admission" in error.pointer for error in report.errors)
-    if mode == "owner_present":
-        assert any("尚未支持" in error.expected for error in report.errors)
 
 
 async def test_denied_inbound_has_only_safe_counters(tmp_path):

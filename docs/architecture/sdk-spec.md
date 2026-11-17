@@ -247,6 +247,7 @@ features() -> ChannelFeatures
 ```
 `ChannelFeatures`：`max_text_chars`、`supports_react`、`supports_quote`、`supports_card`、`media_limits: dict`。
 另有 `supports_react_remove: bool`，默认 `false`（kernel-spec §13.5）。
+B4b 新增 `supports_membership: bool = False`；支持时提供可选 `async is_member(conversation_id, actor_id) -> bool | None`，参数为逻辑 ID，`None` 表示未知（admission-spec §5）。成员变化沿用 `conversation.notice` 的 `member_join` / `member_leave`，本体在准入前清除对应缓存。
 `media_limits` 的键：`{image|audio|video|file: {max_bytes: int, formats: [media_type]}}`；没有列出的类型视为不支持。
 平台插件负责把平台账号映射为 `Actor` 和 `Conversation`：映射表由本体通过 `ctx` 提供（来自实例配置），插件不自己判断身份。
 

@@ -708,6 +708,7 @@ def load_home(
     global_errors = list(reader.errors)
 
     statuses: list[Mapping[str, Any]] = []
+    dialogue_notices = []
     configurations: dict[str, Any] = {}
     companion_ids = (
         instance.get("companions") if isinstance(instance.get("companions"), list) else []
@@ -829,13 +830,6 @@ def load_home(
                 reader.issue(file, ("protection", "exit_ratio"), "greater than enter_ratio", leave)
         boundary = data.get("boundary", {})
         if isinstance(boundary, dict):
-            if boundary.get("admission") == "owner_present":
-                reader.issue(
-                    file,
-                    ("boundary", "admission"),
-                    "尚未支持 owner_present（B4b）",
-                    "owner_present",
-                )
             if boundary.get("admission") == "test_only" and not instance.get("test_conversation"):
                 reader.issue(
                     file,
@@ -896,6 +890,19 @@ def load_home(
         for role, tools in _entries(data.get("permissions")).items():
             if role != "owner" and isinstance(tools, list) and "*" in tools:
                 reader.issue(file, ("permissions", role), "wildcard allowed only for owner", tools)
+        for tool, scope in _entries(data.get("tool_scopes")).items():
+            excluded = scope.get("exclude", []) if isinstance(scope, dict) else []
+            for index, actor_id in enumerate(excluded if isinstance(excluded, list) else []):
+                person = (
+                    instance.get("people", {}).get(actor_id) if isinstance(actor_id, str) else None
+                )
+                if not isinstance(person, dict) or person.get("role") == "owner":
+                    reader.issue(
+                        file,
+                        ("tool_scopes", tool, "exclude", index),
+                        "registered non-owner person",
+                        actor_id,
+                    )
         for scene, template in _entries(data.get("task_card")).items():
             if isinstance(template, str):
                 try:
@@ -997,6 +1004,7 @@ def load_home(
         references.extend(
             (key, ("plugins", key), {}, "plugins") for key in sorted(role_plugins - listed_plugins)
         )
+        declared_tools = set()
         merged_for_companion: dict[str, Any] = {}
         model_config = recollect_model_config = None
         channel_configs: dict[int, Any] = {}
@@ -1026,6 +1034,7 @@ def load_home(
             if kind == "plugins" and plugin_id in role_plugins:
                 # 同一模型/平台由各账号的第四层最终配置校验，不提前校验未完整的三层。
                 continue
+            declared_tools.update(t["name"] for t in plugin.get("contributes", {}).get("tools", []))
             schema = plugin["config"]
             defaults, origins = _default_config(schema, plugin_file)
             instance_settings = _entries(instance.get("plugins")).get(plugin_id, {})
@@ -1072,6 +1081,19 @@ def load_home(
                 model_config = merged
             elif kind == "channels":
                 channel_configs[position[1]] = merged
+        for tool in _entries(data.get("tool_scopes")):
+            if tool not in declared_tools:
+                dialogue_notices.append(
+                    {"companion_id": companion_id, "code": "tool_scope_unavailable", "tool": tool}
+                )
+        if isinstance(boundary, dict) and boundary.get("admission") == "owner_present":
+            dialogue_notices.append(
+                {
+                    "companion_id": companion_id,
+                    "code": "owner_present_requires_membership",
+                    "message": "不支持成员查询的平台账号只对登记的群生效",
+                }
+            )
         configurations[companion_id] = freeze(
             {
                 "config": data,
@@ -1116,6 +1138,7 @@ def load_home(
         freeze(instance),
         freeze(configurations),
         global_errors=tuple(global_errors),
+        dialogue_notices=tuple(dialogue_notices),
     )
 
 

@@ -652,3 +652,69 @@ async def test_capture_route_without_channel_returns_conflict(route):
         "status": 409,
         "json": {"code": "channel_unavailable"},
     }
+
+
+@pytest.mark.parametrize(
+    "reply,expected",
+    [
+        (
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"group_id": "1000000003", "user_id": "1000000002"},
+            },
+            True,
+        ),
+        ({"status": "failed", "retcode": 1}, None),
+        ({"status": "ok", "retcode": 0, "data": {}}, None),
+    ],
+)
+async def test_membership_query_verifies_response_without_guessing_failure(
+    tmp_path, reply, expected
+):
+    from clytie.sdk.types import Actor
+
+    ctx, channel, protocol = make(tmp_path, Protocol(reply=reply))
+    ctx.identity.actors["1000000002"] = Actor(
+        actor_id="owner", role="owner", channel_id="qq-onebot"
+    )
+    await channel.connect()
+    try:
+        assert channel.features().supports_membership
+        assert await channel.is_member("test_group", "owner") is expected
+        assert protocol.actions[-1]["action"] == "get_group_member_info"
+        assert protocol.actions[-1]["params"] == {
+            "group_id": "1000000003",
+            "user_id": "1000000002",
+            "no_cache": True,
+        }
+        assert "1000000002" not in repr(ctx.log.entries)
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize(
+    "notice,kind", [("group_increase", "member_join"), ("group_decrease", "member_leave")]
+)
+async def test_membership_notice_reaches_core_as_generic_notice(tmp_path, notice, kind):
+    ctx, channel, protocol = make(tmp_path)
+    await channel.connect()
+    try:
+        protocol.messages.put_nowait(
+            json.dumps(
+                {
+                    "post_type": "notice",
+                    "notice_type": notice,
+                    "self_id": "1000000001",
+                    "group_id": "1000000003",
+                    "user_id": "1000000002",
+                }
+            )
+        )
+        stream = channel.events()
+        event = await anext(stream)
+        assert event.type == "conversation.notice" and event.notice.kind == kind
+        assert not event.dedupable and event.message is None
+        await stream.aclose()
+    finally:
+        await channel.close()
