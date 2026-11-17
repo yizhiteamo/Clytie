@@ -214,10 +214,7 @@ class OneBotChannel:
                         if group is not None:
                             self._observed_groups[event.conversation.conversation_id] = group
                     try:
-                        if event.type == "conversation.notice":
-                            await self._queue.put(event)
-                        else:
-                            self._queue.put_nowait(event)
+                        self._queue.put_nowait(event)
                     except asyncio.QueueFull:
                         self._counts["queue_overflow"] += 1
                         self.ctx.log.warning(

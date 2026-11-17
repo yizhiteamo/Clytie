@@ -109,7 +109,7 @@ class Admission:
             generation = self.generations.get(key, 0)
             try:
                 result = await timed(
-                    channel.is_member(conversation.conversation_id, self.owner), self.clock, 30
+                    channel.is_member(conversation.conversation_id, self.owner), self.clock, 5
                 )
                 if result is not True and result is not False:
                     result = None
@@ -117,7 +117,8 @@ class Admission:
                 result = None
             if self.generations.get(key, 0) != generation:
                 return "membership_unknown"
-            self.membership[key] = (self.clock.monotonic() + 600, result)
+            if result is not None:
+                self.membership[key] = (self.clock.monotonic() + 600, result)
         return (
             None if result is True else "owner_absent" if result is False else "membership_unknown"
         )

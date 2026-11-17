@@ -718,3 +718,64 @@ async def test_membership_notice_reaches_core_as_generic_notice(tmp_path, notice
         await stream.aclose()
     finally:
         await channel.close()
+
+
+async def test_full_notice_queue_does_not_block_membership_reply_or_heartbeat(tmp_path):
+    from clytie.sdk.types import Actor
+
+    ctx, channel, protocol = make(
+        tmp_path,
+        Protocol(
+            reply={
+                "status": "ok",
+                "retcode": 0,
+                "data": {"group_id": "1000000003", "user_id": "1000000002"},
+            }
+        ),
+        queue_limit=1,
+    )
+    ctx.identity.actors["1000000002"] = Actor(
+        actor_id="owner", role="owner", channel_id="qq-onebot"
+    )
+    await channel.connect()
+    query = None
+    try:
+        queued = object()
+        channel._queue.put_nowait(queued)
+        ctx.clock.advance(1)
+        protocol.messages.put_nowait(
+            json.dumps(
+                {
+                    "post_type": "notice",
+                    "notice_type": "group_decrease",
+                    "self_id": "1000000001",
+                    "group_id": "1000000003",
+                    "user_id": "1000000002",
+                }
+            )
+        )
+        protocol.messages.put_nowait(
+            json.dumps(
+                {
+                    "post_type": "meta_event",
+                    "meta_event_type": "heartbeat",
+                    "self_id": "1000000001",
+                }
+            )
+        )
+        query = asyncio.create_task(channel.is_member("test_group", "owner"))
+        for _ in range(100):
+            await ctx.clock.advance_and_drain(0)
+            if query.done():
+                break
+        assert query.done(), "full inbound queue blocked the membership reply"
+        assert query.result() is True
+        assert channel._last_heartbeat == ctx.clock.monotonic()
+        assert channel._counts["queue_overflow"] == 1
+        assert channel._queue.get_nowait() is queued
+        assert channel.state().status == "online"
+    finally:
+        if query is not None:
+            query.cancel()
+            await asyncio.gather(query, return_exceptions=True)
+        await channel.close()

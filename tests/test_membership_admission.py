@@ -33,13 +33,17 @@ async def test_membership_result_and_expiring_cache(value, expected):
     admission, channel, clock, conversation, actor = setup(value)
     assert await admission.checked_reason(conversation, actor) == expected
     assert await admission.checked_reason(conversation, actor) == expected
-    assert len(channel.membership_queries) == 1
+    assert len(channel.membership_queries) == (2 if value is None else 1)
     clock.advance(600)
     assert await admission.checked_reason(conversation, actor) == expected
-    assert len(channel.membership_queries) == 2
+    assert len(channel.membership_queries) == (3 if value is None else 2)
     admission.invalidate("fake", "other")
     assert await admission.checked_reason(conversation, actor) == expected
-    assert len(channel.membership_queries) == 3
+    assert len(channel.membership_queries) == (4 if value is None else 3)
+    if value is None:
+        assert not admission.membership
+        channel.membership[("other", "owner")] = True
+        assert await admission.checked_reason(conversation, actor) is None
 
 
 async def test_unsupported_channel_only_admits_registered_groups():
@@ -59,15 +63,18 @@ async def test_query_timeout_and_exception_fail_closed():
     channel.is_member = hang
     task = asyncio.create_task(admission.checked_reason(conversation, actor))
     await clock.advance_and_drain(0)
-    await clock.advance_and_drain(30)
+    await clock.advance_and_drain(4)
+    assert not task.done()
+    await clock.advance_and_drain(1)
     assert await task == "membership_unknown"
-    admission.invalidate("fake", "other")
+    assert not admission.membership
 
     async def fail(*args):
         raise RuntimeError("fictional")
 
     channel.is_member = fail
     assert await admission.checked_reason(conversation, actor) == "membership_unknown"
+    assert not admission.membership
 
 
 async def test_notification_during_query_prevents_stale_admission():
