@@ -149,6 +149,7 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/architecture/storage-spec.md` | Issue #72：存储 I/O 所有者、事务、容量、捕获、取消及性能验收 |
 | `docs/architecture/admission-spec.md` | 会话准入：测试会话、登记会话、owner 在场、静默与出站检查 |
 | `docs/architecture/tool-scopes-spec.md` | 工具使用范围：谁在什么会话能用哪个工具 |
+| `docs/architecture/smoke-spec.md` | B5 真实冒烟测试工具：测试账号、用例、观察与判定、只读摘要 API |
 | `docs/architecture/runtime-services-spec.md` | 阶段二运行时服务：插件凭据、生产 HTTP/WebSocket |
 | `docs/architecture/backup-spec.md` | A4.3 备份与维护：在线快照、保留与容量、副本、恢复切换、旧实例与密钥 |
 | `docs/architecture/api-spec.md` | A4.2 本机 API、登录、审计、CLI、后台运行与插件路由 |
