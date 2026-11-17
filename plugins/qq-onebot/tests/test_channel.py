@@ -531,3 +531,124 @@ async def test_close_stops_repeated_reconnect_wait(tmp_path):
     await ctx.clock.advance_and_drain(100)
     assert ctx.websocket.calls == 4
     assert ctx.clock.pending_sleep_count == 0
+
+
+async def test_owner_notice_capture_is_not_an_inbound_event(tmp_path):
+    from clytie.sdk.types import Actor
+
+    ctx, channel, protocol = make(tmp_path)
+    ctx.identity.actors["1000000002"] = Actor(
+        actor_id="owner", role="owner", channel_id="qq-onebot"
+    )
+    await channel.connect()
+    try:
+        channel.capture.start()
+        protocol.messages.put_nowait(
+            json.dumps(
+                {
+                    "self_id": "1000000001",
+                    "post_type": "notice",
+                    "notice_type": "group_msg_emoji_like",
+                    "user_id": "1000000002",
+                    "is_add": True,
+                    "likes": [{"emoji_id": "7"}],
+                }
+            )
+        )
+        for _ in range(20):
+            await ctx.clock.sleep(0)
+        assert channel.capture.status()["ids"] == ["7"]
+        assert channel._queue.empty()
+        assert "1000000002" not in str(ctx.log.entries)
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize("remove", [False, True])
+async def test_reaction_remove_precedes_add(tmp_path, remove):
+    _, channel, protocol = make(tmp_path, react_remove=remove)
+    await channel.connect()
+    try:
+        assert channel.features().supports_react_remove is remove
+        receipt = await channel.react(
+            intent(react=True).model_copy(update={"replaces_emoji": "⏳"}), CancelToken()
+        )
+        assert receipt.status == "sent"
+        calls = [p for p in protocol.actions if p["action"] == "set_msg_emoji_like"]
+        assert len(calls) == (2 if remove else 1)
+        if remove:
+            assert calls[0]["params"]["set"] is False
+            assert calls[0]["params"]["emoji_id"] == "2"
+        assert "set" not in calls[-1]["params"]
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize("code,remove_enabled", [(1404, False), (5001, True)])
+async def test_remove_failure_still_adds_and_only_remove_degrades(tmp_path, code, remove_enabled):
+    class RemovalProtocol(Protocol):
+        async def send_text(self, text):
+            request = json.loads(text)
+            self.reply = (
+                {"status": "failed", "retcode": code}
+                if request["params"].get("set") is False
+                else {"status": "ok", "retcode": 0}
+            )
+            await super().send_text(text)
+
+    ctx, channel, protocol = make(tmp_path, RemovalProtocol(), react_remove=True)
+    await channel.connect()
+    try:
+        target = intent(react=True).model_copy(update={"replaces_emoji": "⏳"})
+        assert (await channel.react(target, CancelToken())).status == "sent"
+        assert channel.features().supports_react
+        assert channel.features().supports_react_remove is remove_enabled
+        await channel.react(target, CancelToken())
+        removals = [x for x in protocol.actions if x["params"].get("set") is False]
+        assert len(removals) == (2 if remove_enabled else 1)
+        await channel._disconnect()
+        ctx.websocket.connections.append(Protocol())
+        await channel._open()
+        assert channel.features().supports_react_remove
+    finally:
+        await channel.close()
+
+
+async def test_remove_timeout_still_adds_new_marker(tmp_path):
+    class SilentRemoval(Protocol):
+        async def send_text(self, text):
+            data = json.loads(text)
+            self.reply = (
+                "silence" if data["params"].get("set") is False else {"status": "ok", "retcode": 0}
+            )
+            await super().send_text(text)
+
+    ctx, channel, protocol = make(tmp_path, SilentRemoval(), react_remove=True)
+    await channel.connect()
+    try:
+        task = asyncio.create_task(
+            channel.react(
+                intent(react=True).model_copy(update={"replaces_emoji": "⏳"}), CancelToken()
+            )
+        )
+        for _ in range(20):
+            await ctx.clock.sleep(0)
+        ctx.clock.advance(30)
+        for _ in range(30):
+            await ctx.clock.sleep(0)
+        assert task.done()
+        assert (await task).status == "sent"
+        assert len([x for x in protocol.actions if x["action"] == "set_msg_emoji_like"]) == 2
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize("route", ["capture_start", "capture_status", "capture_cancel"])
+async def test_capture_route_without_channel_returns_conflict(route):
+    load_channel()
+    from qq_channel_test.plugin import Plugin
+
+    assert await getattr(Plugin(), route)({}) == {
+        "status": 409,
+        "json": {"code": "channel_unavailable"},
+    }

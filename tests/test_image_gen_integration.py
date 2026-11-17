@@ -92,10 +92,17 @@ async def test_image_gen_model_channel_ledger_and_secret_exclusion(tmp_path, fai
         row = agent.ledger.get("record", trace)
         intents = agent.ledger.intents(trace)
         assert any(i["reaction_state"] == "running" for i in intents)
-        # 本体回应对应整个任务；工具错误交给模型如实回复后，任务仍可正常完成。
-        assert any(i["reaction_state"] == "done" for i in intents)
+        # 工具失败改变最终回应，不改变任务完成状态；假模型仍返回空文本。
+        final_state = "failed" if failed else "done"
+        assert any(i["reaction_state"] == final_state for i in intents)
+        assert not any(i["reaction_state"] == ("done" if failed else "failed") for i in intents)
+        assert row["exec_status"] == "ok"
+        assert row["delivery_status"] == ("none" if failed else "sent")
+        assert (
+            any(a.get("reaction_outcome") == "tool_failed" for a in agent.ledger.rows("audit"))
+            == failed
+        )
         if not failed:
-            assert row["exec_status"] == "ok" and row["delivery_status"] == "sent"
             images = [
                 part for intent in channel.sent for part in intent.parts if part.type == "image"
             ]

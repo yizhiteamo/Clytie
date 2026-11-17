@@ -109,3 +109,29 @@ def test_config_save_coordinates_with_real_capture_process(
             process.kill()
             process.join(5)
     assert process.exitcode == 0
+
+
+def test_emoji_patch_preserves_unrelated_bytes():
+    before = "# keep\nchannels:\n  - plugin: qq-onebot\n    account: bot\n    config:\n      url: ws://127.0.0.1:1 # keep\n      emoji_ids: {}\nplugins: {}\n"
+    patch = {"emoji_ids": {"👌": "1", "⏳": "2", "✅": "3", "❌": "4"}}
+    after = patch_source(before, patch)
+    assert "url: ws://127.0.0.1:1 # keep" in after
+    assert after.startswith("# keep\n") and after.endswith("plugins: {}\n")
+    import yaml
+
+    assert yaml.safe_load(after)["channels"][0]["config"]["emoji_ids"] == patch["emoji_ids"]
+
+
+def test_emoji_multiline_preserves_comments_and_other_keys():
+    before = 'channels:\n  - plugin: qq-onebot\n    config:\n      emoji_ids:\n        "👌": "9" # keep-note\n        # keep-between\n        "⏳": "8"\n      max_text_chars: 123\n'
+    after = patch_source(before, {"emoji_ids": {"👌": "1", "⏳": "2", "✅": "3", "❌": "4"}})
+    assert "# keep-note" in after and "# keep-between" in after
+    assert "      max_text_chars: 123\n" in after
+    import yaml
+
+    assert yaml.safe_load(after)["channels"][0]["config"]["emoji_ids"] == {
+        "👌": "1",
+        "⏳": "2",
+        "✅": "3",
+        "❌": "4",
+    }

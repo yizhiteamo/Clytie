@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ruamel.yaml import YAML
-from ruamel.yaml.nodes import MappingNode, ScalarNode
+from ruamel.yaml.nodes import MappingNode, ScalarNode, SequenceNode
 from ruamel.yaml.tokens import AliasToken, AnchorToken
 
 from clytie.config import load_home
@@ -39,6 +39,68 @@ def patch_source(source, patch):
         return values
 
     root = children(tree)
+    if "emoji_ids" in patch:
+        import json
+
+        ids = patch["emoji_ids"]
+        if set(patch) != {"emoji_ids"} or not isinstance(ids, dict) or set(ids) != set("👌⏳✅❌"):
+            raise APIError("config_not_writable")
+        if any(
+            not isinstance(v, str) or re.fullmatch(r"[0-9]{1,32}", v) is None for v in ids.values()
+        ):
+            raise APIError("config_not_writable")
+        channels = root.get("channels")
+        if not isinstance(channels, SequenceNode) or channels.flow_style:
+            raise APIError("config_not_writable")
+        matches = [
+            children(n)
+            for n in channels.value
+            if children(n).get("plugin") is not None and children(n)["plugin"].value == "qq-onebot"
+        ]
+        if len(matches) != 1:
+            raise APIError("config_not_writable")
+        config = children(matches[0]["config"])
+        encoded = json.dumps(ids, ensure_ascii=False)
+        node = config.get("emoji_ids")
+        if node is not None:
+            if not isinstance(node, MappingNode):
+                raise APIError("config_not_writable")
+            if node.flow_style:
+                return source[: node.start_mark.index] + encoded + source[node.end_mark.index :]
+            existing = children(node)
+            if set(existing) - set(ids):
+                raise APIError("config_not_writable")
+            edits = []
+            for key, value in existing.items():
+                if not isinstance(value, ScalarNode):
+                    raise APIError("config_not_writable")
+                edits.append((value.start_mark.index, value.end_mark.index, json.dumps(ids[key])))
+            missing = [k for k in ids if k not in existing]
+            if missing:
+                pos = node.value[0][0].start_mark
+                start = source.rfind("\n", 0, pos.index) + 1
+                newline = "\r\n" if "\r\n" in source else "\n"
+                text = "".join(
+                    " " * pos.column
+                    + json.dumps(k, ensure_ascii=False)
+                    + ": "
+                    + json.dumps(ids[k])
+                    + newline
+                    for k in missing
+                )
+                edits.append((start, start, text))
+            for start, end, text in sorted(edits, reverse=True):
+                source = source[:start] + text + source[end:]
+            return source
+        node = matches[0]["config"]
+        if not node.value:
+            raise APIError("config_not_writable")
+        pos = node.value[0][0].start_mark
+        start = source.rfind("\n", 0, pos.index) + 1
+        newline = "\r\n" if "\r\n" in source else "\n"
+        return (
+            source[:start] + " " * pos.column + "emoji_ids: " + encoded + newline + source[start:]
+        )
     newline = "\r\n" if "\r\n" in source else "\n"
     edits = []
     missing = []

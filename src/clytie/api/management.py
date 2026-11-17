@@ -325,6 +325,9 @@ class Management:
                 description += (
                     "；" + ", ".join(plan["stopped_companions"]) + " 下次启动时这个插件不会加载"
                 )
+        if route == "/companions/<cid>/emoji/apply":
+            confirm = True
+            description = "保存采集的四个状态表情编号；保留配置历史，重启伴侣后生效。"
         return confirm, needs_password, description
 
     async def transfer(self, cid, op, args):
@@ -863,6 +866,30 @@ class Management:
                 for a, r in state["actors"].items()
                 if r.get("until") and datetime.fromisoformat(r["until"]) > self.clock.now()
             ]
+        if route == "/companions/<cid>/emoji/apply":
+            self.check_cid(cid)
+            async with self.serial:
+                response = await self.transfer(
+                    cid,
+                    "plugin_route",
+                    {
+                        "pid": "qq-onebot",
+                        "subpath": "emoji/status",
+                        "method": "GET",
+                        "query": {"session": data.get("session")},
+                        "json": {},
+                    },
+                )
+                value = response["json"]
+                if response["status"] != 200 or value.get("state") != "complete":
+                    raise APIError("capture_incomplete", 409)
+                ids = value.get("ids", [])
+                if len(ids) != 4:
+                    raise APIError("capture_incomplete", 409)
+                result = await asyncio.to_thread(
+                    self.writer.save, cid, {"emoji_ids": dict(zip("👌⏳✅❌", ids))}
+                )
+                return {**result, "restart_required": True}
         if "<subpath>" in route:
             if not self.running(cid):
                 raise APIError("plugin_unavailable", 404)

@@ -22,6 +22,7 @@ class Reactions:
         }
         self.pending, self.workers, self.changed = {}, {}, {}
         self.finalizations, self.owners = {}, {}
+        self.heavy_results = {}
 
     async def eligible(self, trace, *, finalization=None):
         finalization = finalization or self.finalizations.get(trace)
@@ -39,10 +40,23 @@ class Reactions:
             and self.delivery.channels[r["channel_id"]].features().supports_react
         )
 
+    def record_heavy_result(self, trace, status):
+        self.heavy_results[trace] = status
+
+    def forget(self, trace):
+        self.heavy_results.pop(trace, None)
+
     async def request(self, trace, state, *, finalization=None):
+        outcome = self.heavy_results.pop(trace, None) if state in {"done", "failed"} else None
         finalization = finalization or self.finalizations.get(trace)
         if not await self.eligible(trace, finalization=finalization):
             return
+        if state == "done" and outcome is not None and outcome != "ok":
+            state = (
+                await finalization.persist(self._outcome, trace)
+                if finalization is not None
+                else await run_sync(self.ledger, self._outcome, trace)
+            )
         self.pending[trace] = state
         self.changed.setdefault(trace, asyncio.Event()).set()
         if trace not in self.workers:
@@ -50,6 +64,11 @@ class Reactions:
         if finalization is not None:
             self.owners[trace] = finalization
             finalization.track(self.workers[trace])
+
+    def _outcome(self, trace):
+        with self.ledger.transaction():
+            self.ledger.audit("task.reaction", trace_id=trace, reaction_outcome="tool_failed")
+        return "failed"
 
     async def _run(self, trace):
         try:
