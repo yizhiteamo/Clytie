@@ -15,7 +15,7 @@ from clytie.sdk.types import ApiResponse
         ("unsupported", "y", False),
     ],
 )
-async def test_capture_only_saves_after_complete_and_confirmation(state, confirmed, saved):
+async def test_capture_only_saves_after_complete_and_confirmation(state, confirmed, saved, capsys):
     calls = []
 
     async def request(method, path, data=None, query=None):
@@ -27,6 +27,7 @@ async def test_capture_only_saves_after_complete_and_confirmation(state, confirm
     await capture(cli, "companion_a")
     assert any(path.endswith("/apply") for _, path, _ in calls) == saved
     assert calls[-1][1].endswith("/cancel")
+    assert "请在一条没有其他表情的消息上添加" in capsys.readouterr().out
 
 
 async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path):

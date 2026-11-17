@@ -951,6 +951,7 @@ class Agent:
         finally:
             self.kernel.record_tasks.pop(trace, None)
             self.memory.sessions.pop(trace, None)
+            self.kernel.reactions.forget(trace)
 
     async def execute(self, trace, conversation, actor, call, specs, token):
         declaration = self.declarations().get(call.tool)
@@ -963,6 +964,7 @@ class Agent:
                     self.ledger.audit("tool.heavy_result", trace_id=trace, status=result.status)
 
             await self.kernel.persist(trace, record_outcome)
+            self.kernel.reactions.record_heavy_result(trace, result.status)
         return result
 
     async def _execute_tool(self, trace, conversation, actor, call, specs, token):

@@ -22,6 +22,7 @@ class Reactions:
         }
         self.pending, self.workers, self.changed = {}, {}, {}
         self.finalizations, self.owners = {}, {}
+        self.heavy_results = {}
 
     async def eligible(self, trace, *, finalization=None):
         finalization = finalization or self.finalizations.get(trace)
@@ -39,11 +40,18 @@ class Reactions:
             and self.delivery.channels[r["channel_id"]].features().supports_react
         )
 
+    def record_heavy_result(self, trace, status):
+        self.heavy_results[trace] = status
+
+    def forget(self, trace):
+        self.heavy_results.pop(trace, None)
+
     async def request(self, trace, state, *, finalization=None):
+        outcome = self.heavy_results.pop(trace, None) if state in {"done", "failed"} else None
         finalization = finalization or self.finalizations.get(trace)
         if not await self.eligible(trace, finalization=finalization):
             return
-        if state == "done":
+        if state == "done" and outcome is not None and outcome != "ok":
             state = (
                 await finalization.persist(self._outcome, trace)
                 if finalization is not None
@@ -58,18 +66,9 @@ class Reactions:
             finalization.track(self.workers[trace])
 
     def _outcome(self, trace):
-        import json
-
         with self.ledger.transaction():
-            row = self.ledger.db.execute(
-                "SELECT data FROM audit WHERE json_extract(data,'$.trace_id')=? "
-                "AND json_extract(data,'$.kind')='tool.heavy_result' ORDER BY rowid DESC LIMIT 1",
-                (trace,),
-            ).fetchone()
-            if row is not None and json.loads(row[0])["status"] != "ok":
-                self.ledger.audit("task.reaction", trace_id=trace, reaction_outcome="tool_failed")
-                return "failed"
-        return "done"
+            self.ledger.audit("task.reaction", trace_id=trace, reaction_outcome="tool_failed")
+        return "failed"
 
     async def _run(self, trace):
         try:

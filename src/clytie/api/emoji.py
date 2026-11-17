@@ -18,7 +18,9 @@ async def capture(cli, cid, seconds=180, *, clock=None):
         return response
     session = response.json["result"]["session"]
     try:
-        print("请依次添加接单、执行中、完成、失败的四个表情；仅接受 owner。")
+        print(
+            "请在一条没有其他表情的消息上添加。请依次添加接单、执行中、完成、失败的四个表情；仅接受 owner。"
+        )
         while True:
             response = await cli.request("GET", prefix + "status", query={"session": session})
             if not response.json.get("ok"):

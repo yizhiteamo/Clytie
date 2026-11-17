@@ -58,6 +58,7 @@ async def test_heavy_failure_changes_reaction_not_record_or_reply(
         trace = await agent.receive(event(agent))
         await agent.drain()
         assert agent.ledger.get("record", trace)["exec_status"] == "ok"
+        assert trace not in agent.kernel.reactions.heavy_results
         assert channel.reacts[-1].emoji == ("✅" if retry else "❌")
         assert channel.sent[-1].parts[0].text == "fictional final reply"
         assert any(a["kind"] == "tool.heavy_result" for a in agent.ledger.rows("audit"))

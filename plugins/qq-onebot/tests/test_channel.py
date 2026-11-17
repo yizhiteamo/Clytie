@@ -641,3 +641,14 @@ async def test_remove_timeout_still_adds_new_marker(tmp_path):
         assert len([x for x in protocol.actions if x["action"] == "set_msg_emoji_like"]) == 2
     finally:
         await channel.close()
+
+
+@pytest.mark.parametrize("route", ["capture_start", "capture_status", "capture_cancel"])
+async def test_capture_route_without_channel_returns_conflict(route):
+    load_channel()
+    from qq_channel_test.plugin import Plugin
+
+    assert await getattr(Plugin(), route)({}) == {
+        "status": 409,
+        "json": {"code": "channel_unavailable"},
+    }

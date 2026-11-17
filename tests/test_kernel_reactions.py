@@ -204,10 +204,53 @@ async def test_final_reaction_uses_last_heavy_result_only(tmp_path, statuses, ex
         for status in statuses:
             with ledger.transaction():
                 ledger.audit("tool.heavy_result", trace_id=trace, status=status)
+            reactions.record_heavy_result(trace, status)
         await reactions.request(trace, "done")
         await reactions.drain()
         assert channel.calls[-1].emoji == expected
+        assert trace not in reactions.heavy_results
         outcomes = [a for a in ledger.rows("audit") if a.get("reaction_outcome") == "tool_failed"]
         assert bool(outcomes) == (expected == "❌")
+    finally:
+        ledger.close()
+
+
+async def test_plain_task_never_reads_audit(tmp_path):
+    import sqlite3
+
+    ledger, reactions, channel, _, trace = fixture(tmp_path, config={"min_interval_seconds": 0})
+    reads = []
+
+    def authorize(action, table, column, database, source):
+        if action == sqlite3.SQLITE_READ and table == "audit":
+            reads.append(column)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    try:
+        with ledger.transaction():
+            ledger.audit("tool.heavy_result", trace_id=trace, status="error")
+        ledger.db.set_authorizer(authorize)
+        await reactions.request(trace, "done")
+        await reactions.drain()
+        assert channel.calls[-1].emoji == "✅"
+        assert reads == []
+    finally:
+        ledger.db.set_authorizer(None)
+        ledger.close()
+
+
+@pytest.mark.parametrize("state,enabled", [("done", False), ("failed", True)])
+async def test_terminal_reaction_clears_heavy_state(tmp_path, state, enabled):
+    ledger, reactions, _, _, trace = fixture(tmp_path, config={"enabled": enabled})
+    try:
+        reactions.record_heavy_result(trace, "error")
+        reactions.record_heavy_result("other_trace", "ok")
+        await reactions.request(trace, state)
+        await reactions.drain()
+        assert reactions.heavy_results == {"other_trace": "ok"}
+        reactions.forget("other_trace")
+        reactions.forget("other_trace")
+        assert reactions.heavy_results == {}
     finally:
         ledger.close()

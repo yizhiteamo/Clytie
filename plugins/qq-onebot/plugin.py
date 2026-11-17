@@ -24,6 +24,8 @@ class Plugin:
             await self.channel.close()
 
     async def capture_start(self, request):
+        if self.channel is None:
+            return {"status": 409, "json": {"code": "channel_unavailable"}}
         try:
             return {
                 "status": 200,
@@ -33,12 +35,16 @@ class Plugin:
             return {"status": 409, "json": {"code": str(exc)}}
 
     async def capture_status(self, request):
+        if self.channel is None:
+            return {"status": 409, "json": {"code": "channel_unavailable"}}
         value = self.channel.capture.status()
         if request["query"].get("session") != value["session"]:
             return {"status": 409, "json": {"code": "capture_stale"}}
         return {"status": 200, "json": value}
 
     async def capture_cancel(self, request):
+        if self.channel is None:
+            return {"status": 409, "json": {"code": "channel_unavailable"}}
         if request["json"].get("session") != self.channel.capture.session:
             return {"status": 409, "json": {"code": "capture_stale"}}
         return {"status": 200, "json": self.channel.capture.cancel()}
