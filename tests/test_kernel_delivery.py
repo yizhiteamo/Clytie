@@ -34,6 +34,7 @@ async def task_with_intents(kernel, *, split=False, spaced=False):
 
 
 async def settle(kernel):
+    await kernel.clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
 

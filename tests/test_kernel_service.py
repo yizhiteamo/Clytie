@@ -134,11 +134,12 @@ async def test_offline_execution_delivery_summary_and_idempotency(tmp_path):
     await kernel.seal(r["trace_id"], "ok", [reply(r)])
     assert "task.completed" not in [e.name for e in kernel.events]
     await kernel.delivery.deliver(r["trace_id"])
+    await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
     assert kernel.ledger.get("record", r["trace_id"])["delivery_status"] == "sent"
     assert [e.name for e in kernel.events].count("task.completed") == 1
-    assert [i.emoji for i in channel.calls] == ["✅"]
+    assert [i.emoji for i in channel.calls] == ["👌", "✅"]
     assert len(channel.text) == 1
     fields = next(e[2] for e in kernel.log.entries if e[1] == "record.completed")
     assert {
@@ -196,6 +197,7 @@ async def test_three_cancel_target_modes_and_failed_reaction(tmp_path, mode):
     outcome = await kernel.cancel("companion_a", inv.actor, "test_group", **kwargs)
     assert outcome == "cancelled"
     assert (await work).status == "cancelled"
+    await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
     assert channel.calls[-1].emoji == "❌" and channel.text == []
@@ -236,6 +238,7 @@ async def test_deadline_uses_first_tool_and_produces_cancelled_deadline(tmp_path
     result = await work
     assert result.status == "cancelled" and result.error.code == "deadline"
     await kernel.seal(r["trace_id"], "cancelled", error=dict(code="deadline", message=""))
+    await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
     assert any(entry[1] == "task.timeout_capped" for entry in kernel.log.entries)
@@ -259,7 +262,10 @@ async def test_execute_success_delivery_pending_can_be_cancelled(tmp_path):
         == "cancelled"
     )
     assert kernel.ledger.get("record", r["trace_id"])["exec_status"] == "ok"
-    assert kernel.ledger.intents(r["trace_id"])[0]["error"]["code"] == "cancelled_before_send"
+    text_intents = [i for i in kernel.ledger.intents(r["trace_id"]) if i["kind"] == "reply"]
+    assert len(text_intents) == 1
+    assert text_intents[0]["error"]["code"] == "cancelled_before_send"
+    await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
     assert channel.text == []
@@ -307,9 +313,10 @@ async def test_task_cannot_register_undeclared_arbitrary_reaction(tmp_path):
         await kernel.seal(r["trace_id"], "ok", [intent])
     assert not kernel.ledger.get("intent", intent.intent_id)
     await kernel.seal(r["trace_id"], "ok")
+    await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
-    assert [i.emoji for i in channel.calls] == ["✅"]
+    assert [i.emoji for i in channel.calls] == ["👌", "✅"]
     kernel.ledger.close()
 
 

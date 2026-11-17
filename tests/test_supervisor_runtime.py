@@ -300,6 +300,37 @@ async def test_companion_stop_shared_cleanup_and_model_never_called(tmp_path):
     assert not a.kernel.bus.publish(a.cid, "after_shutdown")
 
 
+async def test_companion_stop_flushes_pending_terminal_reaction(tmp_path):
+    from types import SimpleNamespace
+
+    from clytie.supervisor.companion import Companion
+
+    from .test_agent_acceptance import ECHO
+
+    agent, channel, _ = await make_agent(
+        tmp_path,
+        ECHO,
+        {"finish": "stop", "text": "fictional final reply"},
+        changes={"task_reactions": {"min_interval_seconds": 2}},
+    )
+    runtime = Companion(tmp_path, agent.cid, agent.clock, host=agent.host)
+    runtime.agent, runtime.kernel = agent, agent.kernel
+    runtime.runtime = SimpleNamespace(close=agent.ledger.close)
+    trace = await agent.receive(event(agent))
+    await agent.clock.drain(500)
+    try:
+        assert channel.sent and channel.sent[-1].parts[0].text == "fictional final reply"
+        assert [intent.emoji for intent in channel.reacts] == ["👌"]
+        assert agent.kernel.reactions.pending[trace] == "done"
+    finally:
+        result = await runtime.stop()
+    assert result["state"] == "stopped"
+    assert agent.clock.monotonic() == 0
+    assert [intent.emoji for intent in channel.reacts] == ["👌", "✅"]
+    assert not agent.kernel.reactions.workers
+    assert not agent.kernel.reactions.last_sent
+
+
 async def test_health_counts_without_loading_ledger_bodies(tmp_path, monkeypatch):
     from clytie.supervisor.companion import Companion
 
