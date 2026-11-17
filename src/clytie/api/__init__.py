@@ -17,7 +17,7 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
     from clytie.clock import SystemClock
     from clytie.memory.status import notices as memory_notices
 
-    notices = memory_notices(report, clock=SystemClock())
+    notices = [*report.dialogue_notices, *memory_notices(report, clock=SystemClock())]
     for companion in report.companions:
         path = Path(report.home) / "companions" / companion["id"] / "boundary/state.json"
         if path.is_file():

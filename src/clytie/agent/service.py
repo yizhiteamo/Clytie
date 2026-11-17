@@ -99,7 +99,9 @@ class Agent:
         self.kernel, self.host, self.config, self.instance = kernel, host, config, instance
         from clytie.admission import Admission
 
-        self.admission = Admission(config, instance)
+        self.admission = Admission(
+            config, instance, channels=kernel.delivery.channels, clock=kernel.clock
+        )
         kernel.delivery.admission = self.admission
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
@@ -248,7 +250,7 @@ class Agent:
                     result[declaration["name"]] = (pid, declaration)
         return result
 
-    def reason(self, actor, tool):
+    def reason(self, actor, tool, conversation=None):
         item = self.declarations().get(tool)
         if not item:
             return "disabled"
@@ -263,6 +265,8 @@ class Agent:
             and not (actor.role == "owner" and "*" in allowed)
         ):
             return "permission"
+        if conversation is not None and not self.scope_allows(actor, tool, conversation):
+            return "permission"
         reg = next((r for r in self.host.registrations(self.cid, "tool") if r.key == tool), None)
         if reg is None:
             state = self.host.states.get(self.cid, {}).get(pid, {}).get("status", "disabled")
@@ -270,6 +274,17 @@ class Agent:
         if actor.role != "owner" and declaration.get("heavy") and self.protection.active:
             return "protection_mode"
         return None
+
+    def scope_allows(self, actor, tool, conversation):
+        scope = self.config.get("tool_scopes", {}).get(tool)
+        if scope is None:
+            return True
+        if conversation.kind not in {"private", "group"} or actor is None:
+            return False
+        if actor.role != "owner" and actor.actor_id in scope.get("exclude", ()):
+            return False
+        roles = scope.get(conversation.kind)
+        return roles is None or actor.role in roles
 
     async def cancellable(self, conversation, actor=None):
         return [
@@ -291,7 +306,7 @@ class Agent:
             return [], "主动开口时暂不使用能力"
         specs, lines = [], []
         for name, (_, declaration) in self.declarations().items():
-            reason = self.reason(actor, name)
+            reason = self.reason(actor, name, conversation)
             detail = REASONS[reason] if reason else declaration["description"]
             if reason == "protection_mode" and self.protection.snapshot:
                 resets = [
@@ -352,12 +367,19 @@ class Agent:
                     },
                 )
             )
-        return specs, "\n".join(lines)
+        for spec in specs:
+            if not self.scope_allows(actor, spec.name, conversation) and spec.name.startswith(
+                "core_"
+            ):
+                lines.append(f"{spec.name}: permission {REASONS['permission']}")
+        return [s for s in specs if self.scope_allows(actor, s.name, conversation)], "\n".join(
+            lines
+        )
 
     async def receive(self, event):
         if event.companion_id != self.cid:
             raise ValueError("wrong companion")
-        if not self.admission.accept(event):
+        if not await self.admission.accept_checked(event):
             return None
         finalization = OwnedFinalization(self.kernel.delivery)
         state = {"accepted": False, "handed": False}
@@ -968,10 +990,18 @@ class Agent:
         return result
 
     async def _execute_tool(self, trace, conversation, actor, call, specs, token):
+        if not self.scope_allows(actor, call.tool, conversation):
+            return ToolResult(
+                data={},
+                call_id=call.call_id,
+                status="denied",
+                content=REASONS["permission"],
+                error={"code": "permission", "message": ""},
+            )
         spec = next((s for s in specs if s.name == call.tool), None)
         if spec is None:
             reason = (
-                self.reason(actor, call.tool)
+                self.reason(actor, call.tool, conversation)
                 if call.tool in self.declarations()
                 else "unknown_tool"
             )

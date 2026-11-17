@@ -15,19 +15,44 @@ from .test_agent import finish, make_agent
 
 
 class Protocol(FakeWebSocketConnection):
+    membership_available = True
+
     async def send_text(self, text):
         await super().send_text(text)
         call = json.loads(text)
         data = (
             {"user_id": "1000000001"} if call["action"] == "get_login_info" else {"message_id": 2}
         )
+        status = "ok"
+        if call["action"] == "get_group_member_info":
+            data = {"group_id": call["params"]["group_id"], "user_id": call["params"]["user_id"]}
+            status = "ok" if self.membership_available else "failed"
         self.messages.put_nowait(
-            json.dumps({"echo": call["echo"], "status": "ok", "retcode": 0, "data": data})
+            json.dumps(
+                {
+                    "echo": call["echo"],
+                    "status": status,
+                    "retcode": 0 if status == "ok" else 1,
+                    "data": data,
+                }
+            )
         )
 
 
-@pytest.mark.parametrize("test_only", [False, True])
-async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only):
+@pytest.mark.parametrize(
+    "test_only,scope_case,owner_present",
+    [
+        (False, None, False),
+        (True, None, False),
+        (True, "member", False),
+        (True, "excluded", False),
+        (False, "member", False),
+        (True, None, True),
+    ],
+)
+async def test_onebot_model_image_tool_usage_and_credentials(
+    tmp_path, test_only, scope_case, owner_present
+):
     agent, _, _ = await make_agent(tmp_path)
     h = agent.host
     marker = "fictional-b3a-credential"
@@ -68,8 +93,32 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
                 "members_expected": ["owner"],
             }
         agent.config["boundary"] = {"admission": "test_only"}
+    blocked = scope_case == "excluded" or (scope_case == "member" and not test_only)
+    if scope_case:
+        instance["people"][scope_case] = {
+            "role": "member",
+            "accounts": [{"channel": "qq-onebot", "account": "1000000005"}],
+        }
+        agent.config["permissions"]["member"] = ["draw_image", "edit_image"]
+        agent.config["tool_scopes"] = {
+            "draw_image": {
+                "private": ["owner"],
+                "group": ["owner", "peer", "member", "stranger"],
+                "exclude": ["excluded"],
+            }
+        }
+        if test_only:
+            instance["conversations"]["test_group"]["members_expected"].append(scope_case)
+        else:
+            instance["conversations"]["owner_private"]["platform_id"] = "1000000005"
+            instance["conversations"]["owner_private"]["scene"] = "stranger_private"
+    if owner_present:
+        agent.config["boundary"] = {"admission": "owner_present"}
+        del instance["conversations"]["test_group"]
     agent.instance = instance
-    agent.admission = Admission(agent.config, instance)
+    agent.admission = Admission(
+        agent.config, instance, channels=agent.kernel.delivery.channels, clock=agent.clock
+    )
     agent.kernel.delivery.admission = agent.admission
     h.identities[agent.cid, "qq-onebot", "fake"] = IdentityResolver("fake", "qq-onebot", instance)
     protocol = Protocol()
@@ -85,7 +134,10 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
                 assert url == "https://example.invalid/v1/chat/completions"
                 body = json.loads(kwargs["body"])
                 model_requests.append(body)
-                if len(model_requests) == 1:
+                if blocked:
+                    assert "draw_image" not in [t["function"]["name"] for t in body["tools"]]
+                    message, reason = {"content": "fictional unavailable"}, "stop"
+                elif len(model_requests) == 1:
                     tool = next(
                         t["function"]
                         for t in body["tools"]
@@ -167,7 +219,7 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
         agent.kernel.delivery.channels["fake"] = channel
         await channel.connect()
         stream = channel.events()
-        if test_only:
+        if test_only and not owner_present:
             protocol.messages.put_nowait(
                 json.dumps(
                     {
@@ -192,7 +244,7 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
                     "message_type": "group" if test_only else "private",
                     **({"group_id": "1000000003"} if test_only else {}),
                     "self_id": "1000000001",
-                    "user_id": "1000000002",
+                    "user_id": "1000000005" if scope_case else "1000000002",
                     "message_id": 1,
                     "time": 0,
                     "message": [
@@ -206,7 +258,7 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
         trace = await agent.receive(incoming)
         await agent.drain()
         assert agent.ledger.get("record", trace)["exec_status"] == "ok", agent.log.entries
-        assert len(model_requests) == 2
+        assert len(model_requests) == (1 if blocked else 2)
         sent = [json.loads(s) for s in protocol.sent]
         images = [
             p
@@ -215,9 +267,11 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
             for p in s["params"]["message"]
             if p["type"] == "image"
         ]
-        assert images == [
-            {"type": "image", "data": {"file": "base64://" + base64.b64encode(png).decode()}}
-        ]
+        assert images == (
+            []
+            if blocked
+            else [{"type": "image", "data": {"file": "base64://" + base64.b64encode(png).decode()}}]
+        )
         if test_only:
             assert all(
                 s["params"]["group_id"] == "1000000003"
@@ -225,13 +279,50 @@ async def test_onebot_model_image_tool_usage_and_credentials(tmp_path, test_only
                 if s["action"] == "send_group_msg"
             )
         usage = [r for r in agent.ledger.rows("audit") if r["kind"] == "model.usage"]
-        assert len(usage) == 2 and all(
+        assert len(usage) == (1 if blocked else 2) and all(
             r["plugin"] == "openai-api" and r["input_tokens"] == 17 and r["output_tokens"] == 4
             for r in usage
         )
         assert marker not in "\n".join(agent.ledger.db.iterdump()) + repr(h.log.entries) + repr(
             agent.log.entries
         )
+        if owner_present:
+            queries = [call for call in sent if call["action"] == "get_group_member_info"]
+            assert len(queries) == 1
+            protocol.membership_available = False
+            protocol.messages.put_nowait(
+                json.dumps(
+                    {
+                        "post_type": "notice",
+                        "notice_type": "group_decrease",
+                        "self_id": "1000000001",
+                        "group_id": "1000000003",
+                        "user_id": "1000000002",
+                    }
+                )
+            )
+            assert await agent.receive(await anext(stream)) is None
+            assert not agent.admission.membership
+            before = len(agent.ledger.rows("inbound"))
+            assert (
+                await agent.receive(
+                    incoming.model_copy(
+                        update={
+                            "event_id": "fake:another",
+                            "message": incoming.message.model_copy(
+                                update={
+                                    "ref": incoming.message.ref.model_copy(
+                                        update={"platform_message_id": "another"}
+                                    )
+                                }
+                            ),
+                        }
+                    )
+                )
+                is None
+            )
+            assert len(agent.ledger.rows("inbound")) == before
+            assert agent.admission.counts["membership_unknown"] == 1
         await stream.aclose()
     finally:
         await finish(agent)

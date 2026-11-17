@@ -173,8 +173,10 @@ class Delivery:
 
     async def _call(self, intent, channel, token, cutoff, n, finalization, receipt_recorded):
         function = channel.react if intent.kind == "react" else channel.send
+        admission_pending = self.admission is not None
 
         async def invoke():
+            nonlocal admission_pending
             blocked = self._blocked(intent.channel_id)
             if blocked:
                 return self._receipt(intent, "failed", blocked)
@@ -187,8 +189,12 @@ class Delivery:
                     if record.get("source_event_id")
                     else None
                 )
-                if not self.admission.allows_delivery(intent, inbound):
+                if (
+                    not await self.admission.allows_delivery_checked(intent, inbound)
+                    or token.cancelled
+                ):
                     return self._receipt(intent, "failed", "not_admitted")
+            admission_pending = False
             return await function(intent, token)
 
         task = asyncio.create_task(invoke())
@@ -218,10 +224,14 @@ class Delivery:
                         )
 
                     finalization.track(background(collect_late()))
+                    if admission_pending:
+                        return self._receipt(intent, "failed", "not_admitted")
                     return self._receipt(intent, "unknown", "receipt_timeout")
             try:
                 return task.result()
             except (Exception, asyncio.CancelledError):
+                if admission_pending:
+                    return self._receipt(intent, "failed", "not_admitted")
                 return self._receipt(intent, "unknown", "channel_exception")
         finally:
             self.active_tokens.pop(intent.intent_id, None)

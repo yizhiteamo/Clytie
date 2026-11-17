@@ -805,6 +805,44 @@
         "^x-": {}
       },
       "additionalProperties": false
+    },
+    "tool_scopes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "private": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "owner",
+                "peer",
+                "member",
+                "stranger"
+              ]
+            }
+          },
+          "group": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "owner",
+                "peer",
+                "member",
+                "stranger"
+              ]
+            }
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "patternProperties": {
