@@ -31,6 +31,10 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 - 协议端对别人加的表情回应会推送 `notice` 事件，`notice_type` 为 `group_msg_emoji_like`，其中 `likes` 是 `[{emoji_id, count}]`。2026-11-17 实测：在 QQ 中依次添加四个表情，收到的 `emoji_id` 与 QQ 机器人官方表情列表中能查到的编号一致。
 - 这个通知**只用于表情编号采集**（roadmap B2b），不转换成交给本体的事件，不进入账本和记忆。
 - 采集时只读取 `likes[].emoji_id`，只接受 owner 账号加的回应；不读取消息内容，不记录群号和账号。
+- 加表情的人：通知顶层的 `user_id`。依据：2026-11-17 实测（用户当次同意），owner 给伴侣发的消息加表情，`user_id` 是整数，等于 owner 账号，不等于 `self_id`；通知里没有 `operator_id`。所以 `user_id` 是加表情的人，不是消息作者。
+- 判定：`user_id` 必须是整数或纯数字字符串，只在内存中使用，交给宿主的身份映射（`identity.resolve_actor`）；映射结果是 owner 才采集。不能用消息作者或 `self_id` 代替。
+- 通知里有 `is_add` 字段。只有 `is_add` 为 `true` 时采集；为 `false`（撤销）或缺失时不采集。
+- 以下情况拒绝这条通知，只累加一个拒绝计数，不记录账号、群号和内容：`user_id` 缺失或格式不对，映射不到 owner，`is_add` 不是 `true`，`likes` 不是列表，或其中没有可用的 `emoji_id`。
 - 协议端不推送这类通知时，采集如实报告"不支持"，部署只能手动填写编号。
 
 ## 3. 标准之外的入站消息段
@@ -66,6 +70,7 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 ## 6. 测试
 
 - 表情回应：成功；1404 降级且本连接内不再发送；其他失败只记日志；配置缺编号时不发送。
+- 表情采集：owner 的通知被采集；非 owner、`user_id` 缺失、`user_id` 格式不对、`is_add` 为 `false` 或缺失时都被拒绝，只累加计数。
 - 撤掉表情：`react_remove` 关闭时 `supports_react_remove = false`；打开时撤销请求带 `set: false`；撤销 1404 降级为只添加；撤销失败仍发送新表情。
 - `file`、`mface`：有数据、没有数据、`data` 不是对象、超过 4 KB；同一份 `mface` 数据得到相同的 `sticker_id`；`summary` 截断。
 - `face`：正常编号、缺失编号。
