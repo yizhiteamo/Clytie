@@ -6,18 +6,42 @@
   "category": "channel",
   "version": "0.1.0",
   "requires": {
-    "sdk": ">=0.12,<0.13"
+    "sdk": ">=0.13,<0.14"
   },
   "dependencies": {},
   "conflicts": [],
   "entry": "plugin:Plugin",
   "priority": 100,
+  "config_writable": ["emoji_ids"],
   "contributes": {
+    "smoke_driver": {"factory": "create_smoke_driver"},
+    "cli_commands": [
+      {
+        "name": "emoji-capture",
+        "help": "采集任务表情编号",
+        "args": {
+          "type": "object",
+          "properties": {
+            "companion": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+(?![\\s\\S])"},
+            "seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 180}
+          },
+          "required": ["companion"],
+          "additionalProperties": false
+        },
+        "handler": "capture_cli"
+      }
+    ],
     "channel": {
       "factory": "create_channel",
       "platform": "qq"
     },
     "api_routes": [
+      {
+        "method": "GET",
+        "path": "/plugins/qq-onebot/config/proposal",
+        "handler": "config_proposal",
+        "audit": false
+      },
       {
         "method": "POST",
         "path": "/plugins/qq-onebot/emoji/start",

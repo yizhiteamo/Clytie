@@ -43,6 +43,11 @@
         "sdk"
       ]
     },
+    "config_writable": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
     "dependencies": {
       "type": "object",
       "patternProperties": {
@@ -662,6 +667,14 @@
           "patternProperties": {
             "^x-": {}
           },
+          "additionalProperties": false
+        },
+        "smoke_driver": {
+          "type": "object",
+          "properties": {
+            "factory": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"}
+          },
+          "required": ["factory"],
           "additionalProperties": false
         },
         "cli_commands": {

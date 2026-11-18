@@ -9,6 +9,7 @@ import re
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path, PureWindowsPath
 from string import Formatter
@@ -177,6 +178,15 @@ def repository_root() -> Path | None:
         ):
             return candidate
     return None
+
+
+@lru_cache(maxsize=1)
+def default_consolidator() -> str:
+    schema = files("clytie").joinpath("schemas", "companion.schema.json")
+    if not schema.is_file():
+        schema = repository_root() / "schemas" / "companion.schema.json"
+    properties = json.loads(schema.read_text(encoding="utf-8"))["properties"]
+    return properties["memory"]["properties"]["recollect"]["properties"]["consolidator"]["default"]
 
 
 def resolve_home(home: str | Path | None = None, *, repo_root: Path | None = None) -> Path:
@@ -483,6 +493,7 @@ def load_home(
     *,
     repo_root: Path | None = None,
     _instance_source: bytes | None = None,
+    _companion_source: tuple[str, bytes] | None = None,
 ) -> HomeReport:
     """Inspect files without importing plugins, opening databases or using the network."""
     root = repo_root.resolve() if repo_root is not None else repository_root()
@@ -727,6 +738,8 @@ def load_home(
             )
             continue
         file = companion_dir / "companion.yaml"
+        if _companion_source is not None and _companion_source[0] == companion_id:
+            reader.source_overrides[file] = _companion_source[1]
         data = reader.document(file, "companion")
         status: dict[str, Any] = {
             "id": companion_id,
@@ -974,7 +987,7 @@ def load_home(
                 if isinstance(memory, dict)
                 else None
             )
-            if key == "consolidator" and memory_plugin == "default-consolidator":
+            if key == "consolidator" and memory_plugin == default_consolidator():
                 continue
             if memory_plugin is None:
                 continue

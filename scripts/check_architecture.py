@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,11 +24,18 @@ FORBIDDEN = {
 
 
 def inspect_source(
-    source: str, *, plugin: bool = False, relative_path: str = ""
+    source: str, *, plugin: bool = False, relative_path: str = "", plugin_ids: tuple[str, ...] = ()
 ) -> list[tuple[int, str]]:
     tree = ast.parse(source)
     aliases: dict[str, str] = {}
     errors: list[tuple[int, str]] = []
+    if relative_path.startswith("src/clytie/") and not relative_path.startswith(
+        "src/clytie/sdk/testing/"
+    ):
+        for lineno, line in enumerate(source.splitlines(), 1):
+            for pid in plugin_ids:
+                if pid in line:
+                    errors.append((lineno, f"core-references-plugin-id: {pid}"))
     for node in ast.walk(tree):
         modules: list[str] = []
         if isinstance(node, ast.Import):
@@ -76,6 +84,10 @@ def inspect_source(
 
 
 def main() -> int:
+    plugin_ids = tuple(
+        json.loads(path.read_text(encoding="utf-8"))["id"]
+        for path in sorted((ROOT / "plugins").glob("*/plugin.json"))
+    )
     failures = 0
     count = 0
     for folder in (ROOT / "src", ROOT / "plugins"):
@@ -86,6 +98,7 @@ def main() -> int:
                 path.read_text(encoding="utf-8"),
                 plugin=relative.parts[0] == "plugins",
                 relative_path=relative.as_posix(),
+                plugin_ids=plugin_ids,
             ):
                 print(f"{relative.as_posix()}:{line}: {message}")
                 failures += 1

@@ -2,16 +2,19 @@
 
 import asyncio
 import json
+import math
 from contextlib import suppress
 from datetime import datetime
 
 from clytie.api.client import Client
 from clytie.clock import SystemClock
+from clytie.config import repository_root
+from clytie.plugin_host import PluginHost
 from clytie.plugin_host.support import timed
-from clytie.sdk.immutable import thaw
+from clytie.sdk.immutable import freeze, thaw
+from clytie.sdk.smoke import SmokeDriverError, SmokeReaction, SmokeReply
 
-from .config import SmokeError, prepare, require, target_config
-from .driver import Driver
+from .config import ConfiguredSecrets, SmokeError, prepare, require, target_config
 from .judge import verdict
 
 
@@ -21,15 +24,48 @@ async def get(client, path, query=None):
     return thaw(response.json["result"])
 
 
-async def exercise(case, driver, client, cid, tester, clock, timeout_result):
+def load_driver(home, plugin, clock):
+    host = PluginHost(repository_root(), home, clock=clock)
+    manifest = host.manifests.get(plugin)
+    require(manifest is not None, "driver_unavailable")
+    declaration = manifest.data["contributes"].get("smoke_driver")
+    require(declaration, "driver_unavailable")
+    cls, _ = host._load_class(manifest)
+    return getattr(cls(), declaration["factory"])(clock)
+
+
+async def exercise(case, driver, client, cid, tester, clock, interval, timeout_result):
     since = clock.now()
     start = clock.monotonic()
     mid = await driver.send(case)
+    require(isinstance(mid, str) and mid, "send_unknown")
     timeout_result["failure"] = "timeout_record"
 
+    replies, reactions = [], []
+
     async def listen():
-        while True:
-            await driver.read()
+        async for event in driver.events():
+            require(
+                isinstance(event, (SmokeReply, SmokeReaction))
+                and type(event.at) in {int, float}
+                and math.isfinite(event.at),
+                "invalid_observation",
+            )
+            if isinstance(event, SmokeReply):
+                require(
+                    type(event.chars) is int and event.chars >= 0 and type(event.image) is bool,
+                    "invalid_observation",
+                )
+                replies.append(dict(chars=event.chars, image=event.image, at=event.at))
+            elif event.message_id == mid:
+                require(
+                    event.state in {"accepted", "running", "done", "failed"}
+                    and type(event.added) is bool,
+                    "invalid_observation",
+                )
+                reactions.append((event.state, event.added, event.at))
+            require(len(replies) + len(reactions) <= 2048, "event_overflow")
+        raise SmokeError("driver_closed")
 
     reader = asyncio.create_task(listen())
     ledger_terminal_at = None
@@ -55,8 +91,6 @@ async def exercise(case, driver, client, cid, tester, clock, timeout_result):
                 ),
                 "interference",
             )
-            replies = [v for kind, _, v in driver.events if kind == "reply"]
-            reactions = [v for kind, n, v in driver.events if kind == "reaction" and n == mid]
             expected = case["expect"]["reactions"]
             if matches and expected != "none" and ledger_terminal_at is None:
                 if any(
@@ -70,7 +104,7 @@ async def exercise(case, driver, client, cid, tester, clock, timeout_result):
                 replies,
                 reactions,
                 clock.monotonic(),
-                driver.target["interval"],
+                interval,
                 start,
                 ledger_terminal_at,
             )
@@ -84,7 +118,9 @@ async def exercise(case, driver, client, cid, tester, clock, timeout_result):
             await reader
 
 
-async def run(home, *, ask=input, emit=print, driver_type=Driver, client_type=Client, clock=None):
+async def run(
+    home, *, ask=input, emit=print, driver_loader=load_driver, client_type=Client, clock=None
+):
     clock = clock or SystemClock()
     started = clock.now()
     report = {"started_at": started.isoformat(), "result": "stopped", "cases": []}
@@ -102,31 +138,46 @@ async def run(home, *, ask=input, emit=print, driver_type=Driver, client_type=Cl
         row = (await get(client, "status"))["companions"].get(cid, {})
         require(
             row.get("state") == "running"
-            and row.get("channels", {}).get("qq-onebot") == "online"
+            and row.get("channels", {}).get(target.channel) == "online"
             and row.get("admission", {}).get("mode")
             in {"registered", "test_only", "owner_present"},
             "companion_unavailable",
         )
-        driver = driver_type(target, clock)
-        token = (home / cfg["token_file"]).read_text(encoding="utf-8").strip()
-        require(token, "missing_ws_token")
-        await driver.connect(cfg["ws_url"], token)
+        driver = driver_loader(home, target.channel, clock)
+        config = freeze(cfg["driver"]["config"])
+        await driver.connect(config, ConfiguredSecrets(home, config))
         visual = []
         for case in cases:
             require(target_config(home, cid, cfg["tester"]) == target, "target_changed")
-            count, account = await driver.authorize()
+            count, account = await driver.authorize(target)
+            require(
+                type(count) is int
+                and 0 < count <= len(target.allowed_accounts)
+                and type(account) is int
+                and 1 <= account <= len(target.tester_accounts),
+                "invalid_authorization",
+            )
             report.update(member_count=count, tester_account_index=account)
             require(target_config(home, cid, cfg["tester"]) == target, "target_changed")
             timeout_result = {"result": "failed", "failure": "timeout_send"}
             try:
                 item = await timed(
-                    exercise(case, driver, client, cid, cfg["tester"], clock, timeout_result),
+                    exercise(
+                        case,
+                        driver,
+                        client,
+                        cid,
+                        cfg["tester"],
+                        clock,
+                        target.min_interval_seconds,
+                        timeout_result,
+                    ),
                     clock,
                     case["timeout_s"],
                 )
             except (asyncio.TimeoutError, TimeoutError):
                 item = timeout_result
-            except SmokeError as error:
+            except (SmokeError, SmokeDriverError) as error:
                 item = {"result": "failed", "failure": str(error)}
             except Exception:
                 item = {"result": "failed", "failure": "observation_failed"}
@@ -154,13 +205,17 @@ async def run(home, *, ask=input, emit=print, driver_type=Driver, client_type=Cl
             for item in visual:
                 item["visual_confirmed"] = confirmed
             report["result"] = "passed" if confirmed else "failed"
-    except SmokeError as error:
+    except (SmokeError, SmokeDriverError) as error:
         report["failure"] = str(error)
     except Exception:
         report["failure"] = "smoke_unavailable"
     finally:
         if driver:
-            await driver.close()
+            try:
+                await driver.close()
+            except Exception:
+                report["result"] = "failed"
+                report.setdefault("failure", "driver_close_failed")
     directory = home / "smoke/reports"
     require(directory.resolve() == home.resolve() / "smoke/reports", "invalid_report_path")
     directory.mkdir(parents=True, exist_ok=True)

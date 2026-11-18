@@ -154,44 +154,105 @@ async def companion_operation(runtime, op, args):
             raise APIError("plan_stale", 409) from None
     if op == "panels":
         return [dict(r.declaration) for r in host.registrations(cid, "webui_panel")]
-    if op == "plugin_route":
+    if op == "config_proposal":
         pid = args["pid"]
-        key = "/plugins/" + pid + "/" + args["subpath"]
-        reg = next(
-            (
-                r
+        if pid is None:
+            legacy = {
+                r.plugin_id
                 for r in host.registrations(cid, "api_route")
-                if r.plugin_id == pid
-                and r.declaration["path"] == key
-                and r.declaration["method"] == args["method"]
-            ),
-            None,
-        )
-        if reg is None or (args["method"] != "GET" and not reg.declaration.get("audit")):
+                if r.declaration["method"] == "GET"
+                and r.declaration["path"] == f"/plugins/{r.plugin_id}/emoji/status"
+            }
+            if len(legacy) != 1:
+                raise APIError("plugin_unavailable", 409)
+            pid = legacy.pop()
+        if not host.is_active(cid, pid):
             raise APIError("plugin_unavailable", 404)
-        try:
-            value = await timed(
-                reg.implementation({k: args[k] for k in ("method", "subpath", "query", "json")}),
-                clock,
-                10,
+        layouts = host.unit_configs.get((cid, pid), [])
+        account = None
+        if any(unit["role"] == "channel" for unit in layouts):
+            if (
+                len(layouts) != 1
+                or layouts[0]["role"] != "channel"
+                or not layouts[0].get("account")
+            ):
+                raise APIError("config_binding_mismatch", 409)
+            account = layouts[0]["account"]
+        elif pid not in host.settings.get(cid, {}).get("plugins", {}):
+            raise APIError("config_binding_mismatch", 409)
+        manifest = host.runtimes[cid, pid].manifest
+        writable = set(manifest.data.get("config_writable", ()))
+        if not writable:
+            raise APIError("config_not_writable")
+        response = await plugin_route(
+            host,
+            cid,
+            clock,
+            {
+                "pid": pid,
+                "subpath": "config/proposal",
+                "method": "GET",
+                "query": {"session": args["session"]},
+                "json": {},
+            },
+        )
+        body = response["json"]
+        if response["status"] != 200:
+            raise APIError(
+                "capture_incomplete" if args["pid"] is None else "proposal_unavailable", 409
             )
-        except TimeoutError:
-            raise APIError("plugin_timeout", 504) from None
         if (
-            not isinstance(value, dict)
-            or set(value) != {"status", "json"}
-            or type(value["status"]) is not int
-            or not (
-                value["status"] in {200, 201, 202}
-                or (400 <= value["status"] < 500 and value["status"] not in {401, 403, 407, 428})
-            )
+            not isinstance(body, dict)
+            or set(body) != {"changes"}
+            or not isinstance(body["changes"], dict)
         ):
             raise APIError("plugin_invalid_response", 502)
-        try:
-            size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
-        except (TypeError, ValueError):
-            raise APIError("plugin_invalid_response", 502) from None
-        if size > 1024 * 1024:
-            raise APIError("plugin_response_too_large", 502)
-        return value
+        changes = body["changes"]
+        if not changes or changes.keys() - writable:
+            raise APIError("config_not_writable")
+        return {"pid": pid, "account": account, "changes": changes}
+    if op == "plugin_route":
+        return await plugin_route(host, cid, clock, args)
     raise APIError("not_found", 404)
+
+
+async def plugin_route(host, cid, clock, args):
+    pid = args["pid"]
+    key = "/plugins/" + pid + "/" + args["subpath"]
+    reg = next(
+        (
+            r
+            for r in host.registrations(cid, "api_route")
+            if r.plugin_id == pid
+            and r.declaration["path"] == key
+            and r.declaration["method"] == args["method"]
+        ),
+        None,
+    )
+    if reg is None or (args["method"] != "GET" and not reg.declaration.get("audit")):
+        raise APIError("plugin_unavailable", 404)
+    try:
+        value = await timed(
+            reg.implementation({k: args[k] for k in ("method", "subpath", "query", "json")}),
+            clock,
+            10,
+        )
+    except TimeoutError:
+        raise APIError("plugin_timeout", 504) from None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"status", "json"}
+        or type(value["status"]) is not int
+        or not (
+            value["status"] in {200, 201, 202}
+            or (400 <= value["status"] < 500 and value["status"] not in {401, 403, 407, 428})
+        )
+    ):
+        raise APIError("plugin_invalid_response", 502)
+    try:
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
+    except (TypeError, ValueError):
+        raise APIError("plugin_invalid_response", 502) from None
+    if size > 1024 * 1024:
+        raise APIError("plugin_response_too_large", 502)
+    return value

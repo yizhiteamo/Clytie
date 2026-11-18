@@ -643,7 +643,9 @@ async def test_remove_timeout_still_adds_new_marker(tmp_path):
         await channel.close()
 
 
-@pytest.mark.parametrize("route", ["capture_start", "capture_status", "capture_cancel"])
+@pytest.mark.parametrize(
+    "route", ["capture_start", "capture_status", "capture_cancel", "config_proposal"]
+)
 async def test_capture_route_without_channel_returns_conflict(route):
     load_channel()
     from qq_channel_test.plugin import Plugin
@@ -652,6 +654,45 @@ async def test_capture_route_without_channel_returns_conflict(route):
         "status": 409,
         "json": {"code": "channel_unavailable"},
     }
+
+
+async def test_config_proposal_requires_current_complete_capture(tmp_path):
+    ctx, channel, _ = make(tmp_path)
+    from qq_channel_test.plugin import Plugin
+
+    plugin = Plugin()
+    plugin.channel = channel
+    session = channel.capture.start()["session"]
+    request = {"query": {"session": session}}
+    assert (await plugin.config_proposal(request))["json"] == {"code": "capture_incomplete"}
+    waiting = asyncio.create_task(
+        plugin.capture_status({"query": {"session": session, "wait": "1"}})
+    )
+    await ctx.clock.drain()
+    await plugin.capture_cancel({"json": {"session": session}})
+    session = channel.capture.start()["session"]
+    ctx.clock.advance(0.25)
+    assert (await waiting)["json"] == {"code": "capture_stale"}
+    assert (await plugin.config_proposal(request))["json"] == {"code": "capture_stale"}
+    request["query"]["session"] = session
+    ctx.identity.actors["1000000002"] = ctx.identity.resolve_actor("1000000002").model_copy(
+        update={"role": "owner"}
+    )
+    channel.capture.feed(
+        {
+            "post_type": "notice",
+            "notice_type": "group_msg_emoji_like",
+            "user_id": "1000000002",
+            "is_add": True,
+            "likes": [{"emoji_id": n} for n in range(1, 5)],
+        }
+    )
+    assert await plugin.config_proposal(request) == {
+        "status": 200,
+        "json": {"changes": {"emoji_ids": {"👌": "1", "⏳": "2", "✅": "3", "❌": "4"}}},
+    }
+    await plugin.capture_cancel({"json": {"session": session}})
+    assert (await plugin.config_proposal(request))["json"] == {"code": "capture_incomplete"}
 
 
 @pytest.mark.parametrize(

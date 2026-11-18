@@ -1,15 +1,18 @@
 """Offline B5: synthetic OneBot frames, local API responses and an injected clock."""
 
 import asyncio
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 import yaml
 
+from clytie.sdk.smoke import SmokeDriverError, SmokeReply
 from clytie.sdk.testing import MockClock
 from clytie.sdk.types import ApiResponse
-from clytie.smoke.driver import Driver
-from clytie.smoke.runner import run
+from clytie.smoke.config import ConfiguredSecrets, SmokeError
+from clytie.smoke.runner import load_driver, run
 
 
 def save(path, data):
@@ -18,11 +21,12 @@ def save(path, data):
 
 
 class Scenario:
-    def __init__(self, home, scenario):
+    def __init__(self, home, scenario, *, channel="qq-onebot"):
         self.home, self.scenario = home, scenario
         self.clock = MockClock()
         self.sent, self.rows, self.prompts, self.output = [], [], [], []
         self.closed = False
+        self.channel = channel
         self.login = "fictional-secondary"
         self.group = "fictional-target"
         self.bot = "fictional-companion-account"
@@ -33,8 +37,10 @@ class Scenario:
             dict(
                 tester="tester",
                 companion="companion_a",
-                ws_url="ws://localhost",
-                token_file="secrets/smoke.key",
+                driver={
+                    "plugin": channel,
+                    "config": {"ws_url": "ws://localhost", "token_file": "secrets/smoke.key"},
+                },
                 limits={
                     "max_cases": 1 if scenario == "case_limit" else 2,
                     "max_images": 0 if scenario == "image_limit" else 2,
@@ -56,12 +62,12 @@ class Scenario:
             dict(
                 companions=["companion_a"],
                 test_conversation="test_group",
-                accounts={"binding": {"channel": "qq-onebot", "account": self.bot}},
+                accounts={"binding": {"channel": channel, "account": self.bot}},
                 people={
                     "tester": {
                         "role": "member",
                         "accounts": [
-                            {"channel": "qq-onebot", "account": a}
+                            {"channel": channel, "account": a}
                             for a in ("fictional-primary", self.login)
                         ],
                     }
@@ -69,7 +75,7 @@ class Scenario:
                 conversations={
                     "test_group": dict(
                         kind="group",
-                        channel="qq-onebot",
+                        channel=channel,
                         platform_id=self.group,
                         members_expected=["binding", "tester"],
                     )
@@ -81,7 +87,7 @@ class Scenario:
             dict(
                 channels=[
                     dict(
-                        plugin="qq-onebot",
+                        plugin=channel,
                         account="binding",
                         config={"emoji_ids": {"👌": "a", "⏳": "b", "✅": "c"}},
                     )
@@ -92,12 +98,17 @@ class Scenario:
         token_path.parent.mkdir()
         token_path.write_text("synthetic-marker", encoding="utf-8")
 
-    def driver(self, target, clock):
+    def driver(self, home, plugin, clock):
+        assert home == self.home and plugin == "qq-onebot"
+        path = Path(__file__).resolve().parents[1] / "plugins" / plugin / "smoke_driver.py"
+        spec = importlib.util.spec_from_file_location("test_smoke_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
         scenario = self
 
-        class FakeDriver(Driver):
-            async def connect(self, url, token):
-                assert token == "synthetic-marker"
+        class FakeDriver(module.Driver):
+            async def connect(self, config, secrets):
+                assert secrets.read(config["token_file"]) == "synthetic-marker"
 
             async def close(self):
                 scenario.closed = True
@@ -221,7 +232,7 @@ class Scenario:
                     )
                 return {"message_id": mid}
 
-        return FakeDriver(target, clock)
+        return FakeDriver(clock)
 
     async def request(self, method, path, query):
         assert method == "GET"
@@ -230,7 +241,7 @@ class Scenario:
                 "companions": {
                     "companion_a": {
                         "state": "stopped" if self.scenario == "offline" else "running",
-                        "channels": {"qq-onebot": "online"},
+                        "channels": {self.channel: "online"},
                         "admission": {"mode": "test_only"},
                     }
                 }
@@ -254,7 +265,7 @@ class Scenario:
             run(
                 self.home,
                 clock=self.clock,
-                driver_type=self.driver,
+                driver_loader=self.driver,
                 client_type=lambda home: self,
                 ask=ask,
                 emit=self.output.append,
@@ -339,3 +350,116 @@ async def test_any_registered_tester_account(tmp_path, primary):
     report = await scenario.execute()
     assert report["tester_account_index"] == (1 if primary else 2)
     assert report["result"] == "passed"
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+async def test_core_runs_with_only_an_injected_generic_driver(tmp_path, close_fails):
+    scenario = Scenario(tmp_path, "passed", channel="synthetic-platform")
+    save(
+        tmp_path / "smoke/cases.yaml",
+        {
+            "cases": [
+                dict(
+                    id="plain",
+                    text="hello",
+                    timeout_s=10,
+                    expect=dict(reply=True, image=False, reactions="none"),
+                ),
+            ]
+        },
+    )
+
+    class GenericDriver:
+        async def connect(self, config, secrets):
+            pass
+
+        async def authorize(self, target):
+            assert target.channel == scenario.channel and scenario.login in target.tester_accounts
+            return len(target.allowed_accounts), 2
+
+        async def send(self, case):
+            scenario.rows.append(
+                dict(
+                    created_at=scenario.clock.now().isoformat(),
+                    sender_id="tester",
+                    exec_status="ok",
+                    delivery_status="sent",
+                    reaction_outcome=None,
+                    tokens={},
+                    deliveries=[dict(state=None, status="sent", status_reaction=False)],
+                )
+            )
+            return "local-id"
+
+        async def events(self):
+            yield SmokeReply(chars=3, image=False, at=scenario.clock.monotonic())
+            await asyncio.Future()
+
+        async def close(self):
+            scenario.closed = True
+            if close_fails:
+                raise RuntimeError("synthetic-marker")
+
+    scenario.driver = lambda home, plugin, clock: GenericDriver()
+    report = await scenario.execute()
+    assert scenario.closed
+    if close_fails:
+        assert report["result"] == "failed" and report["failure"] == "driver_close_failed"
+    else:
+        assert report["result"] == "passed"
+
+
+def test_driver_secrets_reject_other_credentials_and_traversal(tmp_path):
+    secrets = ConfiguredSecrets(
+        tmp_path, {"token_file": "secrets/test.key", "other": "secrets/api.key"}
+    )
+    with pytest.raises(SmokeError, match="invalid_token_file"):
+        secrets.read("secrets/api.key")
+    for path in ("../outside", "secrets/../outside", str(tmp_path / "key")):
+        with pytest.raises(SmokeError, match="invalid_token_file"):
+            ConfiguredSecrets(tmp_path, {"token_file": path}).read(path)
+
+
+async def test_driver_for_different_channel_is_refused_before_confirmation(tmp_path):
+    scenario = Scenario(tmp_path, "passed")
+    path = tmp_path / "smoke/smoke.yaml"
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    config["driver"]["plugin"] = "different-platform"
+    save(path, config)
+    result = await scenario.execute()
+    assert result["failure"] == "driver_channel_mismatch"
+    assert scenario.prompts == scenario.sent == []
+
+
+def test_driver_secrets_reject_link_to_other_credential(tmp_path):
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    other = directory / "other.key"
+    other.write_text("synthetic credential", encoding="utf-8")
+    try:
+        (directory / "test.key").symlink_to(other)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(SmokeError, match="invalid_token_file"):
+        ConfiguredSecrets(tmp_path, {"token_file": "secrets/test.key"}).read("secrets/test.key")
+
+
+def test_secret_reference_is_fixed_even_if_driver_changes_config(tmp_path):
+    config = {"token_file": "secrets/test.key"}
+    secrets = ConfiguredSecrets(tmp_path, config)
+    config["token_file"] = "secrets/other.key"
+    with pytest.raises(SmokeError, match="invalid_token_file"):
+        secrets.read(config["token_file"])
+
+
+def test_driver_diagnostics_reject_unrecognized_private_strings():
+    with pytest.raises(ValueError, match="^invalid smoke driver error code$"):
+        raise SmokeDriverError("synthetic private detail")
+
+
+def test_uninstalled_driver_is_never_loaded(tmp_path):
+    state = tmp_path / "plugins/.host/uninstalled.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps(["qq-onebot"]), encoding="utf-8")
+    with pytest.raises(SmokeError, match="driver_unavailable"):
+        load_driver(tmp_path, "qq-onebot", MockClock())

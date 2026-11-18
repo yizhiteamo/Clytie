@@ -7,6 +7,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from clytie.backup.coordination import run_sync
+from clytie.config import default_consolidator
 from clytie.kernel.delivery import OwnedFinalization
 from clytie.sdk import Cancelled, CancelToken
 from clytie.sdk.types import ChatMessage, Conversation, TextPart
@@ -100,7 +101,7 @@ class Recollector:
         self.current = {}
         self.model = RecollectionModel(agent)
         self.conversations = {}
-        self.pid = self.config.get("consolidator", "default-consolidator")
+        self.pid = self.config.get("consolidator", default_consolidator())
         self._initialized = False
         self.delivery = getattr(getattr(agent, "kernel", None), "delivery", None)
         if self.delivery is None:
@@ -221,15 +222,9 @@ class Recollector:
             plan = self.agent.host.plan_enable(self.agent.cid, selected["plugin"])
             if plan.ok:
                 await self.agent.host.apply(plan.plan_id)
+        settings = self.agent.config.get("plugins", {}).get(self.pid, {})
         if (
-            (
-                (
-                    self.pid == "default-consolidator"
-                    and self.agent.config.get("plugins", {}).get(self.pid, {}).get("enabled")
-                    is not False
-                )
-                or self.agent.config.get("plugins", {}).get(self.pid, {}).get("enabled", False)
-            )
+            settings.get("enabled", self.pid == default_consolidator())
             and self.pid in self.agent.host.manifests
             and not self.agent.host.is_active(self.agent.cid, self.pid)
         ):
