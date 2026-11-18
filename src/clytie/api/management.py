@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from clytie.backup.io_budget import IoBudgetError
 from clytie.config import load_home, thaw
@@ -693,6 +693,24 @@ class Management:
                     self.unsaved.pop(cid, None)
                     result = {"accepted": True}
                 return result
+        if route == "/companions/<cid>/smoke/records":
+            conversation = self.report.instance.get("test_conversation")
+            if not conversation:
+                raise APIError("no_test_conversation", 409)
+            try:
+                raw = query["since"]
+                since = datetime.fromisoformat(
+                    raw.removesuffix("Z") + "+00:00" if raw.endswith("Z") else raw
+                )
+                if since.utcoffset() is None:
+                    raise ValueError
+            except (KeyError, ValueError, TypeError):
+                raise APIError("invalid_request") from None
+            return await self.transfer(
+                cid,
+                "smoke/records",
+                {"conversation": conversation, "since": since.astimezone(timezone.utc).isoformat()},
+            )
         if route == "/companions/<cid>/tasks/<task_id>":
             if self.running(cid):
                 return await self.transfer(

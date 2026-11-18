@@ -96,6 +96,11 @@ async def companion_operation(runtime, op, args):
         )
     if op.startswith("memory/"):
         return await memory_operation(home, clock, cid, op.removeprefix("memory/"), args, runtime)
+    if op == "smoke/records":
+        from clytie.smoke.summary import records
+
+        ledger = runtime.agent.ledger
+        return await run_sync(ledger, lambda: records(ledger, args["conversation"], args["since"]))
     if op == "tasks":
         return await run_sync(
             runtime.agent.ledger,

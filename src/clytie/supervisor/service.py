@@ -259,7 +259,8 @@ class Supervisor:
                         row["admission"] = {
                             "mode": admission.get("mode")
                             if isinstance(admission, dict)
-                            and admission.get("mode") in {"registered", "test_only"}
+                            and admission.get("mode")
+                            in {"registered", "test_only", "owner_present"}
                             else "unknown",
                             "rejected": {
                                 key: value
