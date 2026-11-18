@@ -1,0 +1,13 @@
+cases:
+  - id: chat_basic
+    text: "你好，虚构的伙伴。"
+    expect: {reply: true, image: false, reactions: none}
+    timeout_s: 60
+  - id: draw_plain
+    text: "画一只虚构的蓝色小鸟。"
+    expect: {reply: true, image: true, reactions: [accepted, running, done]}
+    timeout_s: 300
+  - id: edit_last
+    text: "把刚才的小鸟改为红色。"
+    expect: {reply: true, image: true, reactions: [accepted, running, done]}
+    timeout_s: 300

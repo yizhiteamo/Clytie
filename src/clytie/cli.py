@@ -16,6 +16,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return internal(argv)
     parser = argparse.ArgumentParser(prog="clytie")
     subcommands = parser.add_subparsers(dest="command", required=True)
+    smoke = (
+        subcommands.add_parser("smoke")
+        .add_subparsers(dest="action", required=True)
+        .add_parser("run")
+    )
+    smoke.add_argument("--home")
+    smoke.add_argument("--yes", action="store_true", help="仍需当次确认")
     supervisor_parser = subcommands.add_parser("supervisor", help="守护进程")
     supervisor_parser.add_argument("action", choices=["start", "status", "stop", "silence"])
     supervisor_parser.add_argument("--home")
@@ -50,6 +57,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     from clytie.config import resolve_home
     from clytie.supervisor.entry import status as supervisor_status
 
+    if arguments.command == "smoke":
+        from clytie.smoke.runner import main as smoke_run
+
+        return smoke_run(resolve_home(arguments.home))
     offline = arguments.command == "status" or (
         arguments.command in {"task", "supervisor"}
         and (

@@ -40,6 +40,7 @@ ROUTES = [
     *[("POST", "/supervisor/" + x) for x in ("stop", "escalate")],
     ("POST", "/silence"),
     *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart")],
+    ("GET", "/companions/<cid>/smoke/records"),
     ("GET", "/companions/<cid>/tasks/<task_id>"),
     ("GET", "/companions/<cid>/boundary"),
     ("POST", "/companions/<cid>/boundary/release"),
