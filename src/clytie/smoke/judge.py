@@ -3,7 +3,7 @@
 
 def verdict(case, record, replies, events, now, interval, started, ledger_terminal_at=None):
     if record is None:
-        return None
+        return "timeout_record"
     ds = record["deliveries"]
     statuses = [d["status"] for d in ds]
 
@@ -27,21 +27,14 @@ def verdict(case, record, replies, events, now, interval, started, ledger_termin
         or record["delivery_status"] == "pending"
         or any(s != "sent" for s in statuses)
     ):
-        return None
-    ids = {
-        str(d["platform_message_id"])
-        for d in ds
-        if not d["state"] and d["platform_message_id"] is not None
-    }
-    if set(replies) - ids:
+        return "timeout_execution"
+    expected_count = sum(not delivery["status_reaction"] for delivery in ds)
+    if len(replies) > expected_count:
         return fail("unattributed_reply")
-    if ids - set(replies) or any(d["platform_message_id"] is None for d in ds if not d["state"]):
-        return None
+    if len(replies) < expected_count:
+        return "timeout_replies"
     expect = case["expect"]
-    if (
-        bool(replies) != expect["reply"]
-        or any(r["image"] for r in replies.values()) != expect["image"]
-    ):
+    if bool(replies) != expect["reply"] or any(r["image"] for r in replies) != expect["image"]:
         return fail("reply_mismatch")
     remaining = set()
     adds = []
@@ -55,17 +48,17 @@ def verdict(case, record, replies, events, now, interval, started, ledger_termin
     source = "platform" if adds else "ledger"
     actual = [s for s, _ in adds] or ledger_states
     wanted = expect["reactions"]
-    last_reply = max((r["at"] for r in replies.values()), default=started)
+    last_reply = max((r["at"] for r in replies), default=started)
     if wanted == "none":
         if actual or events:
             return fail("unexpected_reaction")
         if now < last_reply + interval + 2:
-            return None
+            return "timeout_reactions"
         final = "verified"
     else:
         terminal = wanted[-1]
         if terminal not in actual and terminal not in ledger_states:
-            return None
+            return "timeout_reactions"
         if (
             now
             < max(
@@ -78,7 +71,7 @@ def verdict(case, record, replies, events, now, interval, started, ledger_termin
             + interval
             + 3
         ):
-            return None
+            return "timeout_reactions"
         # A new add after the terminal add is positive evidence, unlike a
         # missing removal notification. Allow late removals during the window.
         last_terminal = max((at for state, at in adds if state == terminal), default=None)
@@ -112,7 +105,7 @@ def verdict(case, record, replies, events, now, interval, started, ledger_termin
                 "image": r["image"],
                 "at_s": round(r["at"] - started, 3),
             }
-            for r in replies.values()
+            for r in replies
         ],
         "reply_s": round(last_reply - started, 3),
         "failure": None,

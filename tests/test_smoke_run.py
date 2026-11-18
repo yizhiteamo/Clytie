@@ -126,7 +126,7 @@ class Scenario:
                 deliveries = []
                 for kind in ("text", "image"):
                     out = f"synthetic-out-{n}-{kind}"
-                    deliveries.append(dict(state=None, status="sent", platform_message_id=out))
+                    deliveries.append(dict(state=None, status="sent", status_reaction=False))
                     if kind == "image" and name == "missing_delivery":
                         continue
                     self.observe(
@@ -157,6 +157,18 @@ class Scenario:
                     events = [("b", True), ("b", False), ("c", True)]
                 elif name == "two_final":
                     events.append(("a", True))
+                elif name in {"no_notices", "missing_terminal"}:
+                    events = []
+                self.observe(
+                    dict(
+                        common,
+                        post_type="notice",
+                        notice_type="group_msg_emoji_like",
+                        message_id="other-tester-message",
+                        is_add=True,
+                        likes=[{"emoji_id": "b"}],
+                    )
+                )
                 for emoji, add in events:
                     clock.advance(0.01)
                     self.observe(
@@ -172,12 +184,13 @@ class Scenario:
                 if name == "receipt_failed":
                     deliveries[0]["status"] = "failed"
                 deliveries += [
-                    dict(state=s, status="sent", platform_message_id=None)
-                    for s in ("accepted", "done")
+                    dict(state=s, status="sent", status_reaction=True)
+                    for s in (("accepted",) if name == "missing_terminal" else ("accepted", "done"))
                 ]
                 scenario.rows = [
                     dict(
-                        platform_message_id=mid,
+                        sender_id="tester",
+                        created_at=clock.now().isoformat(),
                         exec_status="ok",
                         delivery_status="sent",
                         reaction_outcome=None,
@@ -185,6 +198,27 @@ class Scenario:
                         deliveries=deliveries,
                     )
                 ]
+                if name == "no_record":
+                    scenario.rows.clear()
+                elif name == "ambiguous":
+                    scenario.rows.append(dict(scenario.rows[0], deliveries=[]))
+                elif name == "previous_case_sent":
+                    scenario.rows.append(
+                        dict(scenario.rows[0], created_at="1999-12-31T00:00:00+00:00")
+                    )
+                elif name in {"interference", "foreign_pending"}:
+                    scenario.rows.append(
+                        dict(
+                            sender_id="other",
+                            deliveries=[
+                                dict(
+                                    state="accepted",
+                                    status_reaction=True,
+                                    status="sent" if name == "interference" else "pending",
+                                )
+                            ],
+                        )
+                    )
                 return {"message_id": mid}
 
         return FakeDriver(target, clock)
@@ -249,7 +283,12 @@ class Scenario:
     "name, failure",
     [
         ("extra", "unattributed_reply"),
-        ("missing_delivery", "timeout"),
+        ("missing_delivery", "timeout_replies"),
+        ("no_record", "timeout_record"),
+        ("missing_terminal", "timeout_reactions"),
+        ("ambiguous", "ambiguous_record"),
+        ("interference", "interference"),
+        ("previous_case_sent", "interference"),
         ("missing_image", "reply_mismatch"),
         ("wrong_order", "reaction_order"),
         ("two_final", "final_reaction_failed"),
@@ -263,7 +302,9 @@ async def test_failure_stops_remaining_cases(tmp_path, name, failure):
     assert report["result"] == "failed" and report["cases"][0]["failure"] == failure
 
 
-@pytest.mark.parametrize("name", ["passed", "visual_yes", "visual_no"])
+@pytest.mark.parametrize(
+    "name", ["passed", "foreign_pending", "visual_yes", "visual_no", "no_notices"]
+)
 async def test_split_reply_and_final_emoji(tmp_path, name):
     scenario = Scenario(tmp_path, name)
     report = await scenario.execute()
@@ -271,11 +312,13 @@ async def test_split_reply_and_final_emoji(tmp_path, name):
     assert report["result"] == ("failed" if name == "visual_no" else "passed")
     for item in report["cases"]:
         assert [r["image"] for r in item["replies"]] == [False, True]
-        if name == "passed":
+        if name in {"passed", "foreign_pending"}:
             assert item["final_status"] == "verified" and len(scenario.prompts) == 1
         else:
             assert item["final_status"] == "unverified" and item["result"] == "needs_visual_check"
-            assert item["visual_confirmed"] == (name == "visual_yes") and len(scenario.prompts) == 2
+            assert item["visual_confirmed"] == (name != "visual_no") and len(scenario.prompts) == 2
+            if name == "no_notices":
+                assert item["reaction_source"] == "ledger"
 
 
 @pytest.mark.parametrize(
