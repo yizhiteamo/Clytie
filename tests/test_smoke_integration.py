@@ -13,10 +13,33 @@ from clytie.api.operations import companion_operation
 from clytie.api.server import Server
 from clytie.sdk.types import ApiResponse
 from clytie.smoke.runner import run
+from clytie.smoke.summary import records
 from clytie.supervisor.common import Audit
 
 from .test_agent import event, finish, make_agent
 from .test_smoke_run import Scenario, save
+
+
+async def test_older_request_with_a_new_sent_receipt_is_visible(tmp_path, monkeypatch):
+    agent, channel, _ = await make_agent(tmp_path)
+    send = channel.send
+
+    async def delayed_send(intent, cancel):
+        agent.clock.advance(1)
+        return await send(intent, cancel)
+
+    monkeypatch.setattr(channel, "send", delayed_send)
+    try:
+        trace = await agent.receive(event(agent, mention=True, scene="public_group"))
+        await agent.drain()
+        since = agent.clock.now().isoformat()
+        (row,) = records(agent.ledger, "test_group", since)
+        assert row["trace_id"] == trace and row["created_at"] < since
+        assert any(d["status"] == "sent" for d in row["deliveries"])
+        agent.clock.advance(1)
+        assert records(agent.ledger, "test_group", agent.clock.now().isoformat()) == []
+    finally:
+        await finish(agent)
 
 
 async def test_real_driver_agent_and_authenticated_summary(tmp_path):
@@ -52,7 +75,14 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
                     call["action"] == "send_group_msg"
                     and call["params"]["group_id"] == scenario.group
                 )
-                msg = event(agent, text=scenario.text, mention=True, scene="public_group")
+                msg = event(
+                    agent,
+                    text=scenario.text,
+                    actor="tester",
+                    role="member",
+                    mention=True,
+                    scene="public_group",
+                )
                 trace = await agent.receive(msg)
                 await agent.drain()
                 assert agent.ledger.get("record", trace)["exec_status"] == "ok"
@@ -64,11 +94,12 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
                         message_type="group",
                         group_id=scenario.group,
                         user_id=scenario.bot,
-                        message_id="out-" + reply.intent_id,
+                        message_id="tester-view-" + reply.intent_id,
                         message=[{"type": "text", "data": {"text": "synthetic secret reply"}}],
                     )
                 )
-                data = {"message_id": msg.message.ref.platform_message_id}
+                data = {"message_id": "tester-incoming"}
+                assert data["message_id"] != msg.message.ref.platform_message_id
             await socket.send_json(
                 {"echo": call["echo"], "status": "ok", "retcode": 0, "data": data}
             )
@@ -102,6 +133,11 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
         )
         await api.start()
         try:
+            earlier = await agent.receive(
+                event(agent, actor="tester", role="member", mention=True, scene="public_group")
+            )
+            await agent.drain()
+            await agent.clock.advance_and_drain(1)
             private = await agent.receive(event(agent, text="private unrelated"))
             await agent.drain()
             url = f"http://127.0.0.1:{api.port}/api/v1"
@@ -148,7 +184,11 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
                 async with http.get(url + path, params=query, headers=headers) as resp:
                     rows = (await resp.json())["result"]
                 assert [r["trace_id"] for r in rows] == sent and rows[0]["trace_id"] != private
+                assert earlier and earlier not in sent
                 digest = json.dumps(rows)
+                assert rows[0]["sender_id"] == "tester"
+                assert "platform_message_id" not in digest
+                assert all(not delivery["status_reaction"] for delivery in rows[0]["deliveries"])
                 for marker in (
                     scenario.text,
                     "private unrelated",

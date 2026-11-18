@@ -3,6 +3,7 @@
 import asyncio
 import json
 from contextlib import suppress
+from datetime import datetime
 
 from clytie.api.client import Client
 from clytie.clock import SystemClock
@@ -20,10 +21,11 @@ async def get(client, path, query=None):
     return thaw(response.json["result"])
 
 
-async def exercise(case, driver, client, cid, clock):
-    since = clock.now().isoformat()
+async def exercise(case, driver, client, cid, tester, clock, timeout_result):
+    since = clock.now()
     start = clock.monotonic()
     mid = await driver.send(case)
+    timeout_result["failure"] = "timeout_record"
 
     async def listen():
         while True:
@@ -33,12 +35,27 @@ async def exercise(case, driver, client, cid, clock):
     ledger_terminal_at = None
     try:
         while True:
-            rows = await get(client, f"companions/{cid}/smoke/records", {"since": since})
+            rows = await get(
+                client, f"companions/{cid}/smoke/records", {"since": since.isoformat()}
+            )
             if reader.done():
                 reader.result()
-            matches = [r for r in rows if str(r["platform_message_id"]) == mid]
+            matches = [
+                r
+                for r in rows
+                if r["sender_id"] == tester and datetime.fromisoformat(r["created_at"]) >= since
+            ]
             require(len(matches) <= 1, "ambiguous_record")
-            replies = {n: v for kind, n, v in driver.events if kind == "reply"}
+            require(
+                not any(
+                    delivery["status"] == "sent"
+                    for row in rows
+                    if not matches or row is not matches[0]
+                    for delivery in row["deliveries"]
+                ),
+                "interference",
+            )
+            replies = [v for kind, _, v in driver.events if kind == "reply"]
             reactions = [v for kind, n, v in driver.events if kind == "reaction" and n == mid]
             expected = case["expect"]["reactions"]
             if matches and expected != "none" and ledger_terminal_at is None:
@@ -57,8 +74,9 @@ async def exercise(case, driver, client, cid, clock):
                 start,
                 ledger_terminal_at,
             )
-            if answer:
+            if isinstance(answer, dict):
                 return answer
+            timeout_result["failure"] = answer
             await clock.sleep(0.2)
     finally:
         reader.cancel()
@@ -99,12 +117,15 @@ async def run(home, *, ask=input, emit=print, driver_type=Driver, client_type=Cl
             count, account = await driver.authorize()
             report.update(member_count=count, tester_account_index=account)
             require(target_config(home, cid, cfg["tester"]) == target, "target_changed")
+            timeout_result = {"result": "failed", "failure": "timeout_send"}
             try:
                 item = await timed(
-                    exercise(case, driver, client, cid, clock), clock, case["timeout_s"]
+                    exercise(case, driver, client, cid, cfg["tester"], clock, timeout_result),
+                    clock,
+                    case["timeout_s"],
                 )
             except (asyncio.TimeoutError, TimeoutError):
-                item = {"result": "failed", "failure": "timeout"}
+                item = timeout_result
             except SmokeError as error:
                 item = {"result": "failed", "failure": str(error)}
             except Exception:
@@ -113,6 +134,7 @@ async def run(home, *, ask=input, emit=print, driver_type=Driver, client_type=Cl
             report["cases"].append(item)
             emit(
                 f"{item['id']} {item['result']} {item.get('reply_s', '-')}s {item.get('reactions', [])}"
+                + (f" {item['failure']}" if item.get("failure") else "")
             )
             if item["result"] == "failed":
                 report["result"] = "failed"
