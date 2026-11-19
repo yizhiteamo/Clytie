@@ -204,8 +204,23 @@ class Http:
         self._backend, self._clock = backend, clock
 
     async def request(
-        self, method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 * 1024 * 1024
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout_s=30,
+        max_bytes=None,
+        follow_redirects: bool = True,
     ):
+        from .http import ResponseTooLarge, media_download_limit
+
+        media_limit = media_download_limit.get()
+        if max_bytes is None:
+            max_bytes = media_limit if media_limit is not None else 20 * 1024 * 1024
+        elif media_limit is not None:
+            max_bytes = min(max_bytes, media_limit)
         if timeout_s <= 0 or max_bytes < 0:
             raise ValueError("invalid HTTP budget")
         result = HttpResponse.model_validate(
@@ -217,13 +232,14 @@ class Http:
                     body=body,
                     timeout_s=timeout_s,
                     max_bytes=max_bytes,
+                    follow_redirects=follow_redirects,
                 ),
                 self._clock,
                 timeout_s,
             )
         )
         if len(result.body) > max_bytes:
-            raise ValueError("HTTP response exceeds max_bytes")
+            raise ResponseTooLarge("HTTP response exceeds max_bytes")
         return result
 
 

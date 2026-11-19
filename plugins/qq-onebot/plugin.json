@@ -6,7 +6,7 @@
   "category": "channel",
   "version": "0.1.0",
   "requires": {
-    "sdk": ">=0.13,<0.14"
+    "sdk": ">=0.14,<0.15"
   },
   "dependencies": {},
   "conflicts": [],
@@ -90,6 +90,13 @@
         "exclusiveMinimum": 0,
         "maximum": 3600,
         "default": 60
+      },
+      "inbound_media": {
+        "type": "object",
+        "properties": {
+          "allowed_hosts": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []}
+        },
+        "additionalProperties": false
       },
       "reconnect_delays": {
         "type": "array",

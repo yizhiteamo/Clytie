@@ -86,7 +86,7 @@ def restore(captured, stage, tmp_path, clock):
 @pytest.mark.parametrize("config_asset", [False, True])
 @pytest.mark.parametrize("concurrent", [False, True])
 async def test_production_tool_ledger_online_encrypted_restore_authorization(
-    tmp_path, shared, config_asset, concurrent, late=False
+    tmp_path, shared, config_asset, concurrent, late=False, inbound=False
 ):
     home, clock = fictional(tmp_path)
     declaration = json.loads((ROOT / "plugins/echo-tool/plugin.json").read_bytes())["contributes"][
@@ -149,6 +149,23 @@ async def test_production_tool_ledger_online_encrypted_restore_authorization(
         ref = result.assets[0]
         snapshot_ref = capability.owner.extra
         captured_ids = {ref.asset_id, snapshot_ref.asset_id}
+        if inbound:
+            from clytie.sdk.types import ImagePart
+
+            from .test_agent import event
+            from .test_agent_placeholders import with_parts
+
+            incoming = with_parts(
+                event(SimpleNamespace(clock=clock, cid="companion_a"), ""), [ImagePart()]
+            )
+            key, new = runtime.ledger.claim_inbound(incoming)
+            assert new
+            raw_image = b"\x89PNG\r\n\x1a\nfictional restore image"
+            media = await host.asset_store.put(
+                "companion_a", raw_image, "image/png", "inbound_media", inbound_only=True
+            )
+            runtime.ledger.update_media(key, 0, "ok", media)
+            captured_ids.add(media.asset_id)
         if config_asset:
             captured_ids.add(effective["artifact"])
         if late:
@@ -220,6 +237,32 @@ async def test_production_tool_ledger_online_encrypted_restore_authorization(
             )
             assert "credential" not in restored_config["plugins"]["asset-tool"]["config"]
         restored = AssetStore(target, clock)
+        if inbound:
+            from clytie.assets.store import model_image_access
+            from clytie.kernel.ledger import Ledger
+            from clytie.sdk.types import AssetRef
+
+            ledger = Ledger(
+                target / "companions/companion_a/ledger/ledger.sqlite3",
+                "companion_a",
+                clock,
+                readonly=True,
+            )
+            try:
+                (row,) = ledger.rows("inbound_media")
+                assert row["record_id"] == key and row["asset_id"] == media.asset_id
+                selected = AssetRef.model_validate(row["asset"])
+                with model_image_access("companion_a", "fictional-model", [selected]):
+                    assert (
+                        await restored.bind("companion_a", "fictional-model").read(
+                            selected.asset_id
+                        )
+                        == raw_image
+                    )
+                    with pytest.raises(KeyError):
+                        await restored.bind("companion_a", "asset-tool").read(selected.asset_id)
+            finally:
+                ledger.close()
         assert await restored.bind("companion_a").read(ref.asset_id) == b"fictional product"
         assert await restored.bind("companion_a").info(ref.asset_id) == ref
         assert (
@@ -269,4 +312,10 @@ async def test_production_tool_ledger_online_encrypted_restore_authorization(
 async def test_late_tool_asset_in_audit_survives_online_backup_and_restore(tmp_path):
     await test_production_tool_ledger_online_encrypted_restore_authorization(
         tmp_path, shared=False, config_asset=False, concurrent=False, late=True
+    )
+
+
+async def test_inbound_only_image_online_encrypted_backup_restore(tmp_path):
+    await test_production_tool_ledger_online_encrypted_restore_authorization(
+        tmp_path, shared=False, config_asset=False, concurrent=False, inbound=True
     )

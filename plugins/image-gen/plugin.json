@@ -6,7 +6,7 @@
   "category": "tool",
   "version": "0.1.0",
   "requires": {
-    "sdk": ">=0.10,<0.14"
+    "sdk": ">=0.10,<0.15"
   },
   "entry": "plugin:Plugin",
   "priority": 100,

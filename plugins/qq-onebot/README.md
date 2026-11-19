@@ -36,3 +36,7 @@ B2 正向 WebSocket 平台插件。按 OneBot v11 标准与仓库 `docs/plugins/
 ## B4b 成员查询
 
 支持可选成员查询；通过标准 `get_group_member_info` 查询一个逻辑成员，成功数据必须匹配目标。失败或不可确认时返回未知，不解析错误文字或内置非标准返回码。`group_increase` / `group_decrease` 转换为通用成员通知，由本体清除十分钟缓存；不拉取群列表或成员列表。
+
+## 入站图片
+
+`inbound_media.allowed_hosts` 是允许下载入站图片的 HTTPS 主机名列表，默认为空。请只登记明确授权的主机。取图不携带认证信息、不跟随重定向；拒绝的主机只按主机名记录。

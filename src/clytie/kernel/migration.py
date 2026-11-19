@@ -26,9 +26,15 @@ from clytie.plugin_host.support import HostLog
 from clytie.sdk import CancelToken
 
 from .events import background
-from .ledger import SCHEMA_VERSION, Ledger, LedgerError
+from .ledger import MEDIA_INDEX, SCHEMA_VERSION, Ledger, LedgerError
 
 PROTECTED = {".lock", ".migration.json"}
+
+
+async def migrate_inbound_media(db, cancel):
+    cancel.raise_if_cancelled()
+    db.execute('CREATE TABLE "inbound_media" (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+    db.execute(MEDIA_INDEX)
 
 
 async def migrate_dialogue(db, cancel):
@@ -226,7 +232,7 @@ class LedgerRuntime:
         self.home, self.cid, self.clock = Path(home).resolve(), identifier(cid), clock
         self.log, self.migrations, self.retention_days = (
             log or HostLog(),
-            {2: migrate_dialogue, **(migrations or {})},
+            {2: migrate_dialogue, 3: migrate_inbound_media, **(migrations or {})},
             retention_days,
         )
         self.snapshots = LedgerSnapshots(self.home, cid, clock, self.log)

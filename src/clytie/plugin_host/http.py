@@ -1,10 +1,17 @@
 """插件实例独享的生产 HTTP 会话；时间预算由 context.Http 管理。"""
 
+from contextvars import ContextVar
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
 from clytie.sdk.types import HttpResponse
+
+media_download_limit = ContextVar("media_download_limit", default=None)
+
+
+class ResponseTooLarge(ValueError):
+    """The streamed response exceeded the requested byte budget."""
 
 
 class HttpBackend:
@@ -21,7 +28,15 @@ class HttpBackend:
         return parsed
 
     async def request(
-        self, method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 * 1024 * 1024
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout_s=30,
+        max_bytes=20 * 1024 * 1024,
+        follow_redirects: bool = True,
     ):
         if self._closed:
             raise RuntimeError("HTTP backend is closed")
@@ -50,7 +65,11 @@ class HttpBackend:
                 ) as response:
                     status = response.status
                     location = response.headers.get("Location")
-                    if status in {301, 302, 303, 307, 308} and location is not None:
+                    if (
+                        follow_redirects
+                        and status in {301, 302, 303, 307, 308}
+                        and location is not None
+                    ):
                         if redirects == 3:
                             raise ValueError("HTTP redirect limit exceeded")
                         target_url = urljoin(url, location)
@@ -82,7 +101,7 @@ class HttpBackend:
                         if not chunk:
                             break
                         if len(content) + len(chunk) > max_bytes:
-                            raise ValueError("HTTP response exceeds max_bytes")
+                            raise ResponseTooLarge("HTTP response exceeds max_bytes")
                         content.extend(chunk)
                     return HttpResponse(
                         status=status,

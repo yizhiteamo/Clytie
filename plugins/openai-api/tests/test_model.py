@@ -284,6 +284,7 @@ async def test_image_reads_authorized_asset_and_never_fetches_raw_ref(setup):
         == "data:image/png;base64," + base64.b64encode(data).decode()
     )
     assert reads == [("info", asset.asset_id), ("read", asset.asset_id)]
+    assert body["messages"][0]["content"][0]["image_url"]["detail"] == "high"
     req = req.model_copy(
         update={
             "messages": [

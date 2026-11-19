@@ -15,3 +15,5 @@ Responses 固定发送 `store: false`，不使用服务端会话标识。工具�
 请求遵守本体 deadline，取消后关闭当前 HTTP 等待；请求可能已经被平台处理，取消不表示未计费。用量由本体按 agent-spec §11.1 写账本，缺失的用量保持未知。没有经过线上模型验证。
 
 接口依据：[Chat Completions 官方参考](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create)、[Responses 官方参考](https://developers.openai.com/api/reference/resources/responses/methods/create)。测试只用假 HTTP、虚构凭据和假协议端。
+
+图片清晰度由 `image_detail` 控制，可选 `auto`、`low`、`high`，默认 `high`。此选项同时用于 Chat Completions 和 Responses 请求。
