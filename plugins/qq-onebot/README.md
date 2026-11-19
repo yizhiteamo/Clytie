@@ -28,7 +28,7 @@ B2 正向 WebSocket 平台插件。按 OneBot v11 标准与仓库 `docs/plugins/
 
 `react_remove` 默认关闭。经用户确认协议端支持后设为 `true`，状态切换时先撤销上一个确定发出的表情，再添加新表情。撤销失败不重试，继续添加；撤销接口返回 1404 时，本连接只停用撤销，重连重新按配置启用。
 
-`clytie emoji capture companion_a --seconds 180` 通过本机 API 在正在运行的 qq-onebot 中开始采集。默认三分钟；只接受宿主识别为 owner 的 `user_id`、`is_add: true` 通知中的编号。按接单、执行中、完成、失败顺序添加；重复编号不重复计入。通知不进入聊天事件、账本或记忆。
+`clytie plugin qq-onebot emoji-capture '{"companion":"companion_a","seconds":180}'` 通过本机 API 在正在运行的 qq-onebot 中开始采集。可省略 `seconds`，默认三分钟。只接受宿主识别为 owner 的 `user_id`、`is_add: true` 通知中的编号。按接单、执行中、完成、失败顺序添加，重复编号只计一次。通知不进入聊天事件、账本或记忆。
 
 四个编号齐全后显示并要求确认，`--yes` 不跳过这次编号确认。超时、不足四个、未收到支持的通知或用户不确认都不写配置。保存保留配置历史，重启伴侣后生效；不会自动重启。一个伴侣存在多个 qq-onebot 配置或无法安全保留 YAML 时拒绝写入，需要手动配置。
 

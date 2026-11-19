@@ -16,6 +16,7 @@ from .auth import APIError, Auth, Identity, csrf
 ROUTES = [
     ("GET", "/status"),
     ("POST", "/companions/<cid>/emoji/apply"),
+    ("POST", "/companions/<cid>/plugins/<pid>/config/apply"),
     ("GET", "/backup/status"),
     ("GET", "/backup/list"),
     ("POST", "/backup/create"),

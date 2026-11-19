@@ -52,6 +52,23 @@ def test_project_architecture():
     assert CHECKS.main() == 0
 
 
+def test_architecture_uses_installed_manifest_ids_and_exact_testing_exemption(
+    tmp_path, monkeypatch
+):
+    manifest = tmp_path / "plugins" / "different-directory" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"id":"fictional-platform"}', encoding="utf-8")
+    root = tmp_path / "src" / "clytie"
+    exempt = root / "sdk" / "testing" / "fake.py"
+    exempt.parent.mkdir(parents=True)
+    exempt.write_text('CHANNEL = "fictional-platform"', encoding="utf-8")
+    monkeypatch.setattr(CHECKS, "ROOT", tmp_path)
+    assert CHECKS.main() == 0
+    sibling = root / "sdk" / "testing_helpers.py"
+    sibling.write_text('CHANNEL = "fictional-platform"', encoding="utf-8")
+    assert CHECKS.main() == 1
+
+
 def test_system_clock_adapter_is_exact_path_and_exact_api_only():
     source = "from datetime import datetime as dt\nfrom time import monotonic as m\nimport asyncio\ndt.now()\nm()\nasyncio.sleep(1)"
     assert CHECKS.inspect_source(source, relative_path="src/clytie/clock.py") == []

@@ -11,10 +11,6 @@ from .client import Client, NotRunning
 
 
 def add_parser(commands):
-    emoji = commands.add_parser("emoji")
-    emoji.add_argument("action", choices=["capture"])
-    emoji.add_argument("cid")
-    emoji.add_argument("--seconds", type=float, default=180)
     companion = commands.add_parser("companion")
     companion.add_argument("action", choices=["start", "stop", "restart"])
     companion.add_argument("cid")
@@ -66,7 +62,7 @@ def add_parser(commands):
     backup.add_argument("--confirm-identity", action="store_true")
     backup.add_argument("--patch")
     backup.add_argument("--preserved")
-    for p in (emoji, companion, boundary, plugin, admin, backup):
+    for p in (companion, boundary, plugin, admin, backup):
         p.add_argument("--home")
         p.add_argument("--yes", action="store_true")
         p.add_argument("--json", action="store_true")
@@ -133,10 +129,6 @@ async def execute(args, client=None):
     )
     await cli.request("GET", "/status")
     command = args.command
-    if command == "emoji":
-        from .emoji import capture
-
-        return await capture(cli, args.cid, args.seconds)
     if command == "backup":
         source_binding = None
         if getattr(args, "source_repository", None):
@@ -399,7 +391,7 @@ async def execute(args, client=None):
 
 
 async def plugin_command(args, client):
-    from jsonschema import validate
+    from jsonschema import ValidationError, validate
 
     from clytie.config import load_home, repository_root
     from clytie.plugin_host.manifests import discover
@@ -409,9 +401,13 @@ async def plugin_command(args, client):
     pid = args.action
     report = load_home(client.home)
     excluded = read(client.home / "plugins/.host/uninstalled.json", [])
+    # Resolved plugin configs also include implicitly enabled role bindings.
     enabled = any(
-        v["config"].get("plugins", {}).get(pid, {}).get("enabled", False)
-        for v in report.plugin_configs.values()
+        result["config"]
+        .get("plugins", {})
+        .get(pid, {})
+        .get("enabled", pid in result.get("plugins", {}))
+        for result in report.plugin_configs.values()
     )
     if pid in excluded or not enabled:
         raise ValueError("插件未启用")
@@ -427,7 +423,10 @@ async def plugin_command(args, client):
         raise ValueError("未知插件命令")
     # CLI arguments are a JSON object matching the declared schema.
     values = json.loads(args.pid or "{}")
-    validate(values, thaw(declaration["args"]))
+    try:
+        validate(values, thaw(declaration["args"]))
+    except ValidationError:
+        raise ValueError("插件命令参数错误") from None
     from clytie.clock import SystemClock
     from clytie.plugin_host import PluginHost
 

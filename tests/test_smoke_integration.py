@@ -5,14 +5,17 @@ import json
 from types import SimpleNamespace
 
 import aiohttp
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from clytie.api.management import Management
 from clytie.api.operations import companion_operation
 from clytie.api.server import Server
+from clytie.sdk.smoke import SmokeDriverError
 from clytie.sdk.types import ApiResponse
-from clytie.smoke.runner import run
+from clytie.smoke.config import ConfiguredSecrets
+from clytie.smoke.runner import load_driver, run
 from clytie.smoke.summary import records
 from clytie.supervisor.common import Audit
 
@@ -114,8 +117,13 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
             dict(
                 tester="tester",
                 companion="companion_a",
-                ws_url=str(fake.make_url("/").with_scheme("ws")),
-                token_file="secrets/smoke.key",
+                driver={
+                    "plugin": "qq-onebot",
+                    "config": {
+                        "ws_url": str(fake.make_url("/").with_scheme("ws")),
+                        "token_file": "secrets/smoke.key",
+                    },
+                },
             ),
         )
         save(
@@ -203,3 +211,31 @@ async def test_real_driver_agent_and_authenticated_summary(tmp_path):
         finally:
             await api.close()
             await finish(agent)
+
+
+async def test_driver_refuses_redirect_before_sending_credentials_to_destination(tmp_path):
+    scenario = Scenario(tmp_path, "passed")
+    contacted = []
+
+    async def redirect(request):
+        raise web.HTTPFound("/destination")
+
+    async def destination(request):
+        contacted.append(True)
+        return web.Response()
+
+    app = web.Application()
+    app.router.add_get("/", redirect)
+    app.router.add_get("/destination", destination)
+    driver = load_driver(tmp_path, "qq-onebot", scenario.clock)
+    async with TestServer(app) as server:
+        config = {
+            "ws_url": str(server.make_url("/").with_scheme("ws")),
+            "token_file": "secrets/smoke.key",
+        }
+        try:
+            with pytest.raises(SmokeDriverError, match="ws_redirect"):
+                await driver.connect(config, ConfiguredSecrets(tmp_path, config))
+        finally:
+            await driver.close()
+    assert contacted == []

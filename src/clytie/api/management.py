@@ -18,6 +18,9 @@ from .config_write import ConfigWriter
 from .management_workers import Workers
 from .operations import load_plan
 
+CONFIG_APPLY = "/companions/<cid>/plugins/<pid>/config/apply"
+LEGACY_APPLY = "/companions/<cid>/emoji/apply"
+
 
 class Management:
     def __init__(self, supervisor, report):
@@ -325,9 +328,9 @@ class Management:
                 description += (
                     "；" + ", ".join(plan["stopped_companions"]) + " 下次启动时这个插件不会加载"
                 )
-        if route == "/companions/<cid>/emoji/apply":
+        if route in {CONFIG_APPLY, LEGACY_APPLY}:
             confirm = True
-            description = "保存采集的四个状态表情编号；保留配置历史，重启伴侣后生效。"
+            description = "保存插件提议的配置并保留历史，重启伴侣后生效。"
         return confirm, needs_password, description
 
     async def transfer(self, cid, op, args):
@@ -884,28 +887,25 @@ class Management:
                 for a, r in state["actors"].items()
                 if r.get("until") and datetime.fromisoformat(r["until"]) > self.clock.now()
             ]
-        if route == "/companions/<cid>/emoji/apply":
-            self.check_cid(cid)
+        if route in {CONFIG_APPLY, LEGACY_APPLY}:
+            if (
+                set(data) != {"session"}
+                or not isinstance(data["session"], str)
+                or not data["session"]
+            ):
+                raise APIError("invalid_request")
+            if not self.running(cid):
+                raise APIError("companion_not_running", 409)
             async with self.serial:
-                response = await self.transfer(
-                    cid,
-                    "plugin_route",
-                    {
-                        "pid": "qq-onebot",
-                        "subpath": "emoji/status",
-                        "method": "GET",
-                        "query": {"session": data.get("session")},
-                        "json": {},
-                    },
+                proposal = await self.transfer(
+                    cid, "config_proposal", {"pid": params.get("pid"), "session": data["session"]}
                 )
-                value = response["json"]
-                if response["status"] != 200 or value.get("state") != "complete":
-                    raise APIError("capture_incomplete", 409)
-                ids = value.get("ids", [])
-                if len(ids) != 4:
-                    raise APIError("capture_incomplete", 409)
                 result = await asyncio.to_thread(
-                    self.writer.save, cid, {"emoji_ids": dict(zip("👌⏳✅❌", ids))}
+                    self.writer.save_proposal,
+                    cid,
+                    proposal["pid"],
+                    proposal["account"],
+                    proposal["changes"],
                 )
                 return {**result, "restart_required": True}
         if "<subpath>" in route:

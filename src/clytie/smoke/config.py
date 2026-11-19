@@ -1,8 +1,11 @@
 import re
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import yaml
+
+from clytie.plugin_host.snapshots import SnapshotError, contained
+from clytie.sdk.immutable import freeze
+from clytie.sdk.smoke import SmokeTarget
 
 
 class SmokeError(Exception):
@@ -30,13 +33,18 @@ def target_config(home, cid, tester):
     instance = load(home / "clytie.local.yaml")
     require(ident(cid) and cid in instance["companions"], "invalid_companion")
     config = load(home / "companions" / cid / "companion.yaml")
-    (binding,) = [b for b in config["channels"] if b["plugin"] == "qq-onebot"]
-    bot = str(instance["accounts"][binding["account"]]["account"])
     group = instance["conversations"][instance["test_conversation"]]
-    require(group["kind"] == "group" and group["channel"] == "qq-onebot", "invalid_target")
+    channel = group["channel"]
+    require(group["kind"] == "group", "invalid_target")
+    bindings = [b for b in config["channels"] if b["plugin"] == channel]
+    require(len(bindings) == 1, "invalid_target")
+    binding = bindings[0]
+    account = instance["accounts"][binding["account"]]
+    require(account["channel"] == channel, "invalid_target")
+    bot = str(account["account"])
 
     def accounts(person):
-        return [str(a["account"]) for a in person["accounts"] if a["channel"] == "qq-onebot"]
+        return [str(a["account"]) for a in person["accounts"] if a["channel"] == channel]
 
     person = instance["people"][tester]
     require(person["role"] == "member" and tester in group["members_expected"], "invalid_tester")
@@ -46,7 +54,7 @@ def target_config(home, cid, tester):
             allowed.update(accounts(instance["people"][member]))
         elif member in instance["accounts"]:
             a = instance["accounts"][member]
-            require(a["channel"] == "qq-onebot", "invalid_target")
+            require(a["channel"] == channel, "invalid_target")
             allowed.add(str(a["account"]))
         elif member == cid:
             allowed.add(bot)
@@ -63,38 +71,52 @@ def target_config(home, cid, tester):
         "failed": "❌",
         **reactions.get("emojis", {}),
     }
-    states = {symbol: state for state, symbol in symbols.items()}
-    emojis = {
-        str(v): states[k] for k, v in binding["config"].get("emoji_ids", {}).items() if k in states
-    }
-    return dict(
-        group=str(group["platform_id"]),
-        bot=bot,
-        testers=testers,
-        allowed=allowed,
-        emojis=emojis,
-        interval=reactions.get("min_interval_seconds", 2),
+    return SmokeTarget(
+        channel=channel,
+        conversation=str(group["platform_id"]),
+        companion_account=bot,
+        tester_accounts=tuple(testers),
+        allowed_accounts=frozenset(allowed),
+        binding_config=freeze(binding.get("config", {})),
+        reaction_symbols=freeze(symbols),
+        min_interval_seconds=reactions.get("min_interval_seconds", 2),
     )
+
+
+class ConfiguredSecrets:
+    def __init__(self, home, config):
+        self._home = home.resolve()
+        self._token_file = config.get("token_file")
+
+    def read(self, path):
+        require(isinstance(path, str) and path == self._token_file, "invalid_token_file")
+        token = Path(path)
+        require(
+            not token.is_absolute()
+            and len(token.parts) == 2
+            and token.parts[0] == "secrets"
+            and (self._home / token).parent == self._home / "secrets",
+            "invalid_token_file",
+        )
+        try:
+            selected = contained(self._home, self._home / token)
+        except (OSError, SnapshotError) as exc:
+            raise SmokeError("invalid_token_file") from exc
+        require(selected.is_file(), "invalid_token_file")
+        value = selected.read_text(encoding="utf-8").strip()
+        require(value, "missing_secret")
+        return value
 
 
 def prepare(home):
     cfg = load(home / "smoke/smoke.yaml")
     cases = load(home / "smoke/cases.yaml")["cases"]
-    url = urlsplit(cfg["ws_url"])
+    driver = cfg.get("driver")
     require(
-        url.scheme in {"ws", "wss"}
-        and url.hostname in {"127.0.0.1", "::1", "localhost"}
-        and not url.username
-        and not url.password,
-        "invalid_ws",
-    )
-    token = Path(cfg["token_file"])
-    require(
-        not token.is_absolute()
-        and len(token.parts) == 2
-        and token.parts[0] == "secrets"
-        and (home / token).resolve().parent == home.resolve() / "secrets",
-        "invalid_token_file",
+        isinstance(driver, dict)
+        and ident(driver.get("plugin"))
+        and isinstance(driver.get("config"), dict),
+        "invalid_driver",
     )
     limits = cfg.get("limits", {})
     caps = [limits.get("max_cases", 10), limits.get("max_images", 4)]
@@ -128,4 +150,6 @@ def prepare(home):
             "invalid_reactions",
         )
     require(sum(c["expect"]["image"] for c in cases) <= caps[1], "image_limit")
-    return cfg, cases, target_config(home, cfg["companion"], cfg["tester"])
+    target = target_config(home, cfg["companion"], cfg["tester"])
+    require(target.channel == driver["plugin"], "driver_channel_mismatch")
+    return cfg, cases, target

@@ -301,8 +301,16 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `memory.consolidator` | `async run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`；本体核对、写入，见 memory-recall-spec §2 |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
 | `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
+| `smoke_driver`（SDK 0.13） | 平台插件在 `contributes.smoke_driver.factory` 声明工厂。冒烟 CLI 用注入的时钟构造测试方驱动；伴侣启动不装配此扩展点。 |
 | `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；实际挂载 `/api/v1/companions/<cid>/plugins/<pid>/`；非 GET 必须声明 `audit: true`；handler 与边界见 §7.3 |
 | `webui_panel` | 声明式：`{id, title, kind: kv|table|text, data_route}`，不允许插件自带脚本 |
+
+冒烟驱动契约位于 `clytie.sdk.smoke`。本体按测试会话的 `channel` 解析目标，核对其与
+`driver.plugin` 一致。CLI 只把 `driver.config` 和本次测试凭据读取能力交给
+`connect(config, secrets)`。每次发送前调用 `authorize(target)` 检查成员与测试账号，
+返回成员数和测试账号在配置中的序号。`send(case)` 返回测试方消息编号；
+`events()` 产生通用回复或表情观察，`close()` 释放连接。
+平台原始事件、账号、消息编号和凭据均不写入报告。会话服务、能力间调用及能力包的后续规则见平台能力规格 §2–§4。
 
 A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3 完成。
 
@@ -359,6 +367,13 @@ async count() -> int
 `async rerank(query: str, records: list[MemoryRecord], cancel) -> list[float]`：返回与 records 等长的分数。只接收本体按 memory-spec §3 投影后的记录；采用 §7.1 的 factory 编码。不可用时跳过重排（memory-spec §4）。
 
 ### 7.3 ApiClient（CLI 扩展使用）
+
+SDK 0.13 的插件配置提议由已启用的插件路由产生。CLI 在用户确认后向
+`POST /api/v1/companions/<cid>/plugins/<pid>/config/apply` 提交提议的会话引用。
+插件的 `GET /plugins/<pid>/config/proposal` 处理器按 `session` 返回 `{"changes": {键: 新值}}`。
+宿主从同一伴侣的同一插件取回提议，核对运行时绑定、清单顶层 `config_writable` 键清单和配置 Schema。
+客户端只提交会话引用和确认；保存目标由宿主选择。无法唯一确定绑定时拒绝写入。
+没有声明可写键的插件不能通过此路由写配置。成功保存后保留配置历史；新配置在重启后生效。
 
 ```
 async request(method: str, path: str, *, json: JsonObject | None = None,

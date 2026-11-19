@@ -2,6 +2,8 @@
 
 from clytie.sdk import PluginUnavailable
 
+from .capture import identifier
+from .capture_cli import capture
 from .channel import OneBotChannel
 
 
@@ -19,6 +21,14 @@ class Plugin:
             raise RuntimeError("plugin is not started")
         return self.channel
 
+    def create_smoke_driver(self, clock):
+        from .smoke_driver import Driver
+
+        return Driver(clock)
+
+    async def capture_cli(self, args, api):
+        return await capture(args, api)
+
     async def stop(self):
         if self.channel is not None:
             await self.channel.close()
@@ -34,13 +44,36 @@ class Plugin:
         except ValueError as exc:
             return {"status": 409, "json": {"code": str(exc)}}
 
-    async def capture_status(self, request):
+    def _capture_status(self, session):
         if self.channel is None:
             return {"status": 409, "json": {"code": "channel_unavailable"}}
         value = self.channel.capture.status()
-        if request["query"].get("session") != value["session"]:
+        if not session or session != value["session"]:
             return {"status": 409, "json": {"code": "capture_stale"}}
         return {"status": 200, "json": value}
+
+    async def capture_status(self, request):
+        query = request.get("query", {})
+        session = query.get("session")
+        result = self._capture_status(session)
+        if query.get("wait") == "1" and result["json"].get("state") == "collecting":
+            await self.channel.ctx.clock.sleep(0.25)
+            return self._capture_status(session)
+        return result
+
+    async def config_proposal(self, request):
+        result = self._capture_status(request.get("query", {}).get("session"))
+        if result["status"] != 200:
+            return result
+        value = result["json"]
+        ids = value["ids"]
+        if (
+            value["state"] != "complete"
+            or len(ids) != 4
+            or not all(isinstance(item, str) and identifier(item) for item in ids)
+        ):
+            return {"status": 409, "json": {"code": "capture_incomplete"}}
+        return {"status": 200, "json": {"changes": {"emoji_ids": dict(zip("👌⏳✅❌", ids))}}}
 
     async def capture_cancel(self, request):
         if self.channel is None:
