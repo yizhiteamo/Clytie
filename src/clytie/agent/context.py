@@ -7,8 +7,9 @@ from pydantic import TypeAdapter
 
 from clytie.backup.coordination import run_sync
 from clytie.kernel.projection import visible
-from clytie.sdk.types import Actor, ChatMessage, ContextRequest, MessagePart, TextPart
+from clytie.sdk.types import Actor, AssetRef, ChatMessage, ContextRequest, MessagePart, TextPart
 
+from .image_context import Slot
 from .policy import actor_label, text_parts
 
 PART = TypeAdapter(MessagePart)
@@ -74,7 +75,39 @@ class Context:
             ),
         )
 
-    async def quote(self, ref, conversation, authors=None, *, ledger=None):
+    def image_offsets(self, parts, media, key, at, rank, prefix, outgoing=False):
+        offsets = []
+        if not self.agent.features.supports_images:
+            return offsets
+        pos = len(prefix)
+        for i, part in enumerate(parts):
+            row = media.get((key, i))
+            if part.type == "image" and (row or outgoing and part.asset):
+                asset = (
+                    part.asset
+                    if outgoing
+                    else AssetRef.model_validate(row["asset"])
+                    if row.get("asset")
+                    else None
+                )
+                offsets.append(
+                    (
+                        pos,
+                        Slot(
+                            (key, i),
+                            at,
+                            rank,
+                            "ok" if outgoing else row["status"],
+                            asset,
+                            bool(row and row.get("first_frame")),
+                            outgoing,
+                        ),
+                    )
+                )
+            pos += len(self.render_parts([part])) + 1
+        return offsets
+
+    async def quote(self, ref, conversation, authors=None, *, ledger=None, image_info=None):
         if ledger is None:
             tables = await run_sync(self.agent.ledger, self._read_tables)
             ledger = LedgerSnapshot(tables)
@@ -83,9 +116,15 @@ class Context:
                 if row.get("reason") != "boundary_paused" and self.visible(row, conversation):
                     if authors is not None:
                         authors.append(Actor.model_validate(row["message"]["sender"]))
-                    return self.render_parts(
-                        [PART.validate_python(p) for p in row["message"]["parts"] or []]
-                    )
+                    parts = [PART.validate_python(p) for p in row["message"]["parts"] or []]
+                    if image_info:
+                        offsets, media, prefix = image_info
+                        offsets.extend(
+                            self.image_offsets(
+                                parts, media, row["event_id"], row["received_at"], 1, prefix
+                            )
+                        )
+                    return self.render_parts(parts)
                 return "引用了一条看不到的消息"
         for attempt in ledger.rows("attempt"):
             receipt = attempt.get("receipt")
@@ -98,13 +137,35 @@ class Context:
                 and row["conversation_id"] == ref.conversation_id
                 and self.visible(record, conversation)
             ):
-                return self.render_parts([PART.validate_python(p) for p in row.get("parts") or []])
+                parts = [PART.validate_python(p) for p in row.get("parts") or []]
+                if image_info:
+                    offsets, media, prefix = image_info
+                    offsets.extend(
+                        self.image_offsets(
+                            parts,
+                            media,
+                            row["intent_id"],
+                            row.get("created_at", record["created_at"]),
+                            1,
+                            prefix,
+                            outgoing=True,
+                        )
+                    )
+                return self.render_parts(parts)
         return "引用了一条看不到的消息"
 
     def _read_tables(self):
         return {
             table: self.agent.ledger.rows(table)
-            for table in ("record", "invocation", "intent", "audit", "inbound", "attempt")
+            for table in (
+                "record",
+                "invocation",
+                "intent",
+                "audit",
+                "inbound",
+                "inbound_media",
+                "attempt",
+            )
         }
 
     def _snapshot(self, conversation):
@@ -144,9 +205,13 @@ class Context:
         extra="",
         proactive=False,
         memory_trace=None,
+        images=None,
     ):
         agent = self.agent
         ledger = LedgerSnapshot(await run_sync(agent.ledger, self._snapshot, conversation))
+        media = {(row["record_id"], row["part_index"]): row for row in ledger.rows("inbound_media")}
+        if not agent.features.supports_images:
+            capabilities += "\n当前模型看不到图片"
         result = [
             message("system", agent.persona.render(conversation.scene)),
             message("system", "能力状态：\n" + capabilities),
@@ -242,6 +307,14 @@ class Context:
                     f"{sender.role} {actor_label(sender)}：{content}",
                     sender,
                     f"{sender.role} {actor_label(sender)}：{text_parts(parts)}",
+                    self.image_offsets(
+                        parts,
+                        media,
+                        row["event_id"],
+                        row["received_at"],
+                        2,
+                        f"{sender.role} {actor_label(sender)}：",
+                    ),
                 )
             )
         for row in ledger.rows("intent"):
@@ -263,12 +336,21 @@ class Context:
                     ("[不确定是否发出]" if row["status"] == "unknown" else "") + content,
                     None,
                     ("[不确定是否发出]" if row["status"] == "unknown" else "") + text_parts(parts),
+                    self.image_offsets(
+                        parts,
+                        media,
+                        row["intent_id"],
+                        row.get("created_at", record["created_at"]),
+                        2,
+                        "[不确定是否发出]" if row["status"] == "unknown" else "",
+                        True,
+                    ),
                 )
             )
         limits = agent.config.get("context", {})
         memory_query = "\n".join(
             [text_parts(e.message.parts) for e in events if e.message]
-            + [query for _, _, _, _, query in sorted(history, key=lambda r: r[0])[-3:]]
+            + [query for _, _, _, _, query, _ in sorted(history, key=lambda r: r[0])[-3:]]
         )
         if agent.memory_context:
             memory_messages = await agent.memory_context(conversation, actor)
@@ -278,13 +360,19 @@ class Context:
             )
         result[memory_position:memory_position] = memory_messages
         remaining, kept = limits.get("max_chars", 20_000), []
-        for _, role, content, sender, _ in sorted(history, key=lambda r: r[0])[
+        for _, role, content, sender, _, offsets in sorted(history, key=lambda r: r[0])[
             -limits.get("max_messages", 100) :
         ][::-1]:
             content = content[: limits.get("max_single_message_chars", 2000)]
             if len(content) > remaining:
                 break
-            kept.append((message(role, content), sender))
+            history_msg = message(role, content)
+            if images:
+                images.register(
+                    history_msg,
+                    [(pos, s) for pos, s in offsets if pos + len("[图片]") <= len(content)],
+                )
+            kept.append((history_msg, sender))
             remaining -= len(content)
         reminder_position = len(result)
         authors = [sender for _, sender in reversed(kept) if sender is not None]
@@ -292,12 +380,26 @@ class Context:
         for event in events:
             msg = event.message
             text = f"{msg.sender.role} {actor_label(msg.sender)}：" + self.render_parts(msg.parts)
+            offsets = self.image_offsets(
+                msg.parts,
+                media,
+                event.event_id,
+                event.received_at.isoformat(),
+                0,
+                f"{msg.sender.role} {actor_label(msg.sender)}：",
+            )
             if msg.reply_to:
                 text += "\n引用：" + await self.quote(
-                    msg.reply_to, conversation, authors, ledger=ledger
+                    msg.reply_to,
+                    conversation,
+                    authors,
+                    ledger=ledger,
+                    image_info=(offsets, media, text + "\n引用："),
                 )
             authors.append(msg.sender)
             result.append(message("user", text))
+            if images:
+                images.register(result[-1], offsets)
         reminder = agent.boundary.reminder(authors)
         if reminder:
             result.insert(reminder_position, message("system", reminder))

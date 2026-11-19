@@ -2,10 +2,11 @@
 
 import asyncio
 import json
+from urllib.parse import urlsplit
 
 from clytie.sdk import CancelToken, ChannelUnavailable, CredentialUnavailable
 from clytie.sdk.immutable import thaw
-from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, Receipt
+from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, MediaContent, Receipt
 
 from .capture import Capture
 from .mapping import _number, encode_parts, normalize_event
@@ -61,9 +62,39 @@ class OneBotChannel:
             supports_react=self._reaction_enabled,
             supports_react_remove=self._reaction_enabled and self._remove_enabled,
             supports_quote=True,
+            supports_media_fetch=True,
             supports_membership=True,
             supports_card=False,
             media_limits=thaw(self._config.get("media_limits", {})),
+        )
+
+    async def fetch_media(self, part, cancel):
+        cancel.raise_if_cancelled()
+        raw = part.raw_ref
+        if part.type != "image" or not raw or "://" not in raw:
+            raise ValueError("unsupported")
+        if "\\" in raw or any(ord(ch) < 33 or ord(ch) == 127 for ch in raw):
+            raise ValueError("failed")
+        url = urlsplit(raw)
+        host = url.hostname
+        allowed = self._config.get("inbound_media", {}).get("allowed_hosts", ())
+        if (
+            url.scheme != "https"
+            or not host
+            or url.username is not None
+            or url.password is not None
+            or host not in {item.lower() for item in allowed}
+        ):
+            if host and host.isascii() and all(ch.isalnum() or ch in ".-" for ch in host):
+                self.ctx.log.warning("media.host_denied", hostname=host)
+            raise ValueError("failed")
+        response = await self.ctx.http.request("GET", raw, timeout_s=15, follow_redirects=False)
+        cancel.raise_if_cancelled()
+        if not 200 <= response.status < 300:
+            raise ValueError("failed")
+        return MediaContent(
+            data=response.body,
+            media_type=response.headers.get("Content-Type", "application/octet-stream"),
         )
 
     async def connect(self):

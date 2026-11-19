@@ -14,7 +14,7 @@ from clytie.plugin_host.support import timed
 from clytie.sdk.immutable import freeze, thaw
 from clytie.sdk.smoke import SmokeDriverError, SmokeReaction, SmokeReply
 
-from .config import ConfiguredSecrets, SmokeError, prepare, require, target_config
+from .config import ConfiguredSecrets, SmokeError, case_image, prepare, require, target_config
 from .judge import verdict
 
 
@@ -34,10 +34,14 @@ def load_driver(home, plugin, clock):
     return getattr(cls(), declaration["factory"])(clock)
 
 
-async def exercise(case, driver, client, cid, tester, clock, interval, timeout_result):
+async def exercise(case, driver, client, cid, tester, clock, interval, timeout_result, image=None):
     since = clock.now()
     start = clock.monotonic()
-    mid = await driver.send(case)
+    mid = (
+        await driver.send({k: v for k, v in case.items() if k != "image"}, image=image)
+        if image is not None
+        else await driver.send(case)
+    )
     require(isinstance(mid, str) and mid, "send_unknown")
     timeout_result["failure"] = "timeout_record"
 
@@ -171,6 +175,7 @@ async def run(
                         clock,
                         target.min_interval_seconds,
                         timeout_result,
+                        case_image(home, case),
                     ),
                     clock,
                     case["timeout_s"],
@@ -182,6 +187,9 @@ async def run(
             except Exception:
                 item = {"result": "failed", "failure": "observation_failed"}
             item["id"] = case["id"]
+            if "image" in case and item["result"] != "failed":
+                item["image_visual_check"] = True
+                item["result"] = "needs_visual_check"
             report["cases"].append(item)
             emit(
                 f"{item['id']} {item['result']} {item.get('reply_s', '-')}s {item.get('reactions', [])}"
@@ -196,7 +204,11 @@ async def run(
             confirmed = (
                 not visual
                 or ask(
-                    "请目视确认最终只剩一个表情："
+                    (
+                        "请目视确认带图用例回复与图片相符，并核对要求的最终表情："
+                        if any(i.get("image_visual_check") for i in visual)
+                        else "请目视确认最终只剩一个表情："
+                    )
                     + ", ".join(i["id"] for i in visual)
                     + "；输入 y："
                 ).strip()

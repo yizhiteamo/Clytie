@@ -292,6 +292,11 @@ def _legacy_ledger_schema(db):
     expected_db = sqlite3.connect(":memory:")
     try:
         for statement in (*SCHEMA_SQL, *HEALTH_SQL):
+            if (
+                "inbound_media" in statement
+                and db.execute("PRAGMA user_version").fetchone()[0] == 2
+            ):
+                continue
             expected_db.execute(statement)
         expected = {
             name: (kind, sql)
@@ -327,10 +332,14 @@ def _database(path, required):
                     "SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
                 ).fetchall()
                 tables = {name for name, kind in objects if kind == "table"}
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                is_ledger = required is LEDGER_TABLES
+                if is_ledger and version == 2:
+                    required = {k: v for k, v in required.items() if k != "inbound_media"}
                 if (
                     tables != set(required)
                     or any(kind not in {"table", "index"} for _, kind in objects)
-                    or db.execute("PRAGMA user_version").fetchone()[0] != 2
+                    or version not in ((2, 3) if is_ledger else (2,))
                     or db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]
                 ):
                     raise RestoreError("restore_database_invalid")
@@ -376,7 +385,16 @@ MEMORY_TABLES = {
 }
 LEDGER_TABLES = {
     name: ["id", "data"]
-    for name in ("inbound", "record", "invocation", "intent", "attempt", "dedupe", "audit")
+    for name in (
+        "inbound",
+        "inbound_media",
+        "record",
+        "invocation",
+        "intent",
+        "attempt",
+        "dedupe",
+        "audit",
+    )
 }
 
 
@@ -469,6 +487,11 @@ def _companion(root, entry, assets):
             ):
                 raise RestoreError("restore_origin_invalid")
         for table in LEDGER_TABLES:
+            if (
+                table == "inbound_media"
+                and ledger.execute("PRAGMA user_version").fetchone()[0] == 2
+            ):
+                continue
             for _, raw in ledger.execute(f'SELECT id,data FROM "{table}"'):
                 value = json.loads(raw)
                 if not isinstance(value, dict) or (

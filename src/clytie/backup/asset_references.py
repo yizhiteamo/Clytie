@@ -21,7 +21,17 @@ def ledger_references(table, value, *, details=None):
                     ref(part["asset"])
 
     try:
-        if table == "inbound":
+        if table == "inbound_media":
+            if value["status"] == "ok":
+                # The ledger authenticates its own source metadata. A previous
+                # tool product can register the same bytes under another origin.
+                media = AssetRef.model_validate(value["asset"])
+                if value["asset_id"] != media.asset_id:
+                    raise ValueError
+                found.add(media.asset_id)
+            elif value.get("asset_id") is not None or value.get("asset") is not None:
+                raise ValueError
+        elif table == "inbound":
             message = value.get("message")
             if message is not None:
                 parts(message.get("parts"))

@@ -5,7 +5,7 @@
   "summary": "通过兼容 Chat Completions 的接口调用普通模型",
   "category": "model",
   "version": "0.1.0",
-  "requires": {"sdk": ">=0.11,<0.14"},
+  "requires": {"sdk": ">=0.11,<0.15"},
   "entry": "plugin:Plugin",
   "priority": 100,
   "dependencies": {},
@@ -22,6 +22,7 @@
       "api": {"type": "string", "enum": ["chat_completions", "responses"], "default": "chat_completions"},
       "reasoning_effort": {"type": "string", "minLength": 1, "maxLength": 16, "pattern": "^[a-z]+(?![\\s\\S])"},
       "supports_tools": {"type": "boolean", "default": true},
+      "image_detail": {"type": "string", "enum": ["auto", "low", "high"], "default": "high"},
       "supports_images": {"type": "boolean", "default": true}
     },
     "required": ["base_url", "model", "api_key_ref", "context_chars"],

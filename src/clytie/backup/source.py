@@ -313,6 +313,8 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                             "audit",
                         ]
                     )
+                    if kind == "ledger" and db.execute("PRAGMA user_version").fetchone()[0] >= 3:
+                        tables.append("inbound_media")
                     for table in tables:
                         for row in db.execute(f'SELECT data FROM "{table}"'):
                             check()

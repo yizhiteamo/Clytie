@@ -108,6 +108,39 @@ class ConfiguredSecrets:
         return value
 
 
+def case_image(home, case):
+    if "image" not in case:
+        return None
+    name = case["image"]
+    require(
+        isinstance(name, str)
+        and name
+        and not Path(name).anchor
+        and ".." not in Path(name).parts
+        and ":" not in name
+        and "\\" not in name,
+        "invalid_image",
+    )
+    root = home / "smoke"
+    try:
+        path = contained(home, contained(root, root / name))
+        require(path.is_file() and path.stat().st_nlink == 1, "invalid_image")
+        with path.open("rb") as stream:
+            data = stream.read(20 * 1024 * 1024 + 1)
+        require(
+            len(data) <= 20 * 1024 * 1024
+            and (
+                data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a"))
+                or data.startswith(b"RIFF")
+                and data[8:12] == b"WEBP"
+            ),
+            "invalid_image",
+        )
+        return data
+    except (OSError, SnapshotError) as exc:
+        raise SmokeError("invalid_image") from exc
+
+
 def prepare(home):
     cfg = load(home / "smoke/smoke.yaml")
     cases = load(home / "smoke/cases.yaml")["cases"]

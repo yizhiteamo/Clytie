@@ -33,6 +33,7 @@ class OpenAIModel:
         ):
             raise ValueError("invalid base_url")
         self.api = config.get("api", "chat_completions")
+        self.image_detail = config.get("image_detail", "high")
         self.effort = config.get("reasoning_effort")
         if self.api not in {"chat_completions", "responses"}:
             raise ValueError("invalid api")
@@ -102,6 +103,7 @@ class OpenAIModel:
                         {
                             "type": "image_url",
                             "image_url": {
+                                "detail": self.image_detail,
                                 "url": "data:"
                                 + info.media_type
                                 + ";base64,"
@@ -189,7 +191,11 @@ class OpenAIModel:
                         else [
                             {"type": "input_text", "text": p["text"]}
                             if p["type"] == "text"
-                            else {"type": "input_image", "image_url": p["image_url"]["url"]}
+                            else {
+                                "type": "input_image",
+                                "image_url": p["image_url"]["url"],
+                                "detail": p["image_url"]["detail"],
+                            }
                             for p in content
                         ]
                     )

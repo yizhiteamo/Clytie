@@ -10,10 +10,11 @@ from clytie.storage.owner import before_storage_commit
 
 from .projection import redact, visible
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXEC_TERMINAL = {"ok", "error", "denied", "cancelled", "interrupted"}
 INTENT_TERMINAL = {"sent", "failed", "unknown"}
-TABLES = {"inbound", "record", "invocation", "intent", "attempt", "dedupe"}
+TABLES = {"inbound", "inbound_media", "record", "invocation", "intent", "attempt", "dedupe"}
+MEDIA_INDEX = """CREATE INDEX media_record ON inbound_media(json_extract(data,'$.record_id'))"""
 SCHEMA_SQL = (
     *(
         f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
@@ -23,6 +24,7 @@ SCHEMA_SQL = (
     "CREATE UNIQUE INDEX task_id ON \"record\"(json_extract(data,'$.task_id'))",
     "CREATE UNIQUE INDEX source_event ON \"record\"(json_extract(data,'$.source_event_id'))",
     "CREATE UNIQUE INDEX invocation_key ON invocation(json_extract(data,'$.idem_key'))",
+    MEDIA_INDEX,
 )
 HEALTH_SQL = (
     "CREATE INDEX IF NOT EXISTS health_tasks ON record("
@@ -157,6 +159,27 @@ class Ledger:
             )
             self.put("inbound", event.event_id, data)
         return event.event_id, True
+
+    def update_media(self, record_id, part_index, status, asset=None, *, first_frame=False):
+        with self.transaction():
+            event = self.get("inbound", record_id)
+            if not event or not (event.get("message") or {}).get("parts"):
+                return False
+            key = encode([record_id, part_index])
+            self.put(
+                "inbound_media",
+                key,
+                dict(
+                    record_id=record_id,
+                    part_index=part_index,
+                    asset_id=asset.asset_id if asset else None,
+                    asset=dump(asset) if asset else None,
+                    status=status,
+                    fetched_at=self.now() if status != "pending" else None,
+                    first_frame=first_frame,
+                ),
+            )
+            return True
 
     def open_record(
         self, *, event_id=None, invocation=None, parent_trace_id=None, conversation=None
@@ -444,6 +467,11 @@ class Ledger:
     def restart(self):
         interrupted = []
         with self.transaction():
+            self.db.execute(
+                """UPDATE inbound_media SET data=json_set(data,'$.status','failed','$.fetched_at',?)
+                   WHERE json_extract(data,'$.status')='pending'""",
+                (self.now(),),
+            )
             for r in self.rows("record"):
                 r["notified"] = True
                 self.put("record", r["trace_id"], r)
@@ -520,6 +548,10 @@ class Ledger:
                 ):
                     event["message"]["parts"] = None
                     self.put("inbound", event["event_id"], event)
+                    self.db.execute(
+                        "DELETE FROM inbound_media WHERE json_extract(data,'$.record_id')=?",
+                        (event["event_id"],),
+                    )
                     changed += 1
             for intent in self.rows("intent"):
                 dirty = False

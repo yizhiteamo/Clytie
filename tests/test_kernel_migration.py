@@ -18,6 +18,7 @@ from .test_kernel_reactions import fixture
 def old_ledger(home, clock):
     path = home / "companions/companion_a/ledger/ledger.sqlite3"
     ledger = Ledger(path, "companion_a", clock)
+    ledger.db.execute("DROP TABLE inbound_media")
     ledger.db.execute("PRAGMA user_version=0")
     ledger.close()
     return path

@@ -124,6 +124,26 @@ async def test_http_timeout_and_cancel_release_connection(backend, cancel):
             release.set()
 
 
+async def test_http_first_response_without_contacting_redirect_target(backend):
+    targets = []
+
+    async def target(request):
+        targets.append(request.path)
+        return web.Response(body=b"unexpected")
+
+    async with server(target) as destination:
+
+        async def redirect(request):
+            return web.Response(status=302, headers={"Location": str(destination.make_url("/"))})
+
+        async with server(redirect) as origin:
+            result = await Http(backend, backend._clock).request(
+                "GET", str(origin.make_url("/")), follow_redirects=False
+            )
+    assert result.status == 302
+    assert targets == []
+
+
 @pytest.mark.parametrize("count", [3, 4])
 async def test_http_redirect_limit(backend, count):
     seen = []
@@ -245,3 +265,65 @@ async def test_http_tls_verification_and_downgrade(backend, tmp_path, monkeypatc
         with pytest.raises(ValueError, match="downgrade"):
             await backend.request("GET", url)
         assert seen == ["https"]
+
+
+async def test_inbound_media_uses_allowlisted_tls_without_credentials_or_redirect(
+    backend, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from clytie.plugin_host.manifests import discover
+    from clytie.sdk import CancelToken
+    from clytie.sdk.types import ImagePart
+
+    from .host_helpers import ROOT, host
+
+    ctx = SimpleNamespace(
+        config={},
+        identity=SimpleNamespace(self_account=lambda: None),
+        clock=backend._clock,
+        http=Http(backend, backend._clock),
+        log=backend._log,
+    )
+    registry = host(tmp_path, clock=backend._clock)
+    manifest = discover(ROOT / "plugins", tmp_path / "plugins", repo_root=ROOT)["qq-onebot"]
+    plugin_type, _ = registry._load_class(manifest)
+    channel_type = __import__(plugin_type.__module__, fromlist=["OneBotChannel"]).OneBotChannel
+    serving, trusted = tls_contexts(tmp_path)
+    monkeypatch.setattr(aiohttp.connector, "_SSL_CONTEXT_VERIFIED", trusted)
+    hits, targets = [], []
+
+    async def dest(req):
+        targets.append(True)
+        return web.Response()
+
+    async with server(dest) as target:
+
+        async def handler(req):
+            hits.append((req.headers.get("Authorization"), req.headers.get("Cookie")))
+            if req.path == "/redirect":
+                return web.Response(status=302, headers={"Location": str(target.make_url("/"))})
+            return web.Response(body=b"synthetic", content_type="image/png")
+
+        async with server(handler, ssl=serving) as src:
+            channel = channel_type(ctx)
+            url = str(src.make_url("/"))
+            for raw in (url, str(target.make_url("/")), "filename"):
+                with pytest.raises(ValueError):
+                    await channel.fetch_media(ImagePart(raw_ref=raw), CancelToken())
+            assert not hits and not targets
+            ctx.config["inbound_media"] = {"allowed_hosts": ["127.0.0.1"]}
+            data = await channel.fetch_media(ImagePart(raw_ref=url), CancelToken())
+            assert data.data == b"synthetic"
+            with pytest.raises(ValueError):
+                await channel.fetch_media(
+                    ImagePart(raw_ref=str(src.make_url("/redirect"))), CancelToken()
+                )
+            assert hits == [(None, None)] * 2
+            assert targets == []
+            from clytie.agent.vision import ImageFetcher
+
+            fetcher = ImageFetcher(ctx.clock, max_bytes=4)
+            assert await fetcher.fetch(channel, ImagePart(raw_ref=url)) == ("too_large", None)
+            await asyncio.gather(*fetcher.workers)
+    await registry.close()

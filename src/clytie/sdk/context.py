@@ -156,6 +156,7 @@ class Http(Protocol):
         body: bytes | None = None,
         timeout_s: float = 30,
         max_bytes: int = 20 * 1024 * 1024,
+        follow_redirects: bool = True,
     ) -> HttpResponse: ...
 
 

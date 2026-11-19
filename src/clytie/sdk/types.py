@@ -121,6 +121,11 @@ class MentionPart(SDKModel):
     is_self: bool
 
 
+class MediaContent(SDKModel):
+    data: JsonBytes
+    media_type: str
+
+
 class MediaPart(SDKModel):
     asset: AssetRef | None = None
     raw_ref: str | None = None
@@ -492,6 +497,7 @@ class Tick(SDKModel):
 
 
 class ChannelFeatures(SDKModel):
+    supports_media_fetch: bool = False
     max_text_chars: int
     supports_react: bool
     supports_react_remove: bool = False

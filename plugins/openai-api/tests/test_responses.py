@@ -315,6 +315,7 @@ async def test_all_message_roles_images_and_flat_tools(create):
         {"type": "input_text", "text": "image"},
         {
             "type": "input_image",
+            "detail": "high",
             "image_url": "data:image/png;base64," + base64.b64encode(raw).decode(),
         },
     ]

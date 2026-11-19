@@ -1,5 +1,10 @@
 # 变更记录
 
+## SDK 0.14.0（入站图片）
+
+- 平台通过 `supports_media_fetch` 声明可选的 `fetch_media(part, cancel) -> MediaContent`；旧平台默认不取图。
+- `ctx.http.request` 新增关键字参数 `follow_redirects`，默认 `True`。设为 `False` 时返回首次响应，宿主不会请求重定向目标。
+
 ## SDK 0.13.0（平台能力清理）
 
 - 平台插件可声明仅在冒烟 CLI 装配的 `smoke_driver`；测试方连接配置移入 `driver.config`。

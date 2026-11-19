@@ -9,7 +9,8 @@ import os
 import re
 import stat
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
@@ -20,6 +21,21 @@ from clytie.sdk.types import AssetRef
 
 class AssetError(ValueError):
     """稳定错误码；不返回来源文本或私有路径。"""
+
+
+_model_grant = ContextVar("selected_inbound_images", default=None)
+
+
+@contextmanager
+def model_image_access(cid, pid, selected):
+    # Clear the shared set on exit: child tasks inherit the ContextVar value.
+    ids = {ref.asset_id: ref for ref in selected}
+    token = _model_grant.set((cid, pid, ids))
+    try:
+        yield
+    finally:
+        ids.clear()
+        _model_grant.reset(token)
 
 
 def _identity(value):
@@ -49,9 +65,13 @@ class AssetRegistration:
     origin: str
     path: str
     shared_with: tuple[str, ...] = ()
+    inbound_only: bool = False
 
     def as_dict(self):
-        return {**self.__dict__, "shared_with": list(self.shared_with)}
+        value = {**self.__dict__, "shared_with": list(self.shared_with)}
+        if not self.inbound_only:
+            del value["inbound_only"]
+        return value
 
     def ref(self):
         return AssetRef(
@@ -93,7 +113,7 @@ def validate_registry(value):
             raise ValueError
         rows, keys, access = [], set(), {}
         for raw in value["registrations"]:
-            if set(raw) != {
+            if set(raw) - {"inbound_only"} != {
                 "companion_id",
                 "asset_id",
                 "size",
@@ -130,8 +150,11 @@ def validate_registry(value):
             if key in keys:
                 raise ValueError
             keys.add(key)
+            restricted = raw.get("inbound_only", False)
+            if type(restricted) is not bool or restricted and shares:
+                raise ValueError
             row = AssetRegistration(
-                cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path, shares
+                cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path, shares, restricted
             )
             # 同一接收者不能遇到两个不同来源候选，连相同字节也不猜来源。
             for recipient in (cid, *shares):
@@ -169,8 +192,8 @@ class AssetStore:
     def _lock(self, name):
         return CaptureCoordinator(self._safe(f"shared/assets/{name}.lock"), self.clock)
 
-    def bind(self, companion_id):
-        return BoundAssets(self, identifier(companion_id))
+    def bind(self, companion_id, plugin_id=None):
+        return BoundAssets(self, identifier(companion_id), plugin_id)
 
     def snapshot(self):
         path = self._safe("shared/assets/registry.json")
@@ -329,6 +352,8 @@ class AssetStore:
         )
         if row is None:
             raise KeyError(asset_id)
+        if row.inbound_only:
+            raise AssetError("asset_unauthorized")
         resolved = self.resolve(snapshot, owner_id, asset_id)
         self.verify_resolved(resolved)
         with ExitStack() as stack:
@@ -388,7 +413,7 @@ class AssetStore:
             path.chmod(0o444)
             return row.path
 
-    def _stage_put(self, companion_id, data, media_type, origin):
+    def _stage_put(self, companion_id, data, media_type, origin, *, inbound_only=False):
         cid = identifier(companion_id)
         data = bytes(data)
         ref = AssetRef(
@@ -398,26 +423,58 @@ class AssetStore:
             origin=origin,
         )
         path = self._publish(data, ref)
-        row = AssetRegistration(cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path)
+        row = AssetRegistration(
+            cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path, inbound_only=inbound_only
+        )
         return self._prepare_registration(row)
 
-    async def put(self, companion_id, data, media_type, origin):
+    async def put(self, companion_id, data, media_type, origin, *, inbound_only=False):
         cid = identifier(companion_id)
-        resolved, expected = await asyncio.to_thread(self._stage_put, cid, data, media_type, origin)
+        resolved, expected = await asyncio.to_thread(
+            self._stage_put, cid, data, media_type, origin, inbound_only=inbound_only
+        )
         async with companion_coordinator(self.home, cid, self.clock).admit():
+            if expected is not None and expected.inbound_only and not inbound_only:
+                # A trusted tool writer supplied the actual bytes, independently
+                # establishing a product source. A hash alone cannot do this.
+                with self._lock("registry").commit():
+                    snapshot = self.snapshot()
+                    if expected not in snapshot.registrations:
+                        raise AssetError("asset_registration_changed")
+                    self.check_identity(resolved)
+                    product = replace(
+                        expected, origin=origin, media_type=media_type, inbound_only=False
+                    )
+                    self._save(
+                        tuple(product if row == expected else row for row in snapshot.registrations)
+                    )
+                    return product.ref()
             return self._register(resolved, expected)
 
 
 class BoundAssets:
-    def __init__(self, store, companion_id):
+    def __init__(self, store, companion_id, plugin_id=None):
         self._store, self._companion_id = store, companion_id
+        self._plugin_id = plugin_id
 
     def _resolve(self, asset_id):
-        return self._store.resolve(self._store.snapshot(), self._companion_id, asset_id)
+        resolved = self._store.resolve(self._store.snapshot(), self._companion_id, asset_id)
+        if resolved.registration.inbound_only:
+            grant = _model_grant.get()
+            if (
+                not grant
+                or grant[:2] != (self._companion_id, self._plugin_id)
+                or asset_id not in grant[2]
+            ):
+                raise KeyError(asset_id)
+        return resolved
 
     async def info(self, asset_id):
         resolved = self._resolve(asset_id)
         await asyncio.to_thread(self._store.verify_resolved, resolved)
+        grant = _model_grant.get()
+        if grant and grant[:2] == (self._companion_id, self._plugin_id) and asset_id in grant[2]:
+            return grant[2][asset_id]
         return resolved.registration.ref()
 
     async def read(self, asset_id):
@@ -425,6 +482,8 @@ class BoundAssets:
 
     async def path(self, asset_id):
         resolved = self._resolve(asset_id)
+        if resolved.registration.inbound_only:
+            raise AssetError("asset_unauthorized")
         await asyncio.to_thread(self._store.verify_resolved, resolved)
         if resolved.path.stat().st_mode & 0o222:
             raise AssetError("asset_path_not_readonly")
