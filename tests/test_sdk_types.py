@@ -151,6 +151,7 @@ def samples():
         ref,
         asset,
         t.MediaPart(),
+        t.MediaContent(data=b"\x89PNG\xff", media_type="image/png"),
         *parts,
         message,
         event,

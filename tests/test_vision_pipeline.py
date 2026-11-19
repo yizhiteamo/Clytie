@@ -267,6 +267,8 @@ async def test_inbound_source_isolation_and_retention(tmp_path, product_first):
         asset_id = row["asset_id"]
         attached = [p for m in model.requests[0].messages for p in m.parts if p.type == "image"]
         assert [p.asset.asset_id for p in attached] == [asset_id]
+        (usage,) = [r for r in agent.ledger.rows("audit") if r["kind"] == "model.usage"]
+        assert (usage["image_count"], usage["image_bytes"]) == (1, len(data))
         if not product_first:
             with model_image_access(
                 agent.cid, agent.config["model"]["plugin"], [attached[0].asset]

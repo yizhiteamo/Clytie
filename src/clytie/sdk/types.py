@@ -122,7 +122,7 @@ class MentionPart(SDKModel):
 
 
 class MediaContent(SDKModel):
-    data: bytes
+    data: JsonBytes
     media_type: str
 
 

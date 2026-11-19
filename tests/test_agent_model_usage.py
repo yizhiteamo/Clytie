@@ -43,6 +43,8 @@ async def test_usage_single_result_and_safe_fields(tmp_path, ending):
                 plugin="fake-model",
                 input_tokens=12,
                 output_tokens=7,
+                image_count=0,
+                image_bytes=0,
                 finish=ending,
                 timing="on_time",
             ).items()
@@ -55,6 +57,8 @@ async def test_usage_single_result_and_safe_fields(tmp_path, ending):
             "plugin",
             "input_tokens",
             "output_tokens",
+            "image_count",
+            "image_bytes",
             "finish",
             "timing",
         }
