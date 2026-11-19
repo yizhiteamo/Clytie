@@ -306,7 +306,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `memory.importer` | `detect(source: Path) -> bool`；`read(source: Path, cancel)` 异步产出 `ImportCandidate`（具体字段编码见 ADR 0008），包含平台账号/会话引用及可信程度提议，不能直接填写 subject/origin_conversation_id/basis。本体负责配置映射、计划确认、快照和写入，范围见 memory-spec §9.4 |
 | `memory.consolidator` | `async run(window: RecollectWindow, reader: CandidateReader, cancel) -> list[RecollectItem]`；本体核对、写入，见 memory-recall-spec §2 |
 | `notifier` | `async notify(n: Notice, cancel) -> Receipt` |
-| `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作） |
+| `cli_command` | 清单声明 `{name, help, args: JSON Schema}`；`async run(args: dict, api: ApiClient) -> int`（只能通过 API 操作）。SDK 0.15 起确认由本体负责，见下方说明（Issue #137） |
 | `smoke_driver`（SDK 0.13） | 平台插件在 `contributes.smoke_driver.factory` 声明工厂。冒烟 CLI 用注入的时钟构造测试方驱动；伴侣启动不装配此扩展点。 |
 | `api_route` | 清单声明 `{method, path}`，路径固定在 `/plugins/<id>/` 下；实际挂载 `/api/v1/companions/<cid>/plugins/<pid>/`；非 GET 必须声明 `audit: true`；handler 与边界见 §7.3 |
 | `webui_panel` | 声明式：`{id, title, kind: kv|table|text, data_route}`，不允许插件自带脚本 |
@@ -317,6 +317,11 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 返回成员数和测试账号在配置中的序号。`send(case)` 返回测试方消息编号；
 `events()` 产生通用回复或表情观察，`close()` 释放连接。
 平台原始事件、账号、消息编号和凭据均不写入报告。会话服务、能力间调用及能力包的后续规则见平台能力规格 §2–§4。
+
+插件命令的确认（SDK 0.15，Issue #137，用户已确认 2026-11-20）：
+- 交给插件命令的 `ApiClient` 不接受 `confirm` 字段。请求体带 `confirm` 时直接返回固定错误 `confirm_not_allowed`，不发出请求。
+- 路由返回 428 `confirmation_required` 时，由本体 CLI 显示服务器给出的固定说明，按与本体命令相同的规则询问用户（确认与口令规则见 api-spec §2.3）。用户同意后，本体代为重新提交一次并带上 `confirm: true`；用户拒绝或没有交互终端时，插件收到 `confirmation_declined`，不写入。
+- 插件只能看到最终结果，不能自己生成确认提示，也不能代替用户确认。
 
 A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3 完成。
 
