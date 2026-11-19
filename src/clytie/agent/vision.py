@@ -9,7 +9,7 @@ from PIL import Image
 from clytie.plugin_host.http import ResponseTooLarge, media_download_limit
 from clytie.sdk import CancelToken
 
-MAX_GIF_PIXELS = 50_000_000
+MAX_IMAGE_PIXELS = 50_000_000
 
 
 class ImageFetcher:
@@ -76,29 +76,44 @@ class InboundImage:
 
 
 def normalize_image(data: bytes, max_bytes: int) -> InboundImage:
-    """Run in the fetch worker. Only GIF needs a decoder."""
+    """Run in the fetch worker. Validate pixels before publishing any inbound asset."""
     if len(data) > max_bytes:
         raise ValueError("too_large")
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return InboundImage(data, "image/png")
-    if data.startswith(b"\xff\xd8\xff"):
-        return InboundImage(data, "image/jpeg")
-    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return InboundImage(data, "image/webp")
-    if not data.startswith((b"GIF87a", b"GIF89a")):
+        fmt = "PNG"
+    elif data.startswith(b"\xff\xd8\xff"):
+        fmt = "JPEG"
+    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        fmt = "WEBP"
+    elif data.startswith((b"GIF87a", b"GIF89a")) and data.endswith(b";"):
+        fmt = "GIF"
+    else:
         raise ValueError("failed")
 
-    if len(data) < 13 or not data.endswith(b";"):
-        raise ValueError("failed")
-    with Image.open(BytesIO(data), formats=["GIF"]) as image:
-        if image.width * image.height > MAX_GIF_PIXELS:
-            raise ValueError("failed")
-        image.load()
-        if not image.is_animated:
-            return InboundImage(data, "image/gif")
-        image.seek(0)
-        with image.convert("RGBA") as first, BytesIO() as output:
-            first.save(output, format="PNG")
-            if output.tell() > max_bytes:
-                raise ValueError("too_large")
-            return InboundImage(output.getvalue(), "image/png", first_frame=True)
+    if fmt == "PNG":
+        # verify checks chunk checksums; load below checks the compressed pixels.
+        with Image.open(BytesIO(data), formats=[fmt]) as image:
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise ValueError("failed")
+            image.verify()
+    with Image.open(BytesIO(data), formats=[fmt]) as image:
+        first_frame = None
+        index = 0
+        while True:
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise ValueError("failed")
+            image.load()
+            if index == 0 and fmt in {"GIF", "WEBP"} and image.is_animated:
+                with image.convert("RGBA") as first, BytesIO() as output:
+                    first.save(output, format="PNG")
+                    if output.tell() > max_bytes:
+                        raise ValueError("too_large")
+                    first_frame = output.getvalue()
+            index += 1
+            try:
+                image.seek(index)
+            except EOFError:
+                break
+        if first_frame is not None:
+            return InboundImage(first_frame, "image/png", first_frame=True)
+    return InboundImage(data, "image/" + fmt.lower())

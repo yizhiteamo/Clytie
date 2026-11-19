@@ -3,9 +3,11 @@
 import asyncio
 import getpass
 import json
+import sys
 
 from clytie.config import resolve_home
 from clytie.sdk.immutable import thaw
+from clytie.sdk.types import ApiResponse
 
 from .client import Client, NotRunning
 
@@ -74,7 +76,7 @@ class CLI:
         self.input, self.password_prompt = input_fn or input, password_fn or getpass.getpass
         self.prefix = False
 
-    async def request(self, method, path, data=None, query=None):
+    async def request(self, method, path, data=None, query=None, *, plugin=False):
         data = dict(data or {})
         if method == "POST" and (
             "/memory/" in path
@@ -100,7 +102,9 @@ class CLI:
         response = await self.client.request(
             method, "/api/v1" + path, json=data if method != "GET" else None, query=query
         )
-        if response.status == 428:
+        if response.status == 428 and (
+            not plugin or response.json.get("error", {}).get("code") == "confirmation_required"
+        ):
             print(response.json.get("result", {}).get("description", ""))
             source = response.json.get("result", {}).get("source_repository")
             if source is not None:
@@ -109,8 +113,15 @@ class CLI:
                 data["source_repository"] = {
                     key: source[key] for key in ("root", "repository_id", "backup_id")
                 }
-            if not self.yes and self.input("继续？[y/N] ").strip().lower() != "y":
-                return response
+            if plugin and not sys.stdin.isatty():
+                return declined()
+            if not self.yes:
+                try:
+                    approved = self.input("继续？[y/N] ").strip().lower() == "y"
+                except EOFError:
+                    approved = False
+                if not approved:
+                    return declined() if plugin else response
             data["confirm"] = True
             response = await self.client.request(method, "/api/v1" + path, json=data, query=query)
         if (
@@ -281,7 +292,7 @@ async def execute(args, client=None):
         )
     if command == "plugin":
         if args.action not in {"list", "enable", "disable", "uninstall"}:
-            return await plugin_command(args, cli.client)
+            return await plugin_command(args, cli)
         path = f"/companions/{args.cid}/plugins"
         if args.action == "list":
             return await cli.request("GET", path)
@@ -307,7 +318,6 @@ async def execute(args, client=None):
                 results.append(response)
         if len(results) == 1:
             return results[0]
-        from clytie.sdk.types import ApiResponse
 
         return ApiResponse(
             status=404,
@@ -390,14 +400,32 @@ async def execute(args, client=None):
     raise ValueError("未知命令")
 
 
-async def plugin_command(args, client):
+def declined():
+    return ApiResponse(status=428, json={"ok": False, "error": {"code": "confirmation_declined"}})
+
+
+class PluginCommandClient:
+    def __init__(self, cli):
+        self._cli = cli
+
+    async def request(self, method, path, *, json=None, query=None):
+        if json is not None and "confirm" in json:
+            return ApiResponse(
+                status=400, json={"ok": False, "error": {"code": "confirm_not_allowed"}}
+            )
+        if not path.startswith("/api/v1/"):
+            raise ValueError("invalid API path")
+        return await self._cli.request(method, path[len("/api/v1") :], json, query, plugin=True)
+
+
+async def plugin_command(args, cli):
     from jsonschema import ValidationError, validate
 
     from clytie.config import load_home, repository_root
     from clytie.plugin_host.manifests import discover
-    from clytie.sdk.types import ApiResponse
     from clytie.supervisor.common import read
 
+    client = cli.client
     pid = args.action
     report = load_home(client.home)
     excluded = read(client.home / "plugins/.host/uninstalled.json", [])
@@ -431,7 +459,7 @@ async def plugin_command(args, client):
     from clytie.plugin_host import PluginHost
 
     cls, _ = PluginHost(repository_root(), client.home, clock=SystemClock())._load_class(manifest)
-    code = await getattr(cls(), declaration["handler"])(values, client)
+    code = await getattr(cls(), declaration["handler"])(values, PluginCommandClient(cli))
     return ApiResponse(status=200, json={"ok": code == 0, "result": {"exit_code": code}})
 
 

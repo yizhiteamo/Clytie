@@ -156,16 +156,6 @@ async def companion_operation(runtime, op, args):
         return [dict(r.declaration) for r in host.registrations(cid, "webui_panel")]
     if op == "config_proposal":
         pid = args["pid"]
-        if pid is None:
-            legacy = {
-                r.plugin_id
-                for r in host.registrations(cid, "api_route")
-                if r.declaration["method"] == "GET"
-                and r.declaration["path"] == f"/plugins/{r.plugin_id}/emoji/status"
-            }
-            if len(legacy) != 1:
-                raise APIError("plugin_unavailable", 409)
-            pid = legacy.pop()
         if not host.is_active(cid, pid):
             raise APIError("plugin_unavailable", 404)
         layouts = host.unit_configs.get((cid, pid), [])
@@ -198,9 +188,7 @@ async def companion_operation(runtime, op, args):
         )
         body = response["json"]
         if response["status"] != 200:
-            raise APIError(
-                "capture_incomplete" if args["pid"] is None else "proposal_unavailable", 409
-            )
+            raise APIError("proposal_unavailable", 409)
         if (
             not isinstance(body, dict)
             or set(body) != {"changes"}

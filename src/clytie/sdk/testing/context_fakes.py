@@ -289,6 +289,10 @@ class FakeApiClient:
     async def request(self, method, path, *, json=None, query=None):
         if not path.startswith("/api/v1/"):
             raise ValueError("API path must start with /api/v1/")
+        if json is not None and "confirm" in json:
+            return ApiResponse(
+                status=400, json={"ok": False, "error": {"code": "confirm_not_allowed"}}
+            )
         body, query = json_copy(json), json_copy(query)
         await self.clock.sleep(0)
         self.requests.append((method, path, body, query))

@@ -228,3 +228,9 @@ async def test_active_tool_can_propose_only_for_explicit_tool_binding(tmp_path, 
     with pytest.raises(APIError, match="config_not_writable"):
         writer.save_proposal(cid, **proposal)
     assert path.read_bytes() == before
+
+
+def test_plugin_patch_rejects_null_map():
+    with pytest.raises(APIError) as caught:
+        patch_source("plugins: {}\n", {"plugins": None})
+    assert caught.value.code == "config_not_writable"
