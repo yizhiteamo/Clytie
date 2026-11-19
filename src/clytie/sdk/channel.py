@@ -10,9 +10,10 @@ from .types import ChannelFeatures, DeliveryIntent, EventEnvelope, Receipt
 
 @runtime_checkable
 class Channel(Protocol):
-    """supports_membership 为真时，另提供 async is_member(conversation_id, actor_id)。
+    """supports_membership 为真时，另提供 async is_member(conversation_id, actor_id) -> bool | None。
 
-    返回 bool 或 None；可选方法不加入 Protocol 的必需成员，保持旧平台兼容。
+    supports_media_fetch 为真时，另提供 async fetch_media(part: MediaPart, cancel) -> MediaContent。
+    两个方法均为可选扩展，原有平台可以继续实现基础协议。
     """
 
     async def connect(self) -> None: ...

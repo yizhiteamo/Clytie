@@ -81,6 +81,7 @@ async def test_context_build_uses_owner_snapshot_and_calls_host_on_loop(storage)
         return []
 
     agent = SimpleNamespace(
+        features=SimpleNamespace(supports_images=False),
         ledger=ledger,
         clock=clock,
         config={},

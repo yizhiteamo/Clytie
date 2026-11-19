@@ -123,7 +123,7 @@ class PluginHost(MigrationMixin):
         self.accounts = {}
 
         def resolve_backends(cid, pid):
-            bound = self.asset_store.bind(cid)
+            bound = self.asset_store.bind(cid, pid)
             result = {
                 "assets": bound,
                 "asset_writer": bound,

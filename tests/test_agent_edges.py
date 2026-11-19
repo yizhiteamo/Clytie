@@ -17,6 +17,7 @@ async def test_a31_migration_retains_messages_and_initializes_fields(tmp_path):
     agent, _, _ = await make_agent(tmp_path)
     e = event(agent)
     agent.ledger.claim_inbound(e)
+    agent.ledger.db.execute("DROP TABLE inbound_media")
     agent.ledger.db.execute("PRAGMA user_version=1")
     clock = agent.clock
     await finish(agent)

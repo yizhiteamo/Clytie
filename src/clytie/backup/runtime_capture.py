@@ -557,6 +557,11 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                                         "audit",
                                     ]
                                 )
+                                if (
+                                    kind == "ledger"
+                                    and db.execute("PRAGMA user_version").fetchone()[0] >= 3
+                                ):
+                                    tables.append("inbound_media")
                                 for table in tables:
                                     for row in db.execute(f'SELECT data FROM "{table}"'):
                                         check()

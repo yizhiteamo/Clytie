@@ -11,13 +11,35 @@ import yaml
 from clytie.sdk.smoke import SmokeDriverError, SmokeReply
 from clytie.sdk.testing import MockClock
 from clytie.sdk.types import ApiResponse
-from clytie.smoke.config import ConfiguredSecrets, SmokeError
+from clytie.smoke.config import ConfiguredSecrets, SmokeError, case_image
 from clytie.smoke.runner import load_driver, run
 
 
 def save(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+
+async def test_smoke_image_sent_by_driver_requires_visual_confirmation(tmp_path):
+    scenario = Scenario(tmp_path, "input_image")
+    scenario.fixture_image = b"\x89PNG\r\n\x1a\nsynthetic smoke fixture"
+    (tmp_path / "smoke/picture.png").write_bytes(scenario.fixture_image)
+    cases = tmp_path / "smoke/cases.yaml"
+    value = yaml.safe_load(cases.read_bytes())
+    for case in value["cases"]:
+        case["image"] = "picture.png"
+    save(cases, value)
+    report = await scenario.execute()
+    assert report["result"] == "passed" and len(scenario.sent) == 2
+    assert all(c["image_visual_check"] and c["visual_confirmed"] for c in report["cases"])
+
+
+def test_smoke_image_rejects_path_escape_and_nonimage(tmp_path):
+    (tmp_path / "smoke").mkdir()
+    (tmp_path / "smoke/not-image").write_bytes(b"fictional text")
+    for name in ("../outside", "not-image"):
+        with pytest.raises(SmokeError, match="invalid_image"):
+            case_image(tmp_path, {"image": name})
 
 
 class Scenario:
@@ -126,10 +148,18 @@ class Scenario:
                         members.append("outsider")
                     return [{"user_id": i} for i in members]
                 assert action == "send_group_msg" and params["group_id"] == scenario.group
-                assert params["message"] == [
+                expected_parts = [
                     {"type": "at", "data": {"qq": scenario.bot}},
                     {"type": "text", "data": {"text": scenario.text}},
                 ]
+                if name == "input_image":
+                    import base64
+
+                    encoded = base64.b64encode(scenario.fixture_image).decode("ascii")
+                    expected_parts.append(
+                        {"type": "image", "data": {"file": "base64://" + encoded}}
+                    )
+                assert params["message"] == expected_parts
                 scenario.sent.append(action)
                 n = len(scenario.sent)
                 mid = f"synthetic-in-{n}"

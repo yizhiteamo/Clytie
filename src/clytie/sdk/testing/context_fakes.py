@@ -347,7 +347,15 @@ class FakeHttp:
         self.response = response or HttpResponse(status=200, headers={}, body=b"fictional")
 
     async def request(
-        self, method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 * 1024 * 1024
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout_s=30,
+        max_bytes=20 * 1024 * 1024,
+        follow_redirects: bool = True,
     ):
         if len(self.response.body) > max_bytes:
             raise ValueError("response exceeds max_bytes")

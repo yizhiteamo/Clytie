@@ -415,6 +415,14 @@
       },
       "additionalProperties": false
     },
+    "vision": {
+      "type": "object",
+      "properties": {
+        "max_images": {"type": "integer", "minimum": 1, "default": 30},
+        "max_image_bytes": {"type": "integer", "minimum": 1, "description": "单张入站图片的字节上限，默认 20 MiB。"}
+      },
+      "additionalProperties": false
+    },
     "context": {
       "type": "object",
       "properties": {

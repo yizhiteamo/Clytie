@@ -131,13 +131,22 @@ class Driver:
         require(login in self.target.tester_accounts and login in actual, "account_mismatch")
         return len(actual), self.target.tester_accounts.index(login) + 1
 
-    async def send(self, case):
+    async def send(self, case, image=None):
         parts = (
             [{"type": "at", "data": {"qq": self.target.companion_account}}]
             if case.get("mention", True)
             else []
         )
         parts.append({"type": "text", "data": {"text": case["text"]}})
+        if image is not None:
+            import base64
+
+            parts.append(
+                {
+                    "type": "image",
+                    "data": {"file": "base64://" + base64.b64encode(image).decode("ascii")},
+                }
+            )
         self.pending.clear()
         response = await self.rpc(
             "send_group_msg", {"group_id": self.target.conversation, "message": parts}

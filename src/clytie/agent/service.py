@@ -34,8 +34,10 @@ from clytie.sdk.types import (
 from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
 from .context import Context, message
+from .image_context import ImageContext, view_tool
 from .persona import Persona
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
+from .vision import ImageFetcher
 
 REASONS = {
     "permission": "对方没有使用这个能力的权限",
@@ -131,6 +133,11 @@ class Agent:
             config.get("protection", {}), kernel.emit, config["model"]["plugin"]
         )
         self.context = Context(self)
+        self.image_fetcher = ImageFetcher(
+            self.clock, config.get("vision", {}).get("max_image_bytes", 20 * 1024 * 1024)
+        )
+        self.media_jobs = {}
+        self.image_publication = asyncio.Lock()
         from clytie.memory.context import MemoryContext
 
         self.memory = MemoryContext(
@@ -170,20 +177,28 @@ class Agent:
                     "message": "",
                 },
             )
-        if self.model_registration is None:
-            result = await getattr(self.model, method)(*args)
-        else:
-            reg = self.model_registration
-            result = await self.host.invoke(
-                self.cid,
-                reg.plugin_id,
-                "model",
-                reg.key,
-                *args,
-                method=method,
-                scene=scene,
-                conversation_id=conversation_id,
-            )
+        from clytie.assets.store import model_image_access
+
+        selected = (
+            [p.asset for m in args[0].messages for p in m.parts if p.type == "image" and p.asset]
+            if method == "generate"
+            else []
+        )
+        with model_image_access(self.cid, self.config["model"]["plugin"], selected):
+            if self.model_registration is None:
+                result = await getattr(self.model, method)(*args)
+            else:
+                reg = self.model_registration
+                result = await self.host.invoke(
+                    self.cid,
+                    reg.plugin_id,
+                    "model",
+                    reg.key,
+                    *args,
+                    method=method,
+                    scene=scene,
+                    conversation_id=conversation_id,
+                )
         if method == "generate":
             self.model_error_code = result.error.code if result.error else None
             if self.model_error_code == "auth_invalid":
@@ -236,6 +251,30 @@ class Agent:
         self.background.add(task)
         task.add_done_callback(self.background.discard)
         return task
+
+    async def _fetch_image(self, channel, part, key, index):
+        status, image = await self.image_fetcher.fetch(channel, part)
+        asset = None
+        if image is not None:
+            try:
+                async with self.image_publication:
+                    asset = await self.host.asset_store.put(
+                        self.cid, image.data, image.media_type, "inbound_media", inbound_only=True
+                    )
+                    asset = asset.model_copy(
+                        update={"origin": "inbound_media", "media_type": image.media_type}
+                    )
+            except Exception:
+                status = "failed"
+        await run_sync(
+            self.ledger,
+            self.ledger.update_media,
+            key,
+            index,
+            status,
+            asset,
+            first_frame=bool(asset and image.first_frame),
+        )
 
     def declarations(self):
         result = {}
@@ -381,8 +420,19 @@ class Agent:
             raise ValueError("wrong companion")
         if not await self.admission.accept_checked(event):
             return None
+        images = {}
+        if event.message:
+            parts = list(event.message.parts)
+            for i, part in enumerate(parts):
+                if part.type == "image":
+                    images[i] = part
+                    parts[i] = part.model_copy(update={"asset": None, "raw_ref": None})
+            if images:
+                event = event.model_copy(
+                    update={"message": event.message.model_copy(update={"parts": parts})}
+                )
         finalization = OwnedFinalization(self.kernel.delivery)
-        state = {"accepted": False, "handed": False}
+        state = {"accepted": False, "handed": False, "images": images}
 
         async def receive_owned():
             try:
@@ -492,6 +542,14 @@ class Agent:
         if not new:
             self.kernel.duplicates += 1
             return None
+        channel = self.kernel.delivery.channels.get(event.channel_id)
+        for index, part in state.get("images", {}).items():
+            if channel is not None and channel.features().supports_media_fetch:
+                await finalization.persist(self.ledger.update_media, key, index, "pending")
+                job = self.track(self._fetch_image(channel, part, key, index))
+                media_key = (key, index)
+                self.media_jobs[media_key] = job
+                job.add_done_callback(lambda _, k=media_key: self.media_jobs.pop(k, None))
         if hasattr(self, "recollector"):
             self.recollector.activity(event.conversation)
         if not event.message:
@@ -735,6 +793,10 @@ class Agent:
                 plugin=self.config["model"]["plugin"],
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
+                image_count=sum(p.type == "image" for m in messages for p in m.parts),
+                image_bytes=sum(
+                    p.asset.size for m in messages for p in m.parts if p.type == "image" and p.asset
+                ),
                 finish=result.finish,
                 timing=timing,
             )
@@ -845,6 +907,17 @@ class Agent:
         self.kernel.record_tasks[trace] = asyncio.current_task()
         try:
             assets, dialogue, rounds = [], [], 0
+            picked = []
+            ids = {e.event_id for e in events}
+            pending = [task for (key, _), task in self.media_jobs.items() if key in ids]
+            if pending:
+                timer = asyncio.create_task(self.clock.sleep(15))
+                complete = asyncio.gather(*pending, return_exceptions=True)
+                try:
+                    await asyncio.wait((timer, complete), return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    timer.cancel()
+                    await asyncio.gather(timer, return_exceptions=True)
             if direct is not None:
                 record = await self.kernel.persist(trace, self.ledger.get, "record", trace)
                 intents = [self.intent(record, [part], kind="proactive") for part in direct]
@@ -854,6 +927,8 @@ class Agent:
                 token.raise_if_cancelled()
                 specs, states = await self.tools(conversation, actor, proactive)
                 exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
+                images = ImageContext(self.config.get("vision", {}).get("max_images", 30))
+                images.picked = picked
                 context = await self.context.build(
                     conversation,
                     actor,
@@ -863,11 +938,22 @@ class Agent:
                     extra=extra,
                     proactive=proactive,
                     memory_trace=trace,
+                    images=images,
                 )
+                request_messages = [*context, *dialogue]
+                images.apply(request_messages)
+                view = view_tool(images.limit)
+                if (
+                    images.available()
+                    and self.features.supports_tools
+                    and not proactive
+                    and self.scope_allows(actor, view.name, conversation)
+                ):
+                    specs.append(view)
                 if exhausted:
-                    context.append(message("system", "工具轮数已用完，请直接回复"))
+                    request_messages.append(message("system", "工具轮数已用完，请直接回复"))
                 turn = await self.generate(
-                    trace, [*context, *dialogue], [] if exhausted else specs, conversation, token
+                    trace, request_messages, [] if exhausted else specs, conversation, token
                 )
                 if turn.finish == "cancelled":
                     token.cancel("model_cancelled")
@@ -895,7 +981,24 @@ class Agent:
                 )
                 for call in turn.tool_calls:
                     token.raise_if_cancelled()
-                    result = await self.execute(trace, conversation, actor, call, specs, token)
+                    if call.tool == view.name and view in specs:
+                        numbers = call.arguments.get("numbers")
+                        ok = set(call.arguments) == {"numbers"} and images.choose(numbers)
+                        if ok:
+                            picked = images.next_picks
+                        await self.kernel.persist(
+                            trace, self._audit_image_numbers, trace, numbers if ok else []
+                        )
+                        result = ToolResult(
+                            data={},
+                            call_id=call.call_id,
+                            status="ok" if ok else "error",
+                            content="已附上 " + "、".join(f"#{n}" for n in numbers)
+                            if ok
+                            else "图片编号无效",
+                        )
+                    else:
+                        result = await self.execute(trace, conversation, actor, call, specs, token)
                     if result.status == "ok":
                         assets.extend(result.assets)
                     content = result.content
@@ -1089,6 +1192,12 @@ class Agent:
             )
         return result
 
+    def _audit_image_numbers(self, trace, numbers):
+        with self.ledger.transaction():
+            self.ledger.audit(
+                "core.tool", trace_id=trace, tool="core_view_image", numbers=list(numbers)
+            )
+
     def intent(self, record, parts, *, kind="reply", **kwargs):
         return DeliveryIntent(
             intent_id=uuid4().hex,
@@ -1127,9 +1236,17 @@ class Agent:
         hits = await self.outbound.check(text_parts(draft.parts), conversation.scene)
         if hits and not fallback:
             specs, states = await self.tools(conversation, actor, proactive)
+            images = ImageContext(self.config.get("vision", {}).get("max_images", 30))
             context = await self.context.build(
-                conversation, actor, events, states, proactive=proactive, memory_trace=trace
+                conversation,
+                actor,
+                events,
+                states,
+                proactive=proactive,
+                memory_trace=trace,
+                images=images,
             )
+            images.apply(context)
             context.append(
                 message(
                     "system",
@@ -1319,3 +1436,7 @@ class Agent:
             await asyncio.gather(*tuple(self.intake_tasks), return_exceptions=True)
         await self.kernel.queue.drain()
         await self.kernel.reactions.drain()
+        if self.media_jobs:
+            await asyncio.gather(*tuple(self.media_jobs.values()), return_exceptions=True)
+        if self.image_fetcher.workers:
+            await asyncio.gather(*tuple(self.image_fetcher.workers), return_exceptions=True)

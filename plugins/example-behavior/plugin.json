@@ -6,7 +6,7 @@
   "category": "behavior",
   "version": "0.2.0",
   "requires": {
-    "sdk": ">=0.7,<0.14"
+    "sdk": ">=0.7,<0.15"
   },
   "entry": "plugin:Plugin",
   "priority": 100,

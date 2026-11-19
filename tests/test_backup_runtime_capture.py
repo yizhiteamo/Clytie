@@ -33,7 +33,7 @@ async def test_online_capture_uses_existing_owners_and_returns_group_evidence(co
     assert result["group"] == "memory_ledger_progress"
     assert result["epoch"] == "test"
     assert result["members"]["memory"]["schema_version"] == 2
-    assert result["members"]["ledger"]["schema_version"] == 2
+    assert result["members"]["ledger"]["schema_version"] == 3
     assert result["requires_groups"] == ["configuration", "plugins", "assets", "management"]
     for member in result["members"].values():
         assert len(member["sha256"]) == 64
