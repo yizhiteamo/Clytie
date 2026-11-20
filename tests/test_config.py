@@ -462,3 +462,13 @@ def test_conversation_identity_includes_kind_and_rejects_exact_duplicates(tmp_pa
     assert not report.valid
     assert "duplicate_group" in str(report.errors)
     assert "clytie.local.yaml" in str(report.errors)
+
+
+@pytest.mark.parametrize("checkout", [True, False])
+def test_missing_default_consolidator_schema_has_named_error(tmp_path, monkeypatch, checkout):
+    from clytie import config
+
+    monkeypatch.setattr(config, "files", lambda _: tmp_path)
+    monkeypatch.setattr(config, "repository_root", lambda: tmp_path if checkout else None)
+    with pytest.raises(FileNotFoundError, match=r"companion\.schema\.json"):
+        config.default_consolidator.__wrapped__()

@@ -166,8 +166,8 @@ async def test_plugin_cli_disabled_and_uninstalled_never_load(tmp_path, monkeypa
     monkeypatch.setattr("clytie.plugin_host.manifests.discover", forbidden)
     args = SimpleNamespace(action="api-example", cid="inspect", pid="{}")
     with pytest.raises(ValueError, match="插件未启用"):
-        await plugin_command(args, FakeClient(tmp_path))
+        await plugin_command(args, CLI(FakeClient(tmp_path)))
     report.plugin_configs["companion_a"]["config"]["plugins"]["api-example"]["enabled"] = True
     write(tmp_path / "plugins/.host/uninstalled.json", ["api-example"])
     with pytest.raises(ValueError, match="插件未启用"):
-        await plugin_command(args, FakeClient(tmp_path))
+        await plugin_command(args, CLI(FakeClient(tmp_path)))

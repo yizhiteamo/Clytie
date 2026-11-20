@@ -139,6 +139,8 @@ async def assert_api_client_contract(api):
     result = await api.request("GET", "/api/v1/status", json=None, query={"mode": "fictional"})
     assert isinstance(result, ApiResponse)
     assert_roundtrip(result)
+    denied = await api.request("POST", "/api/v1/example", json={"confirm": True})
+    assert denied.json["error"]["code"] == "confirm_not_allowed"
     await rejects_async(ValueError, lambda: api.request("GET", "/outside"))
     await assert_task_cancellation(lambda: api.request("GET", "/api/v1/status"))
 

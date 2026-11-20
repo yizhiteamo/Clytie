@@ -5,6 +5,7 @@ from clytie.sdk.types import ImagePart, MediaContent, TextPart
 
 from .test_agent import event, finish, make_agent
 from .test_agent_placeholders import with_parts
+from .test_vision_image import encoded_image
 
 
 def test_context_selects_current_then_quote_then_recent_history():
@@ -51,7 +52,7 @@ async def test_unregistered_and_paused_messages_never_fetch_or_expose_private_qu
 
     async def fetch(part, cancel):
         fetched.append(part.raw_ref)
-        return MediaContent(data=b"\x89PNG\r\n\x1a\nfictional", media_type="image/png")
+        return MediaContent(data=encoded_image("PNG"), media_type="image/png")
 
     channel.fetch_media = fetch
     try:
@@ -80,7 +81,14 @@ async def test_unregistered_and_paused_messages_never_fetch_or_expose_private_qu
         await finish(agent)
 
 
-@pytest.mark.parametrize("data,expected", [(b"bad", "failed"), (b"oversize" * 10, "too_large")])
+@pytest.mark.parametrize(
+    "data,expected",
+    [
+        (b"bad", "failed"),
+        (b"oversize" * 10, "too_large"),
+        *[(encoded_image(fmt)[:24], "failed") for fmt in ("PNG", "JPEG", "WEBP")],
+    ],
+)
 async def test_failed_image_gets_placeholder_and_reply(tmp_path, data, expected):
     agent, channel, model = await make_agent(tmp_path, changes={"vision": {"max_image_bytes": 32}})
     features = channel.features().model_copy(update={"supports_media_fetch": True})
@@ -135,7 +143,10 @@ async def test_view_more_images_reselects_within_each_request(tmp_path, calls, s
 
     async def fetch(part, cancel):
         return MediaContent(
-            data=b"\x89PNG\r\n\x1a\n" + part.raw_ref.encode(), media_type="image/png"
+            data=encoded_image(
+                "PNG", color={"first": "red", "next": "blue", "last": "yellow"}[part.raw_ref]
+            ),
+            media_type="image/png",
         )
 
     channel.fetch_media = fetch
@@ -233,7 +244,7 @@ async def test_inbound_source_isolation_and_retention(tmp_path, product_first):
     agent.features = agent.features.model_copy(update={"supports_images": True})
     features = channel.features().model_copy(update={"supports_media_fetch": True})
     channel.features = lambda: features
-    data = b"\x89PNG\r\n\x1a\nfictional"
+    data = encoded_image("PNG")
     store = agent.host.asset_store
     tool = store.bind(agent.cid, "fictional-tool")
     viewer = store.bind(agent.cid, agent.config["model"]["plugin"])
@@ -283,5 +294,27 @@ async def test_inbound_source_isolation_and_retention(tmp_path, product_first):
         agent.ledger.expire_content(0)
         assert agent.ledger.rows("inbound_media") == []
         assert await tool.read(asset_id) == data
+    finally:
+        await finish(agent)
+
+
+async def test_animated_webp_attaches_only_first_frame_with_label(tmp_path):
+    agent, channel, model = await make_agent(tmp_path)
+    agent.features = agent.features.model_copy(update={"supports_images": True})
+    features = channel.features().model_copy(update={"supports_media_fetch": True})
+    channel.features = lambda: features
+
+    async def fetch(part, cancel):
+        return MediaContent(data=encoded_image("WEBP", animated=True), media_type="image/jpeg")
+
+    channel.fetch_media = fetch
+    try:
+        await agent.receive(with_parts(event(agent), [ImagePart(raw_ref="synthetic")]))
+        await agent.drain()
+        parts = [p for m in model.requests[0].messages for p in m.parts]
+        (attached,) = [p.asset for p in parts if p.type == "image"]
+        assert attached.media_type == "image/png"
+        assert any("只看到第一帧" in p.text for p in parts if p.type == "text")
+        assert channel.sent
     finally:
         await finish(agent)

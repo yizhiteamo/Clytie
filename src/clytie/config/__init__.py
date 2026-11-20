@@ -184,7 +184,10 @@ def repository_root() -> Path | None:
 def default_consolidator() -> str:
     schema = files("clytie").joinpath("schemas", "companion.schema.json")
     if not schema.is_file():
-        schema = repository_root() / "schemas" / "companion.schema.json"
+        root = repository_root()
+        if root is None or not (root / "schemas" / "companion.schema.json").is_file():
+            raise FileNotFoundError("default consolidator requires companion.schema.json")
+        schema = root / "schemas" / "companion.schema.json"
     properties = json.loads(schema.read_text(encoding="utf-8"))["properties"]
     return properties["memory"]["properties"]["recollect"]["properties"]["consolidator"]["default"]
 

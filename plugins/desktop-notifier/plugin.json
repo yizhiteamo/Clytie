@@ -6,7 +6,7 @@
   "category": "notifier",
   "version": "0.2.0",
   "requires": {
-    "sdk": ">=0.7,<0.15"
+    "sdk": ">=0.7,<0.16"
   },
   "entry": "plugin:Plugin",
   "priority": 100,

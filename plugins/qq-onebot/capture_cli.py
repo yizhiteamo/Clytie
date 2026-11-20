@@ -1,7 +1,5 @@
 """Interactive presentation of a capture session over the local API."""
 
-import asyncio
-
 
 async def capture(args, api):
     prefix = f"/api/v1/companions/{args['companion']}/plugins/qq-onebot/"
@@ -31,13 +29,7 @@ async def capture(args, api):
             return 1
         for label, number in zip(("接单", "执行中", "完成", "失败"), value["ids"]):
             print(label + "：" + number)
-        answer = await asyncio.to_thread(input, "确认保存以上编号？[y/N] ")
-        if answer.strip().lower() != "y":
-            print("已取消保存。")
-            return 0
-        response = await api.request(
-            "POST", prefix + "config/apply", json={"session": session, "confirm": True}
-        )
+        response = await api.request("POST", prefix + "config/apply", json={"session": session})
         if not response.json["ok"]:
             print("保存失败。", response.json["error"]["code"])
             return 1

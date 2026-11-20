@@ -23,7 +23,7 @@ def test_capture_only_saves_after_complete_and_confirmation(
     session = "fictional"
 
     async def request(method, path, *, json=None, query=None):
-        calls.append((method, path, json))
+        calls.append((method, path, dict(json) if json is not None else None))
         if path == "/api/v1/status":
             value = {}
         elif path == prefix + "emoji/start":
@@ -33,6 +33,16 @@ def test_capture_only_saves_after_complete_and_confirmation(
             assert query == {"session": session, "wait": "1"}
             value = {"state": state, "ids": ["1", "2", "3", "4"]}
         elif path == prefix + "config/apply":
+            if "confirm" not in json:
+                assert json == {"session": session}
+                return ApiResponse(
+                    status=428,
+                    json={
+                        "ok": False,
+                        "error": {"code": "confirmation_required"},
+                        "result": {"description": "保存配置"},
+                    },
+                )
             assert json == {"session": session, "confirm": True}
             value = {"restart_required": True}
         else:
@@ -48,6 +58,7 @@ def test_capture_only_saves_after_complete_and_confirmation(
         plugin_configs={"companion_a": {"config": {}, "plugins": {"qq-onebot": {}}}}
     )
     monkeypatch.setattr("clytie.config.load_home", lambda _: report)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: confirmed)
     code = main(
         [
@@ -55,19 +66,19 @@ def test_capture_only_saves_after_complete_and_confirmation(
             "qq-onebot",
             "emoji-capture",
             '{"companion":"companion_a"}',
-            "--yes",
             "--home",
             str(tmp_path),
         ]
     )
-    assert code == (0 if state == "complete" else 1)
-    assert any(path.endswith("/apply") for _, path, _ in calls) == saved
+    assert code == (0 if saved else 1)
+    assert sum(
+        1 for _, path, body in calls if path.endswith("/apply") and body.get("confirm")
+    ) == int(saved)
     assert calls[-1][1].endswith("/cancel")
     assert "请在一条没有其他表情的消息上添加" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monkeypatch, legacy):
+async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monkeypatch):
     import json
 
     import yaml
@@ -114,7 +125,7 @@ async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monk
         )
 
     layouts = [{"role": "channel", "account": "example_bot"}]
-    routes = [registration("emoji/status"), registration("config/proposal")]
+    routes = [registration("config/proposal")]
     host = SimpleNamespace(
         registrations=lambda *_: routes,
         is_active=lambda cid, target: target == pid,
@@ -134,7 +145,9 @@ async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monk
         headers["Authorization"] = "Bearer " + server.auth.token
         async with ClientSession(timeout=ClientTimeout(total=5), headers=headers) as client:
             base = f"http://127.0.0.1:{server.port}/api/v1/companions/companion_a"
-            url = base + ("/emoji/apply" if legacy else f"/plugins/{pid}/config/apply")
+            url = base + f"/plugins/{pid}/config/apply"
+            async with client.post(base + "/emoji/apply", json={"confirm": True}) as removed:
+                assert removed.status == 404
 
             async def request(body, path=url):
                 async with client.post(path, json=body) as response:
@@ -152,7 +165,7 @@ async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monk
             assert (await request(confirmed))[1]["error"]["code"] == "plugin_invalid_response"
             del proposal["account"]
             proposal_status = 409
-            error_code = "capture_incomplete" if legacy else "proposal_unavailable"
+            error_code = "proposal_unavailable"
             assert (await request(confirmed))[1]["error"]["code"] == error_code
             proposal_status = 200
             changes["setting"] = "invalid"
@@ -164,15 +177,6 @@ async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monk
             layouts.append(layouts[0])
             assert (await request(confirmed))[1]["error"]["code"] == "config_binding_mismatch"
             layouts.pop()
-            if legacy:
-                routes.append(
-                    SimpleNamespace(
-                        plugin_id="other",
-                        declaration={"method": "GET", "path": "/plugins/other/emoji/status"},
-                    )
-                )
-                assert (await request(confirmed))[1]["error"]["code"] == "plugin_unavailable"
-                routes.pop()
             assert path.read_bytes() == original
             assert not (path.parent / "config-history").exists()
             status, body = await request(confirmed)
@@ -185,3 +189,42 @@ async def test_apply_http_requires_confirmation_and_keeps_history(tmp_path, monk
             assert history.read_bytes() == original
     finally:
         await server.close()
+
+
+async def test_plugin_client_refuses_supplied_confirmation_and_noninteractive_retry(monkeypatch):
+    from clytie.api.cli import CLI, PluginCommandClient
+
+    calls = []
+
+    async def request(method, path, **kwargs):
+        calls.append(kwargs["json"])
+        return ApiResponse(
+            status=428,
+            json={
+                "ok": False,
+                "error": {"code": "confirmation_required"},
+                "result": {"description": "保存配置"},
+            },
+        )
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    cli = CLI(SimpleNamespace(request=request), yes=True)
+    cli.prefix = True
+    client = PluginCommandClient(cli)
+    for supplied in (True, False, None):
+        reply = await client.request("POST", "/api/v1/test", json={"confirm": supplied})
+        assert reply.json["error"]["code"] == "confirm_not_allowed"
+    assert not calls
+    reply = await client.request("POST", "/api/v1/test", json={})
+    assert reply.json["error"]["code"] == "confirmation_declined"
+    assert calls == [{}]
+
+
+def test_null_plugins_rejects_bound_config_proposal():
+    from clytie.api.auth import APIError
+    from clytie.api.config_write import proposal_source
+
+    source = "plugins:\nchannels:\n  - plugin: fake-channel\n    account: example_bot\n"
+    with pytest.raises(APIError) as caught:
+        proposal_source(source, "fake-channel", "example_bot", {"setting": 7})
+    assert caught.value.code == "config_not_writable"

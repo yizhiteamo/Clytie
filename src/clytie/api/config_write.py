@@ -58,7 +58,10 @@ def patch_source(source, patch):
     edits = []
     missing = []
     plugins = children(root["plugins"]) if "plugins" in root else {}
-    for pid, fields in patch.get("plugins", {}).items():
+    updates = patch.get("plugins", {})
+    if not isinstance(updates, dict):
+        raise APIError("config_not_writable")
+    for pid, fields in updates.items():
         identifier(pid)
         if set(fields) != {"enabled"} or not isinstance(fields["enabled"], bool):
             raise APIError("config_not_writable")
@@ -192,12 +195,15 @@ def proposal_source(source, pid, account, changes):
     else:
         update(config, changes)
     expected = pyyaml.safe_load(source)
+    plugins = expected.get("plugins", {})
+    if not isinstance(plugins, dict) or not isinstance(plugins.get(pid, {}), dict):
+        raise APIError("config_not_writable")
     target = (
-        expected["plugins"][pid]
+        plugins[pid]
         if account is None
         else next(entry for entry in expected["channels"] if entry["plugin"] == pid)
     )
-    if expected.get("plugins", {}).get(pid, {}).get("enabled") is False:
+    if plugins.get(pid, {}).get("enabled") is False:
         raise APIError("config_binding_mismatch", 409)
     target.setdefault("config", {}).update(changes)
     for start, end, text in sorted(edits, reverse=True):

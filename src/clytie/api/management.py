@@ -19,7 +19,6 @@ from .management_workers import Workers
 from .operations import load_plan
 
 CONFIG_APPLY = "/companions/<cid>/plugins/<pid>/config/apply"
-LEGACY_APPLY = "/companions/<cid>/emoji/apply"
 
 
 class Management:
@@ -328,7 +327,7 @@ class Management:
                 description += (
                     "；" + ", ".join(plan["stopped_companions"]) + " 下次启动时这个插件不会加载"
                 )
-        if route in {CONFIG_APPLY, LEGACY_APPLY}:
+        if route == CONFIG_APPLY:
             confirm = True
             description = "保存插件提议的配置并保留历史，重启伴侣后生效。"
         return confirm, needs_password, description
@@ -887,7 +886,7 @@ class Management:
                 for a, r in state["actors"].items()
                 if r.get("until") and datetime.fromisoformat(r["until"]) > self.clock.now()
             ]
-        if route in {CONFIG_APPLY, LEGACY_APPLY}:
+        if route == CONFIG_APPLY:
             if (
                 set(data) != {"session"}
                 or not isinstance(data["session"], str)
@@ -898,7 +897,7 @@ class Management:
                 raise APIError("companion_not_running", 409)
             async with self.serial:
                 proposal = await self.transfer(
-                    cid, "config_proposal", {"pid": params.get("pid"), "session": data["session"]}
+                    cid, "config_proposal", {"pid": params["pid"], "session": data["session"]}
                 )
                 result = await asyncio.to_thread(
                     self.writer.save_proposal,
