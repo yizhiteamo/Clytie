@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from clytie.agent.appearance import Appearance
 from clytie.agent.context import Context
 from clytie.agent.policy import Boundary
 from clytie.backup.coordination import run_sync
@@ -82,6 +83,7 @@ async def test_context_build_uses_owner_snapshot_and_calls_host_on_loop(storage)
 
     agent = SimpleNamespace(
         features=SimpleNamespace(supports_images=False),
+        appearance=Appearance(),
         ledger=ledger,
         clock=clock,
         config={},
