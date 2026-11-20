@@ -273,12 +273,12 @@ class Supervisor:
                         }
                         row["warnings"] = list(msg.get("warnings", []))
                         summary = msg.get("appearance_check")
-                        row["appearance_check"] = (
-                            summary
-                            if isinstance(summary, str)
-                            and re.fullmatch(r"通过|失败|跳过|有 [1-9][0-9]* 条提示", summary)
-                            else None
-                        )
+                        if isinstance(summary, str) and re.fullmatch(
+                            r"通过|失败|跳过|有 [1-9][0-9]* 条提示", summary
+                        ):
+                            row["appearance_check"] = summary
+                        else:
+                            row.pop("appearance_check", None)
                         row["quota"] = msg.get("quota", "unknown")
                         if (
                             row["phase"] == "running"

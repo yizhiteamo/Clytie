@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from clytie.kernel.ledger import TABLES
 from clytie.sdk.testing import MockClock
 from clytie.sdk.types import ImagePart, MediaContent, ModelTurn
 from clytie.supervisor.companion import Companion
+from clytie.supervisor.entry import run as supervisor_command
 
 from .test_agent import ScriptModel, event, finish, make_agent
 from .test_agent_placeholders import with_parts
@@ -47,6 +49,19 @@ def set_description(tmp_path, text):
     path.write_text(text, encoding="utf-8")
 
 
+def single_reference(tmp_path):
+    files = AppearanceFiles(tmp_path, "companion_a", MockClock())
+    files.change(
+        "add", {"content": base64.b64encode(encoded_image("PNG")).decode(), "label": "虚构"}
+    )
+    return files
+
+
+ONE_OBSERVATION = json.dumps(
+    [{"description": "fictional", "conflict": "", "photo": False, "different": False}]
+)
+
+
 def health(agent):
     companion = Companion(agent.host.home, agent.cid, agent.clock, host=agent.host)
     companion.agent, companion.kernel = agent, agent.kernel
@@ -73,6 +88,7 @@ async def test_no_appearance_preserves_b6_request(tmp_path):
             "core_forget",
         ]
         assert agent.appearance_check_task is None
+        assert "appearance_check" not in health(agent)
     finally:
         await finish(agent)
 
@@ -229,7 +245,7 @@ async def test_running_profile_uses_prior_references_until_restart(tmp_path, mon
         await finish(agent)
 
 
-async def test_health_heartbeat_persists_only_summary_and_warning(tmp_path):
+async def test_health_heartbeat_persists_only_summary_and_warning(tmp_path, capsys):
     svc, launcher, clock = await make_supervisor(tmp_path)
     try:
         await launcher.children[0][1].heartbeat(
@@ -249,7 +265,15 @@ async def test_health_heartbeat_persists_only_summary_and_warning(tmp_path):
             appearance_check={"description": "fictional observation"}
         )
         await spin()
-        assert svc.rows["companion_0"]["appearance_check"] is None
+        assert "appearance_check" not in svc.rows["companion_0"]
+        await launcher.children[0][1].heartbeat()
+        await spin()
+        clock.advance(5)
+        await spin()
+        supervisor_command(SimpleNamespace(action="status", home=tmp_path, json=False))
+        output = capsys.readouterr().out
+        assert "companion_0" in output
+        assert "形象自检" not in output and "appearance_check" not in output
     finally:
         await svc.stop()
 
@@ -392,10 +416,11 @@ async def test_image_tools_reserve_slots_in_call_order(tmp_path, monkeypatch, or
 
 async def test_check_once_per_content_across_restarts(tmp_path, monkeypatch):
     vision_model(monkeypatch)
+    single_reference(tmp_path)
 
     async def boot(text, expected_calls):
         set_description(tmp_path, text)
-        agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": "[]"})
+        agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": ONE_OBSERVATION})
         try:
             await agent.appearance_check_task
             assert len(model.requests) == expected_calls
@@ -418,6 +443,7 @@ async def test_check_once_per_content_across_restarts(tmp_path, monkeypatch):
 )
 async def test_failed_check_retries_only_on_next_start(tmp_path, monkeypatch, failure):
     vision_model(monkeypatch)
+    single_reference(tmp_path)
     set_description(tmp_path, "fictional scarf")
     agent, _, model = await make_agent(tmp_path, failure)
     try:
@@ -428,11 +454,50 @@ async def test_failed_check_retries_only_on_next_start(tmp_path, monkeypatch, fa
         assert health(agent)["appearance_check"] == "失败"
     finally:
         await finish(agent)
-    agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": "[]"})
+    agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": ONE_OBSERVATION})
     try:
         await agent.appearance_check_task
         assert len(model.requests) == 1
         assert health(agent)["appearance_check"] == "通过"
+    finally:
+        await finish(agent)
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "expected"),
+    [
+        ("```json\n{}\n```", "passed"),
+        ("```\r\n{}\r\n```", "passed"),
+        ("preface\n```json\n{}\n```", "check_failed"),
+        ("```json\n{}\n```\nafterword", "check_failed"),
+        ("```python\n{}\n```", "check_failed"),
+    ],
+)
+async def test_check_accepts_only_whole_json_fences(tmp_path, monkeypatch, wrapper, expected):
+    files = single_reference(tmp_path)
+    vision_model(monkeypatch)
+    agent, _, model = await make_agent(
+        tmp_path, {"finish": "stop", "text": wrapper.format(ONE_OBSERVATION)}
+    )
+    try:
+        await agent.appearance_check_task
+        assert files.show()["self_check"]["state"] == expected
+        (request,) = model.requests
+        assert "只输出 JSON，不加代码块和其他文字" in request.messages[0].parts[0].text
+    finally:
+        await finish(agent)
+
+
+async def test_description_without_references_skips_model(tmp_path, monkeypatch):
+    set_description(tmp_path, "fictional scarf")
+    vision_model(monkeypatch)
+    agent, _, model = await make_agent(tmp_path)
+    try:
+        await agent.appearance_check_task
+        assert not model.requests
+        result = AppearanceFiles(tmp_path, agent.cid, agent.clock).show()["self_check"]
+        assert result == {"state": "skipped", "reason": "no_references", "unchecked": []}
+        assert health(agent)["appearance_check"] == "跳过"
     finally:
         await finish(agent)
 

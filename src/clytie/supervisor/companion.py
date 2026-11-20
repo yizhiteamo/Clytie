@@ -201,11 +201,10 @@ class Companion:
             pid = channel_plugins.get(key, key)
             if priority[state] >= priority[states.get(pid, "unknown")]:
                 states[pid] = state
-        return dict(
+        status = dict(
             **deepcopy(self._health_data),
             channels=states,
             model=self.agent.model_health,
-            appearance_check=self.agent.appearance_summary,
             admission=self.agent.admission.status(),
             quota=(
                 [
@@ -230,6 +229,9 @@ class Companion:
             ),
             quota_exhausted=self.agent.model_error_code == "quota_exhausted",
         )
+        if self.agent.appearance_summary is not None:
+            status["appearance_check"] = self.agent.appearance_summary
+        return status
 
     async def silence(self, on):
         self.kernel.delivery.silenced = bool(on)

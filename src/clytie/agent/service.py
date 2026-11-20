@@ -122,7 +122,7 @@ class Agent:
         self.persona = Persona(persona_root, config)
         self.appearance = Appearance()
         self.appearance_warnings = []
-        self.appearance_summary = "跳过"
+        self.appearance_summary = None
         self.appearance_check_task = None
         self.actor_names = {}
         self.boundary = Boundary(
@@ -259,11 +259,11 @@ class Agent:
 
         self.recollector = Recollector(self)
         await self.recollector.start()
-        if (self.appearance.description or self.appearance.references) and self.config.get(
-            "appearance", {}
-        ).get("self_check", True):
-            self.appearance_summary = None
-            self.appearance_check_task = self.track(self_check(self, files))
+        if self.appearance.description or self.appearance.references or self.appearance_warnings:
+            if self.config.get("appearance", {}).get("self_check", True):
+                self.appearance_check_task = self.track(self_check(self, files))
+            else:
+                self.appearance_summary = "跳过"
 
     def track(self, coroutine):
         task = background(coroutine)

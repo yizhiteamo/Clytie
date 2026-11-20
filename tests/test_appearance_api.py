@@ -141,6 +141,11 @@ async def test_confirmation_respects_self_check_and_image_limit(api):
     await files.call(routes.ADD, params, data, {}, "POST")
     _, _, two = await files.policy(routes.ADD, params, data)
     assert re.search(r"约 (\d+) token", one)[1] == re.search(r"约 (\d+) token", two)[1]
+    (files.home / "companions/companion_a/persona/appearance.md").write_text(
+        "fictional scarf", encoding="utf-8"
+    )
+    _, _, removal = await files.policy(routes.ROOT + "/remove", params, {"number": 1})
+    assert "0 token" in removal and "自动调用" not in removal
     config["appearance"] = {"self_check": False}
     _, _, disabled = await files.policy(routes.ADD, params, data)
     assert "自检已关闭" in disabled and "0 token" in disabled

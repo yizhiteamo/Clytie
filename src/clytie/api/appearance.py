@@ -51,12 +51,12 @@ def confirmation(home, cid, clock, action, data, config):
     files = AppearanceFiles(home, cid, clock)
     count = len(files.manifest()["references"]) + {"add": 1, "edit": 0, "remove": -1}[action]
     attached = min(max(0, count), config.get("vision", {}).get("max_images", 30))
+    if not attached:
+        return description + "保存后没有参考图，自检预计用量为 0 token。"
     try:
         text_bytes = files.path("appearance.md").stat().st_size
     except FileNotFoundError:
         text_bytes = 0
-    if not attached and not text_bytes:
-        return description + "保存后没有形象资料，自检预计用量为 0 token。"
     # A planning estimate only. Actual image token accounting depends on the provider.
     estimate = 256 + (text_bytes + 2) // 3 + 1024 * attached
     return description + f"重启后会自动调用一次模型检查形象资料，预计用量约 {estimate} token。"
