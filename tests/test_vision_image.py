@@ -1,5 +1,6 @@
 import asyncio
 from io import BytesIO
+from random import Random
 from threading import Event
 
 import pytest
@@ -52,6 +53,51 @@ def test_gif_pixel_limit_precedes_decoding():
 def test_damaged_gif_rejected():
     with pytest.raises(ValueError, match="failed"):
         normalize_image(encoded_image("GIF", animated=False)[:-4], 4096)
+
+
+@pytest.fixture(params=["JPEG-half", "PNG-half", "PNG-crc", "WEBP-half"])
+def damaged_media(request):
+    fmt, damage = request.param.split("-")
+    size = (96, 96)
+    pixels = Random(42).randbytes(size[0] * size[1] * 3)
+    with Image.frombytes("RGB", size, pixels) as image, BytesIO() as output:
+        image.save(output, format=fmt)
+        raw = bytearray(output.getvalue())
+
+    if damage == "crc":
+        # Pillow emits one IDAT for this small RGB fixture. Flip only its checksum.
+        chunk = raw.index(b"IDAT")
+        length = int.from_bytes(raw[chunk - 4 : chunk], "big")
+        raw[chunk + 4 + length] ^= 1
+        with Image.open(BytesIO(raw), formats=[fmt]) as image:
+            assert image.tobytes() == pixels
+        with Image.open(BytesIO(raw), formats=[fmt]) as image, pytest.raises(Exception):
+            image.verify()
+    else:
+        raw = raw[: len(raw) // 2]
+        if fmt in {"JPEG", "PNG"}:
+            with Image.open(BytesIO(raw), formats=[fmt]) as image:
+                assert image.size == size
+                with pytest.raises(Exception):
+                    image.load()
+    return MediaContent(data=bytes(raw), media_type="image/" + fmt.lower())
+
+
+def test_normalize_rejects_damaged_media(damaged_media):
+    with pytest.raises(Exception):
+        normalize_image(damaged_media.data, len(damaged_media.data))
+
+
+async def test_fetch_reports_failed_for_damaged_media(damaged_media):
+    class Channel:
+        async def fetch_media(self, part, cancel):
+            return damaged_media
+
+    fetcher = vision.ImageFetcher(MockClock(), len(damaged_media.data))
+    try:
+        assert await fetcher.fetch(Channel(), None) == ("failed", None)
+    finally:
+        await asyncio.gather(*fetcher.workers)
 
 
 async def test_gif_decoder_timeout_retains_slots_until_threads_exit(monkeypatch):
