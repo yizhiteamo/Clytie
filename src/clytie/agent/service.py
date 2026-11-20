@@ -33,6 +33,7 @@ from clytie.sdk.types import (
 )
 from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
+from .appearance import VIEW, Appearance, load_appearance, reference_message, self_check
 from .context import Context, message
 from .image_context import ImageContext, view_tool
 from .persona import Persona
@@ -119,6 +120,10 @@ class Agent:
         self.model = model or self.model_registration.implementation
         self.features = self.model.features()
         self.persona = Persona(persona_root, config)
+        self.appearance = Appearance()
+        self.appearance_warnings = []
+        self.appearance_summary = None
+        self.appearance_check_task = None
         self.actor_names = {}
         self.boundary = Boundary(
             persona_root.parent / "boundary/state.json",
@@ -184,7 +189,12 @@ class Agent:
             if method == "generate"
             else []
         )
-        with model_image_access(self.cid, self.config["model"]["plugin"], selected):
+        with model_image_access(
+            self.cid,
+            self.config["model"]["plugin"],
+            selected,
+            appearance={r.asset.asset_id: r.resolved for r in self.appearance.references},
+        ):
             if self.model_registration is None:
                 result = await getattr(self.model, method)(*args)
             else:
@@ -224,8 +234,12 @@ class Agent:
             self._memory_rebuilding.add_done_callback(jobs.discard)
 
     async def start(self):
+        from clytie.appearance import AppearanceFiles
+
         if self.features.agent_type:
             raise ValueError("unsupported_model_type")
+        files = AppearanceFiles(self.host.home, self.cid, self.clock)
+        self.appearance, self.appearance_warnings = await asyncio.to_thread(load_appearance, files)
         await self.boundary.initialize()
         self.protection.update(await self.model_call("quota"))
         await self.kernel.start()
@@ -245,6 +259,11 @@ class Agent:
 
         self.recollector = Recollector(self)
         await self.recollector.start()
+        if self.appearance.description or self.appearance.references or self.appearance_warnings:
+            if self.config.get("appearance", {}).get("self_check", True):
+                self.appearance_check_task = self.track(self_check(self, files))
+            else:
+                self.appearance_summary = "跳过"
 
     def track(self, coroutine):
         task = background(coroutine)
@@ -908,6 +927,7 @@ class Agent:
         try:
             assets, dialogue, rounds = [], [], 0
             picked = []
+            selected_refs = []
             ids = {e.event_id for e in events}
             pending = [task for (key, _), task in self.media_jobs.items() if key in ids]
             if pending:
@@ -927,7 +947,8 @@ class Agent:
                 token.raise_if_cancelled()
                 specs, states = await self.tools(conversation, actor, proactive)
                 exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
-                images = ImageContext(self.config.get("vision", {}).get("max_images", 30))
+                limit = self.config.get("vision", {}).get("max_images", 30)
+                images = ImageContext(limit - len(selected_refs))
                 images.picked = picked
                 context = await self.context.build(
                     conversation,
@@ -942,7 +963,22 @@ class Agent:
                 )
                 request_messages = [*context, *dialogue]
                 images.apply(request_messages)
-                view = view_tool(images.limit)
+                if selected_refs:
+                    request_messages.append(reference_message(selected_refs))
+                selected_refs = []
+                candidates = self.appearance.dialogue_refs(limit)
+                if (
+                    candidates
+                    and images.attached
+                    and self.features.supports_tools
+                    and not proactive
+                    and self.scope_allows(actor, "core_view_image", conversation)
+                    and self.scope_allows(actor, VIEW.name, conversation)
+                ):
+                    specs.append(VIEW)
+                # Picks apply to the next request, which has the full image budget again.
+                images.limit = limit
+                view = view_tool(limit)
                 if (
                     images.available()
                     and self.features.supports_tools
@@ -981,8 +1017,28 @@ class Agent:
                 )
                 for call in turn.tool_calls:
                     token.raise_if_cancelled()
-                    if call.tool == view.name and view in specs:
+                    if call.tool == VIEW.name and VIEW in specs:
+                        valid = not call.arguments
+                        content = "这个工具没有参数"
+                        if valid:
+                            selected_refs = candidates[: limit - len(images.next_picks)]
+                            total = len(self.appearance.references)
+                            content = "已附上你的形象参考图"
+                            if not selected_refs:
+                                valid = False
+                                content = "本轮图片名额已用于点选的图片，请在下一轮对照形象。"
+                            elif len(selected_refs) < total:
+                                content = f"附上了 {total} 张参考图中的 {len(selected_refs)} 张"
+                        await self.kernel.persist(trace, self._audit_view_appearance, trace, valid)
+                        result = ToolResult(
+                            data={},
+                            call_id=call.call_id,
+                            status="ok" if valid else "error",
+                            content=content,
+                        )
+                    elif call.tool == view.name and view in specs:
                         numbers = call.arguments.get("numbers")
+                        images.limit = limit - len(selected_refs)
                         ok = set(call.arguments) == {"numbers"} and images.choose(numbers)
                         if ok:
                             picked = images.next_picks
@@ -995,6 +1051,8 @@ class Agent:
                             status="ok" if ok else "error",
                             content="已附上 " + "、".join(f"#{n}" for n in numbers)
                             if ok
+                            else "图片编号无效或本轮剩余图片名额不足"
+                            if selected_refs
                             else "图片编号无效",
                         )
                     else:
@@ -1191,6 +1249,10 @@ class Agent:
                 content="这件事已经在做了 " + str(result["task_id"]),
             )
         return result
+
+    def _audit_view_appearance(self, trace, accepted):
+        with self.ledger.transaction():
+            self.ledger.audit("core.tool", trace_id=trace, tool=VIEW.name, accepted=accepted)
 
     def _audit_image_numbers(self, trace, numbers):
         with self.ledger.transaction():

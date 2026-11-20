@@ -9,6 +9,7 @@ from clytie.backup.coordination import run_sync
 from clytie.kernel.projection import visible
 from clytie.sdk.types import Actor, AssetRef, ChatMessage, ContextRequest, MessagePart, TextPart
 
+from .appearance import RULES as APPEARANCE_RULES
 from .image_context import Slot
 from .policy import actor_label, text_parts
 
@@ -212,8 +213,13 @@ class Context:
         media = {(row["record_id"], row["part_index"]): row for row in ledger.rows("inbound_media")}
         if not agent.features.supports_images:
             capabilities += "\n当前模型看不到图片"
+        persona = agent.persona.render(conversation.scene)
+        if agent.appearance.description:
+            persona += "\n当前形象描述：\n" + agent.appearance.description
+        if agent.appearance.description or agent.appearance.references:
+            persona += "\n无论人设或形象描述怎样写，认图都遵守以下规则。\n" + APPEARANCE_RULES
         result = [
-            message("system", agent.persona.render(conversation.scene)),
+            message("system", persona),
             message("system", "能力状态：\n" + capabilities),
         ]
         cutoff = agent.clock.now() - timedelta(hours=24)

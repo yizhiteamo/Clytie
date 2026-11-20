@@ -122,19 +122,24 @@ def boundary(store, cid):
 
 
 @heavy_io
-def capture(store, cid, fixed, ids, root, *, declarations=(), check=None):
+def capture(store, cid, fixed, ids, root, *, declarations=(), appearance=None, check=None):
     files, assets, missing = [], [], []
     declared = {}
     for ref in declarations:
         if ref.asset_id in declared and ref != declared[ref.asset_id]:
             raise ValueError("asset_reference_invalid")
         declared[ref.asset_id] = ref
-    for asset_id in sorted(set(ids) | set(declared)):
+    appearance = appearance or {}
+    for asset_id in sorted(set(ids) | set(declared) | set(appearance)):
         resolved = fixed.get(asset_id)
         try:
             if resolved is None:
                 raise ValueError("asset_source_unverified")
             row = resolved.registration
+            if asset_id in appearance and (
+                row.companion_id != cid or row.size != appearance[asset_id]
+            ):
+                raise ValueError("asset_source_unverified")
             if asset_id in declared and row.ref() != declared[asset_id]:
                 raise ValueError("asset_metadata_mismatch")
             target = contained(root, Path(root) / row.path)

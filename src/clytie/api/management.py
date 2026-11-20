@@ -13,6 +13,7 @@ from clytie.plugin_host.snapshots import identifier
 from clytie.plugin_host.support import finish_cleanup, timed
 from clytie.supervisor.common import read, write
 
+from . import appearance
 from .auth import APIError, RequestNotDelivered
 from .config_write import ConfigWriter
 from .management_workers import Workers
@@ -227,6 +228,21 @@ class Management:
         cid = params.get("cid")
         if cid:
             self.check_cid(cid)
+        if route in appearance.FIELDS:
+            appearance.validate_fields(route, data)
+            if route == appearance.ROOT:
+                return False, False, ""
+            description = ""
+            if data.get("confirm") is not True:
+
+                def describe():
+                    config = self.configuration().plugin_configs[cid]["config"]
+                    return appearance.confirmation(
+                        self.home, cid, self.clock, route.rsplit("/", 1)[1], data, config
+                    )
+
+                description = await asyncio.to_thread(describe)
+            return True, True, description
         confirm = False
         needs_password = False
         description = ""
@@ -420,6 +436,10 @@ class Management:
         return hashlib.sha256(b"\0".join(p.read_bytes() for p in paths)).hexdigest()
 
     async def call(self, route, params, data, query, method):
+        if route in appearance.FIELDS:
+            return await asyncio.to_thread(
+                appearance.execute, self.home, params["cid"], self.clock, route, data
+            )
         if route == "/backup/cleanup/plans/<plan_id>":
             from clytie.backup.cleanup import CleanupService
 

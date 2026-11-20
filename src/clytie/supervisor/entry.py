@@ -665,6 +665,8 @@ def run(args):
         print(f"{health.get('undelivered', 0)} 条通知未送达")
         for cid, row in health.get("companions", {}).items():
             print(f"{cid}: {row.get('state', 'unknown')}")
+            if row.get("appearance_check"):
+                print(f"形象自检：{row['appearance_check']}")
             print(
                 f"还有 {row.get('sending', 0)} 条消息正在发送 / "
                 f"{row.get('inflight_tasks', 0)} 个任务在执行"

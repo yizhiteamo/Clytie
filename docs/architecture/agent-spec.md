@@ -72,6 +72,7 @@
 | `core_remember` / `core_forget` | 本批次说话人为主人，且本次允许工具 | 当场记、修订或撤销（memory-spec §2） |
 | `core_recall` | 本次允许工具 | 回想记忆与本会话任务（memory-spec §5.3） |
 | `core_view_image` | 模型支持图片且当前上下文有未附上的可读图片 | 按上下文编号再次附图（vision-spec §5） |
+| `core_view_appearance` | 模型支持图片，上下文已附图片，有可用形象参考图，且图片上限至少为 2 | 对照当前或旧形象，至少保留一张待对比图片（appearance-spec §7） |
 | `core_report_boundary` | 说话人不是主人、也不是同部署的伴侣时 | 登记一次越界请求（第 7.2 节） |
 
 - 本体工具的调用**不算能力调用**：不领取幂等键，不把记录升级为 task，不触发任务状态回应和任务单。调用和结果写入审计。
@@ -331,14 +332,14 @@
 
 对话主干每拿到一个模型结果，就写一条 `model.usage` 审计。复用现有 audit，不迁移账本，不新增查询接口；用量的读取和提醒放到「额度感知」里程碑。
 
-**范围**：只在 `_generate` 里记录，覆盖普通回复、工具循环的每一轮和出站改写。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
+普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
 
-**字段**：`trace_id`、`purpose`（`reply` 或 `rewrite`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
+**字段**：`trace_id`、`purpose`（`reply`、`rewrite` 或 `appearance_check`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
 
 **时点**：
 - 每个返回的 `ModelTurn` 恰好记录一次，在本体第一次拿到它的时候记。
 - 按时拿到结果（包括 `finish = error` 的结果）：在 `_generate` 拿到结果后立刻记，`timing = on_time`。之后即使记录被取消，也不再重复记录。
-- 取消或截止之后才到的结果：由现有的 `late()` 记，`timing = late`。`model.late_result` 照旧保存完整内容，它不参与用量统计，所以两者不会重复计入。
+- 取消或截止之后才到的结果记为 `timing = late`。对话的 `model.late_result` 照旧保存完整内容，不参与用量统计。形象自检的迟到结果只记用量，不保存内容。
 - 调用抛出异常、超时后也没有迟到结果：不写 `model.usage`。调用次数已经由 `record.model_calls` 记录；这种情况下平台可能已经计费，但本体不编造数字。
 
 **未知**：服务没有返回用量时，`input_tokens` / `output_tokens` 为 `null`，不写成 0。

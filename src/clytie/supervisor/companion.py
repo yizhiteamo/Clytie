@@ -188,6 +188,7 @@ class Companion:
         if not self.kernel:
             return {}
         notices = set(self.agent.boundary.warnings) | self._memory_notices
+        notices.update(self.agent.appearance_warnings)
         channel_plugins = {r.key: r.plugin_id for r in self.host.registrations(self.cid, "channel")}
         states = {}
         priority = {"unknown": 0, "online": 1, "connecting": 2, "offline": 3, "auth_invalid": 4}
@@ -200,7 +201,7 @@ class Companion:
             pid = channel_plugins.get(key, key)
             if priority[state] >= priority[states.get(pid, "unknown")]:
                 states[pid] = state
-        return dict(
+        status = dict(
             **deepcopy(self._health_data),
             channels=states,
             model=self.agent.model_health,
@@ -228,6 +229,9 @@ class Companion:
             ),
             quota_exhausted=self.agent.model_error_code == "quota_exhausted",
         )
+        if self.agent.appearance_summary is not None:
+            status["appearance_check"] = self.agent.appearance_summary
+        return status
 
     async def silence(self, on):
         self.kernel.delivery.silenced = bool(on)

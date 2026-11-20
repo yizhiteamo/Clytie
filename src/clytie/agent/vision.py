@@ -75,7 +75,10 @@ class InboundImage:
     first_frame: bool = False
 
 
-def normalize_image(data: bytes, max_bytes: int) -> InboundImage:
+REFERENCE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+
+def normalize_image(data: bytes, max_bytes: int, *, clean_png: bool = False) -> InboundImage:
     """Run in the fetch worker. Validate pixels before publishing any inbound asset."""
     if len(data) > max_bytes:
         raise ValueError("too_large")
@@ -94,19 +97,27 @@ def normalize_image(data: bytes, max_bytes: int) -> InboundImage:
         # verify checks chunk checksums; load below checks the compressed pixels.
         with Image.open(BytesIO(data), formats=[fmt]) as image:
             if image.width * image.height > MAX_IMAGE_PIXELS:
-                raise ValueError("failed")
+                raise ValueError("too_many_pixels" if clean_png else "failed")
             image.verify()
     with Image.open(BytesIO(data), formats=[fmt]) as image:
         first_frame = None
         index = 0
         while True:
             if image.width * image.height > MAX_IMAGE_PIXELS:
-                raise ValueError("failed")
+                raise ValueError("too_many_pixels" if clean_png else "failed")
             image.load()
-            if index == 0 and fmt in {"GIF", "WEBP"} and image.is_animated:
+            if index == 0:
+                animated = fmt in {"GIF", "WEBP"} and image.is_animated
+            if index == 0 and (clean_png or animated):
                 with image.convert("RGBA") as first, BytesIO() as output:
+                    if clean_png:
+                        first.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                        first.info.clear()
                     first.save(output, format="PNG")
-                    if output.tell() > max_bytes:
+                    if clean_png:
+                        # Even an incompressible 2048² RGBA image fits the model attachment budget.
+                        assert output.tell() <= REFERENCE_ATTACHMENT_BYTES, "unexpected PNG size"
+                    if not clean_png and output.tell() > max_bytes:
                         raise ValueError("too_large")
                     first_frame = output.getvalue()
             index += 1
@@ -115,5 +126,5 @@ def normalize_image(data: bytes, max_bytes: int) -> InboundImage:
             except EOFError:
                 break
         if first_frame is not None:
-            return InboundImage(first_frame, "image/png", first_frame=True)
+            return InboundImage(first_frame, "image/png", first_frame=animated)
     return InboundImage(data, "image/" + fmt.lower())

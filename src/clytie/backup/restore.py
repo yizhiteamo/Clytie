@@ -587,6 +587,7 @@ def validate_contents(root, envelope, *, repo_root=None, budgeted=False, check=N
                 membership[name] = number
         if covered != set(members):
             raise RestoreError("restore_consistency_invalid")
+        from . import appearance
         from .assets import layout
 
         permissions, _ = layout(root, envelope)
@@ -605,6 +606,7 @@ def validate_contents(root, envelope, *, repo_root=None, budgeted=False, check=N
                 or membership[entry["memory"]] != membership[entry["ledger"]]
             ):
                 raise RestoreError("restore_consistency_invalid")
+            appearance.validate_restored(root, cid, manifest["assets"], check=check)
             warnings.extend(_companion(root, entry, permissions.get(cid, set())))
         root_path = Path(repo_root or repository_root())
         seen_plugins = set()
