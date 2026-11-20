@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 from contextlib import ExitStack
@@ -20,6 +21,7 @@ from clytie.plugin_host.manifests import discover
 from clytie.plugin_host.snapshots import atomic_read, contained, identifier
 from clytie.plugin_host.support import HostLog
 
+from . import appearance
 from .configuration import config_commit_lock
 from .container import _name
 from .coordination import companion_coordinator
@@ -70,23 +72,26 @@ def _put(root, name, value):
     return _entry(root, name)
 
 
+def _file_version(value):
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
 @heavy_io
-def _copy(home, source, root, name, check):
+def _copy(home, source, root, name, check, *, expected_version=None):
     source = contained(home, source)
     target = contained(root, root / name)
     target.parent.mkdir(parents=True, exist_ok=True)
-    before = source.stat()
+    before = _file_version(source.stat())
     with source.open("rb") as incoming, target.open("xb") as outgoing:
+        if (
+            expected_version is not None
+            and _file_version(os.fstat(incoming.fileno())) != expected_version
+        ):
+            raise SourceError("snapshot_inconsistent")
         while chunk := io_read(incoming, 1024 * 1024):
             check()
             io_write(outgoing, chunk)
-    after = source.stat()
-    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-        after.st_dev,
-        after.st_ino,
-        after.st_size,
-        after.st_mtime_ns,
-    ):
+    if before != _file_version(source.stat()):
         raise SourceError("snapshot_inconsistent")
     return _entry(root, name)
 
@@ -236,11 +241,18 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
             if limits is not None:
                 limits.check()
 
+        appearance_refs = {}
+        if scope == "instance":
+            appearance_versions, appearance_entries, appearance_refs = appearance.prepare(
+                home, cid, staging, clock, check
+            )
+            entries.extend(appearance_entries)
         try:
             with companion_coordinator(home, cid, clock).commit():
                 pinned_at = clock.monotonic()
                 _, fixed_assets = boundary(asset_store, cid) if scope == "instance" else (None, {})
                 if scope == "instance":
+                    appearance.verify_versions(home, cid, appearance_versions)
                     state_path = contained(home, base / "boundary/state.json")
                     if state_path.exists():
                         boundary_raw = _small(state_path)
@@ -333,6 +345,7 @@ def _offline(home, cid, staging, clock, epoch, scope, documents, manifests, chec
                 referenced | {row["asset_id"] for row in dependencies},
                 staging,
                 declarations=declarations,
+                appearance=appearance_refs,
                 check=check,
             )
             entries.extend(asset_files)
@@ -506,6 +519,7 @@ def _publish_source_documents(
         result["files"].extend(deployment_entries)
         if deployment_entries:
             result["consistency_groups"].append(_group(epoch, deployment_entries))
+    captured_paths = {entry["path"] for entry in result["files"]}
     config_entries = []
     for name, raw in documents.items():
         check()
@@ -522,6 +536,18 @@ def _publish_source_documents(
                     home / "companions" / companion_id / "persona" / relative,
                 )
                 target = path.relative_to(home).as_posix()
+                if target in {
+                    f"companions/{companion_id}/persona/appearance.md",
+                    f"companions/{companion_id}/persona/appearance.yaml",
+                }:
+                    if target not in captured_paths:
+                        result["missing"].append(
+                            {
+                                "component": f"persona:{companion_id}",
+                                "reason": "snapshot_unavailable",
+                            }
+                        )
+                    continue
                 config_entries.append(_put(staging, target, _small(path)))
     result["files"].extend(config_entries)
     result["consistency_groups"].append(_group(epoch, config_entries))

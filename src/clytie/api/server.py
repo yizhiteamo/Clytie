@@ -11,6 +11,7 @@ from aiohttp import web
 
 from clytie.supervisor.common import write
 
+from . import appearance
 from .auth import APIError, Auth, Identity, csrf
 
 ROUTES = [
@@ -41,6 +42,7 @@ ROUTES = [
     ("POST", "/silence"),
     *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart")],
     ("GET", "/companions/<cid>/smoke/records"),
+    *[("GET" if route == appearance.ROOT else "POST", route) for route in appearance.FIELDS],
     ("GET", "/companions/<cid>/tasks/<task_id>"),
     ("GET", "/companions/<cid>/boundary"),
     ("POST", "/companions/<cid>/boundary/release"),
@@ -135,7 +137,23 @@ class Server:
                 raise APIError("origin_rejected", 403)
             if route == "unmatched":
                 raise APIError("not_found", 404)
-            data = await request.json() if request.can_read_body else {}
+            if route != "/auth/login":
+                identity = self.auth.authenticate(
+                    request.headers.get("Authorization"),
+                    request.cookies.get("clytie_session"),
+                    request.method,
+                    request.headers.get("X-Clytie-CSRF"),
+                )
+            if route in appearance.FIELDS and request.query:
+                raise APIError("invalid_request")
+            if route == appearance.ADD:
+                request = request.clone(client_max_size=appearance.UPLOAD_BODY_BYTES)
+            try:
+                data = await request.json() if request.can_read_body else {}
+            except web.HTTPRequestEntityTooLarge:
+                if route == appearance.ADD:
+                    raise APIError("request_too_large", 413) from None
+                raise
             if not isinstance(data, dict):
                 raise APIError("invalid_request")
             if route == "/auth/login":
@@ -145,12 +163,6 @@ class Server:
                 )
                 result = {"csrf": csrf(session_cookie)}
             else:
-                identity = self.auth.authenticate(
-                    request.headers.get("Authorization"),
-                    request.cookies.get("clytie_session"),
-                    request.method,
-                    request.headers.get("X-Clytie-CSRF"),
-                )
                 confirm, password, description = await self.backend.policy(route, params, data)
                 if confirm and data.get("confirm") is not True:
                     if password and not self.auth.admin:
@@ -215,7 +227,12 @@ class Server:
             return response
         except APIError as exc:
             result_code = exc.code
-            body = {"ok": False, "error": {"code": exc.code, "message": exc.code}}
+            message = (
+                appearance.ERROR_MESSAGES.get(exc.code, exc.code)
+                if route in appearance.FIELDS
+                else exc.code
+            )
+            body = {"ok": False, "error": {"code": exc.code, "message": message}}
             if exc.result is not None:
                 body["result"] = exc.result
             return web.json_response(body, status=exc.status)

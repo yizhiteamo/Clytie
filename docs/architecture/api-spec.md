@@ -103,6 +103,19 @@
 | `GET /companions/<cid>/boundary` | 正在暂停的人：`actor_id`、昵称、暂停到什么时候；不含计数和原文 | | |
 | `POST /companions/<cid>/boundary/release` | `{actor_id}`，即 `boundary.release`（agent-spec §7.3）；伴侣运行中时转交给子进程执行 | 是 | |
 
+### 4.2a 形象资料
+
+以下路由位于 `/companions/<cid>/appearance`。编号从 1 开始，以最近显示的清单顺序为准。
+
+| 方法与路径 | 说明 | 确认 | 口令 |
+|---|---|---|---|
+| `GET` | 返回文字描述是否存在、参考图编号、标签、状态、导入后尺寸和上次自检结果 | | |
+| `POST /add` | `{content, label, state?}`。content 为图片字节的 Base64 编码，state 默认为 current | 是 | 是 |
+| `POST /edit` | `{number, label?, state?}`。至少提供标签或状态之一 | 是 | 是 |
+| `POST /remove` | `{number}`。删除一张参考图并保留清单历史 | 是 | 是 |
+
+API 拒绝文件路径参数。CLI 最多读取 20 MiB 图片。保存前显示目标伴侣、操作、参考图传给模型服务商的用途和重启自检的预计 token 数。估算依据为文字大小和受 `vision.max_images` 限制的附图张数，实际用量按模型服务商记录。自检关闭或删除后没有资料时，预计用量为零。保存成功后提示“重启伴侣后生效”。详见 `appearance-spec.md` 第 6、8、9 节。
+
 ### 4.3 记忆
 
 | 方法与路径 | 说明 | 确认 | 口令 |
@@ -200,6 +213,10 @@
 | `clytie supervisor status [--json]` | 运行中时调用 `GET /status`，没有运行时读取 `run/health.json`（A4.1 行为） |
 | `clytie supervisor silence on\|off [--yes]` | `POST /silence` |
 | `clytie companion start\|stop\|restart <cid> [--yes]` | 第 4.1 节 |
+| `clytie companion appearance show <cid>` | 第 4.2a 节的 GET |
+| `clytie companion appearance add <cid> <file> --label <标签> [--former]` | 第 4.2a 节的 add |
+| `clytie companion appearance edit <cid> <编号> [--label <标签>] [--current \| --former]` | 第 4.2a 节的 edit |
+| `clytie companion appearance remove <cid> <编号>` | 第 4.2a 节的 remove |
 | `clytie boundary list\|release <cid> [<actor_id>] [--yes]` | 第 4.2 节 |
 | `clytie memory ...` | 现有子命令保持原有参数和输出，改为调用第 4.3 节的 API |
 | `clytie plugin list\|enable\|disable\|uninstall <cid> [<pid>] [--yes]` | 先请求计划并显示，确认后再 apply |

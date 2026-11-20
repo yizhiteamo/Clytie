@@ -188,6 +188,7 @@ class Companion:
         if not self.kernel:
             return {}
         notices = set(self.agent.boundary.warnings) | self._memory_notices
+        notices.update(self.agent.appearance_warnings)
         channel_plugins = {r.key: r.plugin_id for r in self.host.registrations(self.cid, "channel")}
         states = {}
         priority = {"unknown": 0, "online": 1, "connecting": 2, "offline": 3, "auth_invalid": 4}
@@ -204,6 +205,7 @@ class Companion:
             **deepcopy(self._health_data),
             channels=states,
             model=self.agent.model_health,
+            appearance_check=self.agent.appearance_summary,
             admission=self.agent.admission.status(),
             quota=(
                 [

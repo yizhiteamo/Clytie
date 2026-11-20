@@ -27,14 +27,20 @@ _model_grant = ContextVar("selected_inbound_images", default=None)
 
 
 @contextmanager
-def model_image_access(cid, pid, selected):
+def model_image_access(cid, pid, selected, *, appearance=None):
     # Clear the shared set on exit: child tasks inherit the ContextVar value.
     ids = {ref.asset_id: ref for ref in selected}
-    token = _model_grant.set((cid, pid, ids))
+    pinned = {
+        ref.asset_id: appearance[ref.asset_id]
+        for ref in selected
+        if appearance and ref.origin == "appearance" and ref.asset_id in appearance
+    }
+    token = _model_grant.set((cid, pid, ids, pinned))
     try:
         yield
     finally:
         ids.clear()
+        pinned.clear()
         _model_grant.reset(token)
 
 
@@ -66,11 +72,18 @@ class AssetRegistration:
     path: str
     shared_with: tuple[str, ...] = ()
     inbound_only: bool = False
+    appearance_only: bool = False
+
+    @property
+    def restricted(self):
+        return self.inbound_only or self.appearance_only
 
     def as_dict(self):
         value = {**self.__dict__, "shared_with": list(self.shared_with)}
         if not self.inbound_only:
             del value["inbound_only"]
+        if not self.appearance_only:
+            del value["appearance_only"]
         return value
 
     def ref(self):
@@ -113,7 +126,7 @@ def validate_registry(value):
             raise ValueError
         rows, keys, access = [], set(), {}
         for raw in value["registrations"]:
-            if set(raw) - {"inbound_only"} != {
+            if set(raw) - {"inbound_only", "appearance_only"} != {
                 "companion_id",
                 "asset_id",
                 "size",
@@ -151,10 +164,26 @@ def validate_registry(value):
                 raise ValueError
             keys.add(key)
             restricted = raw.get("inbound_only", False)
-            if type(restricted) is not bool or restricted and shares:
+            appearance = raw.get("appearance_only", False)
+            if (
+                type(restricted) is not bool
+                or type(appearance) is not bool
+                or (restricted or appearance)
+                and shares
+                or restricted
+                and appearance
+            ):
                 raise ValueError
             row = AssetRegistration(
-                cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path, shares, restricted
+                cid,
+                ref.asset_id,
+                ref.size,
+                ref.media_type,
+                ref.origin,
+                path,
+                shares,
+                restricted,
+                appearance,
             )
             # 同一接收者不能遇到两个不同来源候选，连相同字节也不猜来源。
             for recipient in (cid, *shares):
@@ -322,6 +351,18 @@ class AssetStore:
             self._save((*snapshot.registrations, row))
         return row.ref()
 
+    def release_appearance(self, cid, asset_id):
+        # Independent inbound and product registrations survive removal from the list.
+        with self._lock("registry").commit():
+            snapshot = self.snapshot()
+            keep = tuple(
+                r
+                for r in snapshot.registrations
+                if not (r.companion_id == cid and r.asset_id == asset_id and r.appearance_only)
+            )
+            if len(keep) != len(snapshot.registrations):
+                self._save(keep)
+
     def register_private(self, companion_id, ref, relative_path):
         """只供可信本体登记已知私有位置；不发现文件，也不搬动文件。"""
         cid = identifier(companion_id)
@@ -352,7 +393,7 @@ class AssetStore:
         )
         if row is None:
             raise KeyError(asset_id)
-        if row.inbound_only:
+        if row.restricted:
             raise AssetError("asset_unauthorized")
         resolved = self.resolve(snapshot, owner_id, asset_id)
         self.verify_resolved(resolved)
@@ -413,7 +454,9 @@ class AssetStore:
             path.chmod(0o444)
             return row.path
 
-    def _stage_put(self, companion_id, data, media_type, origin, *, inbound_only=False):
+    def _stage_put(
+        self, companion_id, data, media_type, origin, *, inbound_only=False, appearance_only=False
+    ):
         cid = identifier(companion_id)
         data = bytes(data)
         ref = AssetRef(
@@ -424,7 +467,14 @@ class AssetStore:
         )
         path = self._publish(data, ref)
         row = AssetRegistration(
-            cid, ref.asset_id, ref.size, ref.media_type, ref.origin, path, inbound_only=inbound_only
+            cid,
+            ref.asset_id,
+            ref.size,
+            ref.media_type,
+            ref.origin,
+            path,
+            inbound_only=inbound_only,
+            appearance_only=appearance_only,
         )
         return self._prepare_registration(row)
 
@@ -434,7 +484,11 @@ class AssetStore:
             self._stage_put, cid, data, media_type, origin, inbound_only=inbound_only
         )
         async with companion_coordinator(self.home, cid, self.clock).admit():
-            if expected is not None and expected.inbound_only and not inbound_only:
+            if (
+                expected is not None
+                and expected.restricted
+                and (expected.appearance_only or not inbound_only)
+            ):
                 # A trusted tool writer supplied the actual bytes, independently
                 # establishing a product source. A hash alone cannot do this.
                 with self._lock("registry").commit():
@@ -443,7 +497,11 @@ class AssetStore:
                         raise AssetError("asset_registration_changed")
                     self.check_identity(resolved)
                     product = replace(
-                        expected, origin=origin, media_type=media_type, inbound_only=False
+                        expected,
+                        origin=origin,
+                        media_type=media_type,
+                        inbound_only=inbound_only,
+                        appearance_only=False,
                     )
                     self._save(
                         tuple(product if row == expected else row for row in snapshot.registrations)
@@ -458,9 +516,13 @@ class BoundAssets:
         self._plugin_id = plugin_id
 
     def _resolve(self, asset_id):
+        grant = _model_grant.get()
+        if grant and grant[:2] == (self._companion_id, self._plugin_id) and asset_id in grant[3]:
+            return grant[3][asset_id]
         resolved = self._store.resolve(self._store.snapshot(), self._companion_id, asset_id)
-        if resolved.registration.inbound_only:
-            grant = _model_grant.get()
+        if resolved.registration.appearance_only:
+            raise KeyError(asset_id)
+        if resolved.registration.restricted:
             if (
                 not grant
                 or grant[:2] != (self._companion_id, self._plugin_id)
@@ -482,7 +544,10 @@ class BoundAssets:
 
     async def path(self, asset_id):
         resolved = self._resolve(asset_id)
-        if resolved.registration.inbound_only:
+        grant = _model_grant.get()
+        if resolved.registration.restricted or (
+            grant and grant[:2] == (self._companion_id, self._plugin_id) and asset_id in grant[3]
+        ):
             raise AssetError("asset_unauthorized")
         await asyncio.to_thread(self._store.verify_resolved, resolved)
         if resolved.path.stat().st_mode & 0o222:

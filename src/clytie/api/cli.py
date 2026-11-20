@@ -1,9 +1,14 @@
 """Management command presentation. Confirmation and authorization remain server policy."""
 
+import argparse
 import asyncio
+import base64
 import getpass
 import json
+import posixpath
 import sys
+from pathlib import Path
+from urllib.parse import unquote
 
 from clytie.config import resolve_home
 from clytie.sdk.immutable import thaw
@@ -14,8 +19,34 @@ from .client import Client, NotRunning
 
 def add_parser(commands):
     companion = commands.add_parser("companion")
-    companion.add_argument("action", choices=["start", "stop", "restart"])
-    companion.add_argument("cid")
+    actions = companion.add_subparsers(dest="action", required=True)
+    companion_leaves = []
+    for name in ("start", "stop", "restart"):
+        leaf = actions.add_parser(name)
+        leaf.add_argument("cid")
+        companion_leaves.append(leaf)
+    appearance = actions.add_parser("appearance")
+    subcommands = appearance.add_subparsers(dest="appearance_action", required=True)
+    for name in ("show", "add", "edit", "remove"):
+        leaf = subcommands.add_parser(name)
+        leaf.add_argument("cid")
+        if name == "add":
+            leaf.add_argument("file", type=Path)
+            leaf.add_argument("--label", required=True)
+            leaf.add_argument("--former", action="store_true")
+        if name in ("edit", "remove"):
+            leaf.add_argument("number", type=int)
+        if name == "edit":
+            leaf.add_argument("--label")
+            state = leaf.add_mutually_exclusive_group()
+            state.add_argument("--current", dest="state", action="store_const", const="current")
+            state.add_argument("--former", dest="state", action="store_const", const="former")
+        companion_leaves.append(leaf)
+    # Keep common flags valid both before and after the companion subcommand.
+    for leaf in companion_leaves:
+        leaf.add_argument("--home", default=argparse.SUPPRESS)
+        leaf.add_argument("--yes", action="store_true", default=argparse.SUPPRESS)
+        leaf.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     boundary = commands.add_parser("boundary")
     boundary.add_argument("action", choices=["list", "release"])
     boundary.add_argument("cid")
@@ -273,6 +304,8 @@ async def execute(args, client=None):
         )
         return await cli.request("GET" if args.action == "status" else "POST", path, data)
     if command == "companion":
+        if args.action == "appearance":
+            return await appearance_command(args, cli)
         return await cli.request("POST", f"/companions/{args.cid}/{args.action}")
     if command == "boundary":
         return await cli.request(
@@ -400,6 +433,50 @@ async def execute(args, client=None):
     raise ValueError("未知命令")
 
 
+async def appearance_command(args, cli):
+    from clytie.appearance import MAX_BYTES
+
+    path = f"/companions/{args.cid}/appearance"
+    action = args.appearance_action
+    if action == "show":
+        return await cli.request("GET", path)
+    if action == "add":
+        try:
+            with args.file.open("rb") as source:
+                raw = source.read(MAX_BYTES + 1)
+        except OSError:
+            return ApiResponse(
+                status=400,
+                json={
+                    "ok": False,
+                    "error": {"code": "file_unreadable", "message": "参考图文件无法读取"},
+                },
+            )
+        if len(raw) > MAX_BYTES:
+            return ApiResponse(
+                status=413,
+                json={
+                    "ok": False,
+                    "error": {"code": "too_large", "message": "参考图文件超过 20 MiB"},
+                },
+            )
+        data = {
+            "content": base64.b64encode(raw).decode("ascii"),
+            "label": args.label,
+            "state": "former" if args.former else "current",
+        }
+    else:
+        data = {"number": args.number}
+        if action == "edit":
+            if args.state is not None:
+                data["state"] = args.state
+            if args.label is not None:
+                data["label"] = args.label
+            if len(data) == 1:
+                raise ValueError("请指定标签或状态")
+    return await cli.request("POST", path + "/" + action, data)
+
+
 def declined():
     return ApiResponse(status=428, json={"ok": False, "error": {"code": "confirmation_declined"}})
 
@@ -415,6 +492,11 @@ class PluginCommandClient:
             )
         if not path.startswith("/api/v1/"):
             raise ValueError("invalid API path")
+        parts = posixpath.normpath(unquote(path)).split("/")
+        if len(parts) >= 6 and parts[3] == "companions" and parts[5] == "appearance":
+            return ApiResponse(
+                status=403, json={"ok": False, "error": {"code": "appearance_owner_only"}}
+            )
         return await self._cli.request(method, path[len("/api/v1") :], json, query, plugin=True)
 
 

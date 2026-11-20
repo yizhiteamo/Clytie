@@ -11,6 +11,8 @@ channels:
   - plugin: fake-channel
     account: example_bot
     config: {}
+appearance:
+  self_check: true
 persona:
   files:
     base: base.md

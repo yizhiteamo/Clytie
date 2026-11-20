@@ -415,6 +415,13 @@
       },
       "additionalProperties": false
     },
+    "appearance": {
+      "type": "object",
+      "properties": {
+        "self_check": {"type": "boolean", "default": true}
+      },
+      "additionalProperties": false
+    },
     "vision": {
       "type": "object",
       "properties": {

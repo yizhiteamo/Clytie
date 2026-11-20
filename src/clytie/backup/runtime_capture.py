@@ -11,6 +11,7 @@ from clytie.api.management_io import FileCommands
 from clytie.api.management_journal import ManagementBusy, gate
 from clytie.plugin_host.snapshots import contained, identifier
 
+from . import appearance
 from .capture import capture_group
 from .coordination import CaptureError, companion_coordinator
 from .io_client import heavy_io, io_read
@@ -416,7 +417,15 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                         check,
                     )
                 )
+                appearance_refs = {}
                 if scope == "instance":
+                    appearance_versions, appearance_entries, appearance_refs = await monitored(
+                        _thread(
+                            lambda tick: appearance.prepare(home, cid, work, companion.clock, tick),
+                            check,
+                        )
+                    )
+                    entries.extend(appearance_entries)
                     for plugin in plugins:
                         pid = plugin["id"]
                         holder = host.runtimes.get((cid, pid))
@@ -475,6 +484,7 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                     if scope == "instance":
 
                         def read_boundary():
+                            appearance.verify_versions(home, cid, appearance_versions)
                             _, assets = boundary(asset_store, cid)
                             state_path = contained(home, base / "boundary/state.json")
                             raw = _small(state_path) if state_path.exists() else None
@@ -594,6 +604,7 @@ async def capture_online(companion, work, epoch, *, scope="instance", check=None
                             referenced | {row["asset_id"] for row in dependencies},
                             work,
                             declarations=declarations,
+                            appearance=appearance_refs,
                             check=tick,
                         ),
                         check,
