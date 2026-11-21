@@ -18,7 +18,7 @@
 | 值 | 群聊 | 私聊 |
 |---|---|---|
 | `test_only` | 只处理实例配置的 `test_conversation` | 同左：只有它是私聊会话时才处理 |
-| `registered` | 只处理实例配置 `conversations` 中登记的群 | 处理 owner 和登记过的成员；陌生人静默 |
+| `registered` | 只处理实例配置 `conversations` 中登记的群 | 只处理 `conversations` 中登记的私聊；未登记的私聊都静默（见 §2.1） |
 | `owner_present`（B4b） | 登记的群，加上 owner 当前在其中的未登记群 | 同 `registered` |
 
 - 任何模式下，**陌生人私聊都静默**（用户决定 2026-11-15）。
@@ -27,11 +27,20 @@
 - 本体不认识的会话类型，任何模式下都静默。以后需要"公开场合"（如推特时间线）时另行设计，不扩大现有模式。
 - 准入配置在伴侣启动时读取，修改后重启伴侣生效。本期不提供运行中重载（Issue #105）；以后有通用配置重载时，再让准入跟随。
 
+### 2.1 未登记的私聊（2026-11-21 补充，Issue #130）
+
+人物登记和会话登记是分开的。一个人在 `people` 中登记了，不等于他的私聊也登记了。用户决定：
+
+- 私聊会话没有在 `conversations` 中登记时，在入站检查处静默，不调用模型，即使发消息的是 owner 或登记过的成员。原因是这种会话没有出站目标，回复本来就发不出去。
+- 计数分开：发言人是登记过的人物时记 `private_not_registered`；发言人无法映射到登记人物时，照旧记 `stranger_private`。
+- 伴侣状态在 `private_not_registered` 大于 0 时提示"有登记过的人从未登记的私聊发来消息，需要时请在 `conversations` 中登记这个私聊"。提示里不写是谁、账号和内容。
+- 想和谁私聊，就显式登记谁的私聊会话。不自动把人物映射成私聊会话，现有权限边界不变。
+
 ## 3. 静默的含义
 
 没有准入的消息：
 - 在交给对话主干之前丢弃，不写入账本的入站记录，不写记忆，不触发回应、工具、表情或任务；
-- 只累加计数，按原因分类：`not_test_conversation`、`not_registered`、`stranger_private`、`sender_not_expected`、`unknown_kind`、`owner_absent`（B4b）、`membership_unknown`（B4b）；
+- 只累加计数，按原因分类：`not_test_conversation`、`not_registered`、`private_not_registered`、`stranger_private`、`sender_not_expected`、`unknown_kind`、`owner_absent`（B4b）、`membership_unknown`（B4b）；
 - 计数出现在伴侣的状态和本地 API 中。日志和状态不记录平台账号、平台会话号和消息内容。
 
 ## 4. 两道检查
@@ -69,3 +78,8 @@
 - 成员查询的 `True` / `False` / `None` / 超时各有测试；缓存和成员变动清除各有测试。
 - 不支持成员查询的平台插件，`owner_present` 只对登记的群生效。
 - `tool_scopes` 的验收在其规格中给出。
+
+**未登记的私聊（§2.1）**
+- 登记过的人物（包括 owner）从未登记的私聊发消息：`registered` 和 `owner_present` 下都静默，计 `private_not_registered`，不产生入站记录和模型调用；同一个人的私聊登记后正常回复并交付。
+- 无法映射的发言人仍计 `stranger_private`。
+- 状态提示只在计数大于 0 时出现，且不含账号、人物 ID 和内容。

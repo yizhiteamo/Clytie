@@ -7,7 +7,7 @@
 ## 当前状态（2026-11-18）
 
 - 阶段一（A1 至 A4.3）已全部合入 `main`。A4.3 经 [PR #71](https://github.com/yizhiteamo/Clytie/pull/71) 合并，tag `a4-3`。
-- A4.3 的已知限制：备份结束后约 699 ms 的尾部停顿、loop_delay 观测不足，以及延期的其余三场性能测量，见 [Issue #77](https://github.com/yizhiteamo/Clytie/issues/77)。不宣称 Linux 或大资产场景的性能已通过。
+- A4.3 的已知限制：备份结束后约 699 ms 的尾部停顿、loop_delay 观测不足，以及延期的其余三场性能测量，见 [Issue #77](https://github.com/yizhiteamo/Clytie/issues/77)。不宣称 Linux 或大资产场景的性能已通过。2026-11-21 用户决定不再执行这些延期测量和完整比较，以后出现真实性能问题再单独立项；测量工具按 [Issue #81](https://github.com/yizhiteamo/Clytie/issues/81) 退役。
 - 阶段二第一段：B1、B2、B3a、B4a、B3c、B3d、B2b、B4b、B5 已完成（tag 到 `b5`）。2026-11-18 冒烟测试的真实运行三条用例全部通过。下一步是经用户同意上线 companion_a（只改私有配置），然后做 B3b。
 
 ## 每个里程碑都要提供
