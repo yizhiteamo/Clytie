@@ -33,7 +33,9 @@ def samples():
         t.UnknownPart(raw_type="fake-part"),
     ]
     message = t.Message(ref=ref, sender=actor, parts=parts, sent_at=AT)
+    addressed = t.Addressed(mention=True, reply_to_self=False, name="external")
     event = t.EventEnvelope(
+        addressed=addressed,
         event_id="fake-channel:fake-message",
         type="conversation.message",
         companion_id="companion_a",
@@ -139,6 +141,7 @@ def samples():
     ]
     return [
         t.ChannelState(),
+        addressed,
         t.RecollectMessage(number=1, speaker="speaker_1", role="owner", text="fictional"),
         t.RecollectRemembered(
             label="[记忆1]", kind="episode", content="fictional", visibility="private"
