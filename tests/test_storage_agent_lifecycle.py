@@ -5,6 +5,7 @@ import threading
 from contextlib import asynccontextmanager
 
 import pytest
+import yaml
 
 from clytie.backup.coordination import run_sync
 from clytie.kernel.ledger import Ledger
@@ -16,7 +17,24 @@ from clytie.storage.owner import StorageBusy
 from clytie.supervisor.companion import Companion
 
 from .test_agent import event
+from .test_config import write_yaml
 from .test_supervisor_startup import home_copy
+
+
+def private_home(tmp_path):
+    home = home_copy(tmp_path)
+    path = home / "clytie.local.yaml"
+    instance = yaml.safe_load(path.read_text(encoding="utf-8"))
+    account = instance["people"]["owner"]["accounts"][0]
+    instance["conversations"]["owner_private"] = {
+        "channel": account["channel"],
+        "platform_id": account["account"],
+        "kind": "private",
+        "scene": "owner_private",
+        "members_expected": ["owner", "companion_a"],
+    }
+    write_yaml(path, instance)
+    return home
 
 
 def inbound(runtime, **kwargs):
@@ -33,7 +51,7 @@ def inbound(runtime, **kwargs):
 
 @asynccontextmanager
 async def ready_runtime(tmp_path):
-    runtime = Companion(home_copy(tmp_path), "companion_a", MockClock())
+    runtime = Companion(private_home(tmp_path), "companion_a", MockClock())
     await runtime.start()
     for task in runtime.feeds:
         task.cancel()
@@ -66,7 +84,7 @@ async def full_queue(owner):
 
 
 async def test_inbound_rejects_before_claim_when_finalizers_exhausted(tmp_path):
-    runtime = Companion(home_copy(tmp_path), "companion_a", MockClock())
+    runtime = Companion(private_home(tmp_path), "companion_a", MockClock())
     await runtime.start()
     owner, ledger = runtime.storage_owner, runtime.kernel.ledger
     reservations = []
