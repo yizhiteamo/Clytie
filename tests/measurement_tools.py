@@ -1,113 +1,19 @@
-"""Explicit test-only tool imports, independent of pytest's executable entrypoint."""
+"""Import a repository script without relying on the pytest entry point."""
 
-from tests.test_measurement_evidence import load_tool
-
-DEPENDENCIES = {
-    "measurement_closeout": (
-        "measurement_plan",
-        "measurement_plan_ingress",
-        "measurement_preparation_generate",
-    ),
-    "measurement_matrix_analysis": (
-        "evaluate_storage_performance",
-        "measurement_analysis_index",
-        "measurement_matrix_plan",
-    ),
-    "measurement_matrix_ingress": ("measurement_plan_ingress", "measurement_matrix_plan"),
-    "measurement_matrix_workflow": (
-        "measurement_matrix_ingress",
-        "measurement_matrix_launch",
-        "measurement_mechanism_workflow",
-        "measurement_cipher_handoff",
-    ),
-    "environment_evidence": ("measurement_preparation_evidence",),
-    "environment_capture": ("environment_evidence", "measurement_mechanism_workflow"),
-    "measurement_mechanism_plan": ("measurement_launch",),
-    "measurement_matrix_plan": ("measurement_mechanism_plan",),
-    "measurement_matrix_launch": ("measurement_matrix_plan", "measurement_mechanism_launch"),
-    "measurement_wal_validation": ("measurement_pressure_observation",),
-    "measurement_plan_ingress": (
-        "measurement_mechanism_plan",
-        "measurement_preparation_request",
-    ),
-    "measurement_cipher_handoff": (
-        "measurement_launch",
-        "measurement_transport",
-        "measurement_preparation_evidence",
-    ),
-    "measurement_mechanism_workflow": (
-        "measurement_cipher_handoff",
-        "measurement_plan_ingress",
-        "measurement_mechanism_launch",
-    ),
-    "measurement_mechanism_launch": (
-        "measurement_mechanism_plan",
-        "measurement_preparation_generate",
-    ),
-    "measurement_budget_observation": ("measurement_io_observation",),
-    "measurement_batch_observation": ("measurement_io_observation",),
-    "measurement_preparation_request": ("measurement_preparation_transport",),
-    "measurement_analysis_index": (
-        "measurement_evidence",
-        "measurement_cancel",
-        "measurement_control_observation",
-        "measurement_io_observation",
-        "measurement_pressure_observation",
-    ),
-    "measurement_mechanism_validation": (
-        "measurement_wal_validation",
-        "measurement_batch_validation",
-        "measurement_pressure_validation",
-        "measurement_analysis_index",
-        "measurement_sample_validation",
-        "measurement_io_observation",
-        "measurement_pressure_observation",
-    ),
-    "measurement_preparation_generate": ("measurement_preparation_transport",),
-    "measurement_preparation_transport": (
-        "measurement_launch",
-        "measurement_preparation_evidence",
-        "measurement_transport",
-        "measurement_version",
-    ),
-    "measurement_preparation_evidence": ("measurement_plan",),
-    "measurement_cancel_validation": ("measurement_cancel", "measurement_sample_validation"),
-    "measurement_observation": (
-        "measurement_batch_observation",
-        "measurement_budget_observation",
-        "measurement_control_observation",
-        "measurement_io_observation",
-        "measurement_pressure_observation",
-        "measurement_native_observation",
-    ),
-    "measurement_geometry": ("measurement_fixture",),
-    "measurement_trial": (
-        "measurement_cancel",
-        "measurement_recording",
-        "measurement_load",
-        "measurement_observation",
-        "measurement_native_observation",
-        "measurement_resources",
-        "measurement_version",
-        "measurement_views",
-        "measurement_fixture",
-    ),
-    "measurement_launch": (
-        "measurement_version",
-        "measurement_batch_observation",
-        "measurement_budget_observation",
-        "measurement_control_observation",
-        "measurement_io_observation",
-        "measurement_pressure_observation",
-        "measurement_sample_validation",
-    ),
-    "measurement_pressure_observation": ("measurement_io_observation",),
-    "measurement_load": ("measurement_recording",),
-    "measurement_views": ("measurement_recording",),
-}
+import importlib.util
+import sys
+from pathlib import Path
 
 
 def load(name):
-    for dependency in DEPENDENCIES.get(name, ()):
-        load(dependency)
-    return load_tool(name)
+    path = Path(__file__).resolve().parents[1] / "scripts" / (name + ".py")
+    if name in sys.modules:
+        existing = sys.modules[name]
+        if Path(existing.__file__).resolve() != path.resolve():
+            raise ValueError("test_tool_origin_mismatch")
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module

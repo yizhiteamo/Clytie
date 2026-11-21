@@ -48,13 +48,19 @@ def test_native_database_holds_stage_until_connection_closed_without_byte_charge
 
 def test_native_database_nested_reads_reuse_one_stage(tmp_path):
     path = memory_file(tmp_path)
-    calls = []
+    calls, connections = [], []
 
     def request(arguments, cleanup=False):
         calls.append(arguments)
+        if arguments["action"] == "release":
+            assert len(connections) == 2
+            for connection in connections:
+                with pytest.raises(sqlite3.ProgrammingError):
+                    connection.execute("SELECT 1")
         return {}
 
     with io_scope(IoClient(request)), opened(path) as first, opened(path) as second:
+        connections.extend([first, second])
         assert first.execute("SELECT count(*) FROM records").fetchone() == (0,)
         assert second.execute("SELECT count(*) FROM records").fetchone() == (0,)
     assert [row["action"] for row in calls] == ["acquire", "release"]
@@ -67,6 +73,10 @@ def test_native_progress_restores_original_cancellation_and_closes(tmp_path):
 
     def request(arguments, cleanup=False):
         calls.append(arguments)
+        if arguments["action"] == "release":
+            assert connection is not None
+            with pytest.raises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
         return {}
 
     def check():
@@ -94,15 +104,28 @@ def test_native_progress_restores_original_cancellation_and_closes(tmp_path):
         connection.execute("SELECT 1")
 
 
-def test_native_validation_error_releases_stage(tmp_path):
+def test_native_validation_error_releases_stage(tmp_path, monkeypatch):
     path = memory_file(tmp_path)
     with sqlite3.connect(path) as db:
         db.execute("PRAGMA user_version=3")
     db.close()
-    calls = []
+    calls, connections = [], []
+    connect = sqlite3.connect
+
+    def track(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        connections.append(db)
+        return db
+
+    monkeypatch.setattr(sqlite3, "connect", track)
 
     def request(arguments, cleanup=False):
         calls.append(arguments)
+        if arguments["action"] == "release":
+            assert connections
+            for connection in connections:
+                with pytest.raises(sqlite3.ProgrammingError):
+                    connection.execute("SELECT 1")
         return {}
 
     with io_scope(IoClient(request)), pytest.raises(restore.RestoreError), opened(path):

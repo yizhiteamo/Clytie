@@ -142,3 +142,36 @@ async def test_view_watchdog_expires_idle_view_but_waits_for_uninterruptible_io(
             await asyncio.gather(task, return_exceptions=True)
         await view.close()
         writer.close()
+
+
+@pytest.mark.parametrize("outcome", ["materialize", "cancel", "close"])
+async def test_snapshot_exit_releases_reader_thread_and_wal(tmp_path, outcome):
+    path = tmp_path / "memory.db"
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE facts(value)")
+        writer.commit()
+        group = await capture_group(
+            {"memory": path},
+            CaptureCoordinator(tmp_path / "capture.lock", MockClock()),
+            epoch="fictional",
+        )
+        try:
+            writer.execute("INSERT INTO facts VALUES(1)")
+            writer.commit()
+            if outcome == "materialize":
+                await group.materialize(tmp_path / "copy")
+            elif outcome == "cancel":
+                group._worker.cancelled.set()
+                with pytest.raises(CaptureError, match="cancelled"):
+                    await group.materialize(tmp_path / "copy")
+            else:
+                await group.close()
+            assert group.closed and not group.resource_pending
+            assert not group._worker.thread.is_alive()
+            assert writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        finally:
+            await group.close()
+    finally:
+        writer.close()

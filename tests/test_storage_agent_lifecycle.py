@@ -347,3 +347,32 @@ async def test_deferred_batch_cancel_accounts_for_every_accepted_event(tmp_path)
             row = await run_sync(ledger, ledger.get, "inbound", incoming.event_id)
             assert row["state"] == "ignored"
         assert all(responsibility.released for responsibility in responsibilities)
+
+
+async def test_failed_inbound_transaction_rolls_back_before_model(tmp_path, monkeypatch):
+    async with ready_runtime(tmp_path) as runtime:
+        incoming = inbound(runtime)
+        ledger = runtime.kernel.ledger
+        original = Ledger.put
+        model_calls = []
+
+        def fail_write(store, table, key, value):
+            original(store, table, key, value)
+            if table == "inbound" and key == incoming.event_id:
+                raise ValueError("fictional_write_failure")
+
+        async def model(*args, **kwargs):
+            model_calls.append(args)
+            pytest.fail("model called after failed transaction")
+
+        monkeypatch.setattr(Ledger, "put", fail_write)
+        monkeypatch.setattr(runtime.agent, "model_call", model)
+        with pytest.raises(ValueError, match="fictional_write_failure"):
+            await runtime.agent.receive(incoming)
+        await runtime.agent.drain()
+        assert not model_calls
+        assert await run_sync(ledger, ledger.get, "inbound", incoming.event_id) is None
+        assert not any(
+            row["event_id"] == incoming.event_id
+            for row in await run_sync(ledger, ledger.rows, "dedupe")
+        )
