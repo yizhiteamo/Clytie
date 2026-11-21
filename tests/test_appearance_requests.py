@@ -147,6 +147,12 @@ async def test_description_and_fixed_rules_survive_opposing_persona(tmp_path, mo
         assert "虚构形象戴一条蓝围巾。" in persona
         assert persona.endswith(RULES)
         for evidence in [
+            "换身衣服也能认出自己",
+            "参考图里的衣服只是当时的穿着",
+            "配饰、发型打扮、姿势、表情和画风都可能变",
+            "物种、脸部特征、发色和瞳色",
+            "人设或形象描述里另有说明，就按描述来",
+            "不容易改变的特征明显对不上，就别认",
             "鲜明特征",
             "群里随手转来",
             "真人照片",
@@ -155,7 +161,7 @@ async def test_description_and_fixed_rules_survive_opposing_persona(tmp_path, mo
             "主人本人此刻",
             "改写记忆",
         ]:
-            assert evidence in RULES
+            assert evidence in persona
         assert all(t.name != "core_view_appearance" for t in req.tools)
         assert agent.appearance_check_task is None
     finally:
