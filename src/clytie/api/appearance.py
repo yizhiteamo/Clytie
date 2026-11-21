@@ -58,7 +58,7 @@ def confirmation(home, cid, clock, action, data, config):
     except FileNotFoundError:
         text_bytes = 0
     # A planning estimate only. Actual image token accounting depends on the provider.
-    estimate = 256 + (text_bytes + 2) // 3 + 1024 * attached
+    estimate = 256 + (text_bytes + 2) // 3 + 2000 * attached
     return description + f"重启后会自动调用一次模型检查形象资料，预计用量约 {estimate} token。"
 
 

@@ -166,7 +166,9 @@ class Server:
                 confirm, password, description = await self.backend.policy(route, params, data)
                 if confirm and data.get("confirm") is not True:
                     if password and not self.auth.admin:
-                        description += "；建议设置管理口令"
+                        if description and not description.endswith(("。", "！", "？")):
+                            description += "。"
+                        description += "建议设置管理口令。"
                     raise APIError("confirmation_required", 428, {"description": description})
                 if password:
                     self.auth.require_password(identity, data.get("admin_password"))
