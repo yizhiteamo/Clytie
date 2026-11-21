@@ -154,7 +154,7 @@ def event(
         conversation=Conversation(
             conversation_id=cid,
             channel_id="fake",
-            kind="group" if scene == "public_group" else "private",
+            kind="group" if scene in {"public_group", "family_group"} else "private",
             scene=scene,
         ),
         received_at=agent.clock.now(),
@@ -249,6 +249,13 @@ async def test_outbound_rewrite_once_and_fallback(tmp_path, scene, rewritten, ex
         tmp_path,
         {"finish": "stop", "text": "fictional_internal"},
         {"finish": "stop", "text": rewritten},
+        conversations={
+            "stranger_private": {
+                "kind": "private",
+                "channel": "fake-channel",
+                "scene": "stranger_private",
+            },
+        },
     )
     trace = await agent.receive(event(agent, scene=scene, mention=True))
     await agent.drain()

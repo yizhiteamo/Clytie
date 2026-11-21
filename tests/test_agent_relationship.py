@@ -33,6 +33,14 @@ async def test_relationship_exact_system_position_scope_and_stability(
     scenes = ["public_group", "stranger_private", "owner_private", "family_group"]
     agent, _, model = await make_agent(
         tmp_path,
+        conversations={
+            "family_group": {"kind": "group", "channel": "fake-channel", "scene": "family_group"},
+            "stranger_private": {
+                "kind": "private",
+                "channel": "fake-channel",
+                "scene": "stranger_private",
+            },
+        },
         changes={
             "names": {
                 "internal": "fictional_internal",
