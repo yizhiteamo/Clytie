@@ -140,15 +140,29 @@ async def test_confirmation_respects_self_check_and_image_limit(api):
     _, _, one = await files.policy(routes.ADD, params, data)
     await files.call(routes.ADD, params, data, {}, "POST")
     _, _, two = await files.policy(routes.ADD, params, data)
-    assert re.search(r"约 (\d+) token", one)[1] == re.search(r"约 (\d+) token", two)[1]
+    assert "约 2256 token。" in one
+    assert "约 2256 token。" in two  # The configured image limit is one.
+    config["vision"]["max_images"] = 2
+    _, _, uncapped = await files.policy(routes.ADD, params, data)
+    assert "约 4256 token。" in uncapped
     (files.home / "companions/companion_a/persona/appearance.md").write_text(
-        "fictional scarf", encoding="utf-8"
+        "虚构", encoding="utf-8"
     )
+    _, _, with_description = await files.policy(routes.ADD, params, data)
+    assert "约 4258 token。" in with_description
     _, _, removal = await files.policy(routes.ROOT + "/remove", params, {"number": 1})
     assert "0 token" in removal and "自动调用" not in removal
     config["appearance"] = {"self_check": False}
     _, _, disabled = await files.policy(routes.ADD, params, data)
     assert "自检已关闭" in disabled and "0 token" in disabled
+
+
+async def test_confirmation_without_admin_password_uses_separate_sentence(api):
+    result = await request(api, "POST", ROOT + "/add", {"label": "常服"})
+    assert result.status == 428
+    description = result.json["result"]["description"]
+    assert "。；" not in description
+    assert description.endswith("token。建议设置管理口令。")
 
 
 async def test_upload_limits_and_readable_failure(api, monkeypatch):
