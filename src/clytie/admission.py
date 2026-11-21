@@ -6,12 +6,34 @@ from types import SimpleNamespace
 REASONS = (
     "not_test_conversation",
     "not_registered",
+    "private_not_registered",
     "stranger_private",
     "sender_not_expected",
     "unknown_kind",
     "owner_absent",
     "membership_unknown",
 )
+
+
+def admission_status(mode, counts):
+    rejected = (
+        {
+            key: value
+            for key, value in counts.items()
+            if key in REASONS and type(value) is int and value >= 0
+        }
+        if isinstance(counts, dict)
+        else {}
+    )
+    status = {
+        "mode": mode if mode in ("registered", "test_only", "owner_present") else "unknown",
+        "rejected": rejected,
+    }
+    if rejected.get("private_not_registered", 0) > 0:
+        status["hint"] = (
+            "有登记过的人从未登记的私聊发来消息，需要时请在 conversations 中登记这个私聊"
+        )
+    return status
 
 
 class Admission:
@@ -74,6 +96,11 @@ class Admission:
                 return "sender_not_expected"
         elif self.mode not in {"registered", "owner_present"}:
             return "not_registered"
+        elif (
+            conversation.kind == "private"
+            and self.conversations.get(cid, {}).get("kind") != "private"
+        ):
+            return "private_not_registered"
         if conversation.kind == "group" and self.conversations.get(cid, {}).get("kind") != "group":
             return "not_registered"
         return None
@@ -203,4 +230,4 @@ class Admission:
         )
 
     def status(self):
-        return {"mode": self.mode, "rejected": dict(self.counts)}
+        return admission_status(self.mode, self.counts)

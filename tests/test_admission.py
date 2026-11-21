@@ -28,8 +28,8 @@ def policy(mode="registered", test="test_group"):
     [
         ("registered", "group", "test_group", "stranger", "stranger", None),
         ("registered", "group", "other", "owner", "owner", "not_registered"),
-        ("registered", "private", "other", "owner", "owner", None),
-        ("registered", "private", "other", "member", "member", None),
+        ("registered", "private", "other", "owner", "owner", "private_not_registered"),
+        ("registered", "private", "other", "member", "member", "private_not_registered"),
         ("registered", "private", "test_private", "stranger", "stranger", "stranger_private"),
         ("test_only", "group", "test_group", "owner", "owner", None),
         ("test_only", "group", "test_group", "member", "unexpected", "sender_not_expected"),
@@ -49,6 +49,70 @@ def test_admission_table(mode, kind, cid, role, actor, expected):
     )
     sender = SimpleNamespace(role=role, actor_id=actor)
     assert p.reason(conversation, sender) == expected
+
+
+@pytest.mark.parametrize("mode", ["registered", "owner_present"])
+@pytest.mark.parametrize("role", ["owner", "member"])
+async def test_registered_person_private_requires_registered_conversation(tmp_path, mode, role):
+    from clytie.plugin_host.identity import IdentityResolver
+
+    from .test_agent import event, finish, make_agent
+
+    person = "fictional_person"
+    account = "fictional-private_chat"
+    text = "fictional private message"
+    people = {person: {"role": role, "accounts": [{"channel": "fake-channel", "account": account}]}}
+    registration = {
+        "private_chat": {"kind": "private", "channel": "fake-channel", "scene": "owner_private"}
+    }
+    for registered in (False, True):
+        agent, channel, model = await make_agent(
+            tmp_path,
+            changes={"boundary": {"admission": mode}},
+            people=people,
+            conversations=registration if registered else {},
+        )
+        try:
+            identity = IdentityResolver("fake", "fake-channel", agent.instance)
+
+            def private_message(platform_account):
+                actor = identity.resolve_actor(platform_account)
+                conversation = identity.resolve_conversation("private", platform_account)
+                return event(
+                    agent,
+                    text,
+                    role=actor.role,
+                    actor=actor.actor_id,
+                    cid=conversation.conversation_id,
+                    scene=conversation.scene,
+                )
+
+            assert "hint" not in agent.admission.status()
+            if not registered:
+                assert await agent.receive(private_message("fictional-unmapped")) is None
+                assert agent.admission.counts["stranger_private"] == 1
+                assert "hint" not in agent.admission.status()
+            trace = await agent.receive(private_message(account))
+            await agent.drain()
+            if registered:
+                assert len(model.requests) == len(channel.sent) == 1
+                assert channel.sent[0].conversation_id == "private_chat"
+                assert agent.ledger.get("record", trace)["delivery_status"] == "sent"
+                assert agent.admission.counts["private_not_registered"] == 0
+            else:
+                assert trace is None
+                assert not agent.ledger.rows("inbound") and not agent.ledger.rows("record")
+                assert not model.requests and not channel.sent and not channel.reacts
+                status = agent.admission.status()
+                assert status["rejected"]["private_not_registered"] == 1
+                assert (
+                    status["hint"]
+                    == "有登记过的人从未登记的私聊发来消息，需要时请在 conversations 中登记这个私聊"
+                )
+                for marker in (person, account, text, "anon:"):
+                    assert marker not in repr(status)
+        finally:
+            await finish(agent)
 
 
 def test_admission_configuration_is_startup_snapshot():
@@ -183,19 +247,25 @@ async def test_counters_reach_health_and_local_http_without_identifiers(tmp_path
     try:
         await launcher.children[0][1].heartbeat(
             admission={
-                "mode": "test_only",
+                "mode": "registered",
                 "rejected": {
-                    "not_registered": 3,
+                    "not_registered": 2,
+                    "private_not_registered": 3,
                     "fictional-private-marker": 4,
                     "unknown_kind": -1,
                 },
                 "content": "fictional-private-marker",
+                "hint": "fictional-private-marker",
             }
         )
         await spin()
         clock.advance(5)
         await svc.flush_health()
-        expected = {"mode": "test_only", "rejected": {"not_registered": 3}}
+        expected = {
+            "mode": "registered",
+            "rejected": {"not_registered": 2, "private_not_registered": 3},
+            "hint": "有登记过的人从未登记的私聊发来消息，需要时请在 conversations 中登记这个私聊",
+        }
         assert (
             read(tmp_path / "run/health.json")["companions"]["companion_0"]["admission"] == expected
         )

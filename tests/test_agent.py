@@ -77,7 +77,7 @@ class Channel:
         return Receipt(intent_id=intent.intent_id, status="sent", at=self.clock.now())
 
 
-async def make_agent(tmp_path, *turns, changes=None, conversations=None):
+async def make_agent(tmp_path, *turns, changes=None, conversations=None, people=None):
     clock = MockClock()
     h = host(tmp_path, clock=clock)
     await enable(h, "echo-tool")
@@ -114,6 +114,8 @@ async def make_agent(tmp_path, *turns, changes=None, conversations=None):
             },
         },
     }
+    if people is not None:
+        instance["people"] = people
     instance["conversations"].update(conversations or {})
     for cid, conversation in instance["conversations"].items():
         conversation["platform_id"] = "fictional-" + cid
