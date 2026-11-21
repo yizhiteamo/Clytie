@@ -139,6 +139,7 @@ async def companion_main(home, cid):
     if first is None:
         return 0
     runtime = Companion(home, cid, clock)
+    runtime.forward_safety_trip = lambda trip: emit("safety_belt", **trip)
     runtime.backup_io_client = io_channel.client
     runtime.on_phase = lambda phase: heartbeat.update(phase=phase)
     runtime.stop_requested = stop_requested.is_set
@@ -393,6 +394,11 @@ async def daemon_main(home, detached=False, maintenance=False):
         config={} if maintenance else instance.get("supervisor", {}),
     )
     supervisor.maintenance = maintenance
+    supervisor.conversations = {
+        key: cfg["kind"]
+        for key, cfg in instance.get("conversations", {}).items()
+        if not key.startswith("x-") and isinstance(cfg, dict) and "kind" in cfg
+    }
     supervisor.old_instance_options = instance.get("backup", {}).get("old_instances", {})
     log_seq = 0
 

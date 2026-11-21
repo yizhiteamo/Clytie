@@ -54,6 +54,7 @@ class Companion:
         self.management_tasks = set()
         self.management_journals = {}
         self.on_phase = lambda phase: None
+        self.forward_safety_trip = None
         self.stop_requested = lambda: False
 
     async def start(self):
@@ -158,6 +159,7 @@ class Companion:
             raise StartupBlocked("lock_held") from None
         except MemoryStartupError:
             raise StartupBlocked("migration_blocked") from None
+        self.agent.forward_safety_trip = self.forward_safety_trip
         await self.agent.start()
         await self.kernel.reactions.restart(interrupted)
         for channel in self.channels.values():
@@ -206,6 +208,7 @@ class Companion:
             channels=states,
             model=self.agent.model_health,
             admission=self.agent.admission.status(),
+            safety_belt_config=dict(self.agent.safety_belt.settings),
             quota=(
                 [
                     dict(
@@ -480,6 +483,8 @@ class Companion:
 
     def _read_health(self):
         counts = self.kernel.ledger.health_counts()
+        counts["safety_belt"] = self.agent.safety_belt.read_status()
+        counts["attention"] = self.agent.judgments.read_status()
         notices = set()
         if self.report:
             from clytie.memory.status import notices as memory_notices

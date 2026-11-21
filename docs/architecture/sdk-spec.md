@@ -287,7 +287,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 |---|---|---|
 | `message_received` | EventEnvelope | 不返回（只观察） |
 | `before_attention` | EventEnvelope + `CompanionState` | `Ignore` / `ReactOnly(emoji)` / `Mode(name, params)` / `Normal` |
-| `attention` | EventEnvelope + 待处理的消息批次 | `Skip` / `Defer(seconds)` / `Respond` |
+| `attention` | EventEnvelope + 待处理的消息批次；判断结束后，向发起判断的处理器追加第三项 Judgment | `Skip` / `Defer(seconds)` / `Judge(facts)` / `Respond(focus?, recheck_after?)` |
 | `after_generation` | `ReplyDraft` | 修改后的 `ReplyDraft` |
 | `before_send` | list[DeliveryIntent] | 修改后的 list[DeliveryIntent] |
 | `task_completed` | 任务摘要 | 不返回 |
@@ -298,7 +298,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 ### 5.6 其他扩展点
 | 扩展点 | 签名 |
 |---|---|
-| `context_section` | `async contribute(req: ContextRequest) -> ContextSection?`；`ContextRequest`：`scene`、`actor: Actor?`（默认 `None`）、`budget_chars`；主动消息时 actor 为空，普通回复显式传入发送者；`ContextSection`：`title`、`text`、`priority: int` |
+| `context_section` | `async contribute(req: ContextRequest) -> ContextSection?`；`ContextRequest`：`scene`、`actor: Actor?`（默认 `None`）、`budget_chars`；SDK 0.16 增加可选的 `conversation`，指向本次会话；主动消息时提供目标会话，actor 为空，普通回复显式传入发送者；`ContextSection`：`title`、`text`、`priority: int` |
 | `schedule` | 清单声明 `{id, every: ISO 8601 固定时长}` 或 `{id, at: "HH:MM", days: [...]}`；处理函数 `async on_tick(tick: Tick)`；`every` 的范围见 §7.7，按 kernel-spec §9 执行 |
 | `service` | 清单声明 `{name, version, methods: [...]}`；`async call(method: str, args: dict) -> dict`。使用方通过 `ctx.services.get(name).call(...)` 调用，参数和返回值都必须可序列化 |
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
@@ -334,7 +334,7 @@ A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3
 **before_attention**：取"强度"最高的指令，强度：`Ignore`(4) > `ReactOnly`(3) > `Mode`(2) > `Normal`(1)。强度相同时取排序最靠前的插件。
 **本体保护**：主人私聊的消息永远不会被完全忽略——`Ignore` 自动降级为 `ReactOnly`（表情来自配置，默认 💤）。
 
-**attention**：`Skip` > `Defer` > `Respond`。多个 `Defer` 取最长的秒数；本体限制最长延迟（默认 120 秒）。没有任何插件给出意见时：私聊和被 @ 的消息为 `Respond`，其余为 `Skip`。主人私聊不能被 `Skip`（降级为 `Respond`）。
+**attention**：`Skip` > `Defer` > `Judge` > `Respond`。多个 `Defer` 取最长的秒数；本体限制最长延迟（默认 120 秒）。没有任何插件给出意见时：私聊、被 @ 和回复本伴侣已发送消息时为 `Respond`，其余为 `Skip`。主人私聊不能被 `Skip`（降级为 `Respond`）。
 
 **after_generation / before_send**：按排序依次传递（流水线），每个插件拿到上一个的结果。约束：
 - 不能改变文字内容，只能改变形式（拆分、卡片、引用、发送时间）。本体比较处理前后去掉空白后的全部文字，不一致则丢弃该插件的修改并记录警告。
@@ -571,3 +571,9 @@ assets.info/read/path 不增加写权限要求，但始终核验当前可信调�
 本体记忆/账本由 storage-spec.md 的 StorageOwner 执行；SDK 不暴露连接、游标、任意 SQL 或命令执行器。权限及场景投影不变，异步结果是独立快照。
 
 backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队列；宿主检测跨 await、子任务和转交的异步调用链，不能只看线程编号。重入立即拒绝并列提供者缺项，不排队形成死锁。所需读取在 prepare 完成，capture 校验版本，变化时拒绝旧视图；prepare/materialize 的原权限不因此扩大。
+
+### SDK 0.16 群聊行为
+
+行为环节收到的 `EventEnvelope.addressed` 由本体填写，记录是否被 @、是否回复本伴侣、是否命中内部或对外名字。平台提供的值在入站时覆盖。默认值为 None。
+`JudgeFacts` 只接受 chat-behavior-spec §3.2 的八个字段。只有发起判断的处理器收到带第三项 `Judgment` 的输入，其他处理器仍使用原来的两项。主人私聊遇到 Judge 直接回应。
+`ReplyDraft.focus` 是要接的话的引用，默认为空；`interleaved` 是焦点之后其他人在本会话发出的消息数，默认 0。回复形式插件可以根据这两项选择是否引用。

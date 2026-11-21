@@ -136,6 +136,19 @@ class Delivery:
         self.channel_errors = {}
         self.workers = set()
         self.admission = None
+        self.safety_belt = None
+
+    async def _record_receipt(self, finalization, intent_id, n, receipt, *, retry=False):
+        if self.safety_belt is None:
+            return await finalization.persist(
+                self.ledger.record_receipt, intent_id, n, receipt, retry=retry
+            )
+        fresh, trip = await finalization.persist(
+            self.safety_belt.record_receipt, intent_id, n, receipt, retry=retry
+        )
+        if trip is not None:
+            self.safety_belt.notify(trip)
+        return fresh
 
     async def persist(self, function, *args, **kwargs):
         """收据/执行结果一旦到达，取消调用者也不能丢弃等待提交的结果。"""
@@ -219,9 +232,7 @@ class Delivery:
                         except (Exception, asyncio.CancelledError):
                             return
                         await receipt_recorded.wait()
-                        await finalization.persist(
-                            self.ledger.record_receipt, intent.intent_id, n, result
-                        )
+                        await self._record_receipt(finalization, intent.intent_id, n, result)
 
                     finalization.track(background(collect_late()))
                     if admission_pending:
@@ -364,8 +375,8 @@ class Delivery:
                 and self.clock.monotonic() + delay < cutoff
                 and (group or not await finalization.persist(self._cancelled, row))
             )
-            fresh = await finalization.persist(
-                self.ledger.record_receipt, intent_id, n, receipt, retry=bool(retry)
+            fresh = await self._record_receipt(
+                finalization, intent_id, n, receipt, retry=bool(retry)
             )
             receipt_recorded.set()
             if (

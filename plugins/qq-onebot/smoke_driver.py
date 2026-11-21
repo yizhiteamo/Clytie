@@ -21,6 +21,8 @@ class Driver:
         self.target = None
         self.clock = clock
         self.pending = deque()
+        self.case_id = None
+        self.last_reply_id = None
 
     async def connect(self, config, secrets):
         url = config["ws_url"]
@@ -61,7 +63,9 @@ class Driver:
             parts = d["message"]
             require(isinstance(parts, list), "invalid_message")
             chars = sum(len(p["data"]["text"]) for p in parts if p.get("type") == "text")
-            self.pending.append(SmokeReply(chars, any(p.get("type") == "image" for p in parts), at))
+            reply = SmokeReply(chars, any(p.get("type") == "image" for p in parts), at)
+            raw_id = d.get("message_id")
+            self.pending.append((reply, mid if type(raw_id) in {int, str} and mid else None))
         elif (
             d.get("post_type") == "notice"
             and d.get("notice_type") == "group_msg_emoji_like"
@@ -70,13 +74,16 @@ class Driver:
             for like in d.get("likes", []):
                 state = self.emojis.get(str(like.get("emoji_id")))
                 if state:
-                    self.pending.append(SmokeReaction(mid, state, d["is_add"], at))
+                    self.pending.append((SmokeReaction(mid, state, d["is_add"], at), None))
         require(len(self.pending) <= 2048, "event_overflow")
 
     async def events(self):
         while True:
             while self.pending:
-                yield self.pending.popleft()
+                event, reply_id = self.pending.popleft()
+                if isinstance(event, SmokeReply):
+                    self.last_reply_id = reply_id
+                yield event
             await self.read()
 
     async def read(self):
@@ -132,11 +139,17 @@ class Driver:
         return len(actual), self.target.tester_accounts.index(login) + 1
 
     async def send(self, case, image=None):
-        parts = (
-            [{"type": "at", "data": {"qq": self.target.companion_account}}]
-            if case.get("mention", True)
-            else []
-        )
+        parts = []
+        if self.case_id != case["id"]:
+            # Only observations consumed by the previous verdict can be quoted.
+            self.pending.clear()
+            if case.get("reply_to_last"):
+                require(self.last_reply_id, "invalid_message")
+                parts.append({"type": "reply", "data": {"id": self.last_reply_id}})
+            self.case_id = case["id"]
+            self.last_reply_id = None
+        if case.get("mention", True):
+            parts.append({"type": "at", "data": {"qq": self.target.companion_account}})
         parts.append({"type": "text", "data": {"text": case["text"]}})
         if image is not None:
             import base64
@@ -147,7 +160,6 @@ class Driver:
                     "data": {"file": "base64://" + base64.b64encode(image).decode("ascii")},
                 }
             )
-        self.pending.clear()
         response = await self.rpc(
             "send_group_msg", {"group_id": self.target.conversation, "message": parts}
         )

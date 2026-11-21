@@ -52,8 +52,16 @@ class Persona:
             segments.append((False, text[offset:]))
             self.layers[layer] = segments
 
-    def render(self, scene):
+    def scene_text(self, scene):
         private = scene in self.config.get("memory", {}).get("private_scenes", ["owner_private"])
+        return "\n".join(
+            text
+            for layer in self.config["persona"]["scenes"][scene]
+            for secret, text in self.layers[layer]
+            if private or not secret
+        )
+
+    def render(self, scene):
         return "\n".join(
             [
                 RULES,
@@ -64,12 +72,7 @@ class Persona:
                     and self.config.get("boundary", {}).get("categories", {}).get("romance", True)
                     else []
                 ),
-                *[
-                    text
-                    for layer in self.config["persona"]["scenes"][scene]
-                    for secret, text in self.layers[layer]
-                    if private or not secret
-                ],
+                self.scene_text(scene),
                 FLOOR,
             ]
         )

@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -46,6 +47,8 @@ class Supervisor:
         self.notifications = notifications or Notifications(home, clock, self.log, self.audit)
         self.external = external
         self.rows, self.children, self.monitors = {}, {}, {}
+        self.conversations = {}
+        self.safety_notifications = set()
         self.lock = None
         self.stopping = False
         self.seq = 0
@@ -260,6 +263,15 @@ class Supervisor:
                             admission.get("mode"), admission.get("rejected")
                         )
                         row["warnings"] = list(msg.get("warnings", []))
+                        for field in ("safety_belt", "attention"):
+                            row[field] = self._conversation_status(msg.get(field), field)
+                        belt_config = msg.get("safety_belt_config")
+                        fields = ("replies", "window_minutes", "pause_minutes")
+                        if isinstance(belt_config, dict) and all(
+                            type(belt_config.get(k)) is int for k in fields
+                        ):
+                            row["safety_belt_config"] = {k: belt_config[k] for k in fields}
+                        row["storage_observed_at"] = msg.get("storage_observed_at")
                         summary = msg.get("appearance_check")
                         if isinstance(summary, str) and re.fullmatch(
                             r"通过|失败|跳过|有 [1-9][0-9]* 条提示", summary
@@ -299,6 +311,16 @@ class Supervisor:
                             )
                         else:
                             self.problems.pop(f"quota_exhausted:{cid}", None)
+                    elif kind == "safety_belt":
+                        group = msg.get("conversation_id")
+                        if self._valid_trip(group, msg):
+                            task = asyncio.create_task(
+                                self.notifications.safety_trip(
+                                    cid, group, msg["count"], msg["until"]
+                                )
+                            )
+                            self.safety_notifications.add(task)
+                            task.add_done_callback(self.safety_notifications.discard)
                     elif kind == "backup_io":
 
                         async def reply(response, child=child):
@@ -427,6 +449,34 @@ class Supervisor:
                 # A transient Windows file sharing violation must not kill monitoring.
                 self.log.warning("supervisor.health_write_failed", error=type(exc).__name__)
             await self.clock.sleep(1)
+
+    def _valid_trip(self, group, value):
+        if not isinstance(group, str) or self.conversations.get(group) != "group":
+            return False
+        if type(value.get("count")) is not int or value["count"] < 0:
+            return False
+        try:
+            return datetime.fromisoformat(value["until"]).tzinfo is not None
+        except (TypeError, ValueError, KeyError):
+            return False
+
+    def _conversation_status(self, values, field):
+        result = {}
+        if isinstance(values, dict):
+            for key, row in values.items():
+                if key not in self.conversations or not isinstance(row, dict):
+                    continue
+                if field == "safety_belt" and self._valid_trip(key, row):
+                    result[key] = dict(
+                        count=row["count"],
+                        until=row["until"],
+                        owner_private_missing=row.get("owner_private_missing") is True,
+                    )
+                elif field == "attention" and all(
+                    type(row.get(k)) is int and row[k] >= 0 for k in ("count", "tokens")
+                ):
+                    result[key] = dict(count=row["count"], tokens=row["tokens"])
+        return result
 
     async def refresh_old_instances(self):
         from clytie.backup.old_instances import OldInstances
@@ -765,6 +815,8 @@ class Supervisor:
         await asyncio.gather(
             *self.monitors.values(), *([self.ticker] if self.ticker else []), return_exceptions=True
         )
+        if self.safety_notifications:
+            await asyncio.gather(*tuple(self.safety_notifications), return_exceptions=True)
         if self.finalize:
             await self.finalize()
         self.audit.append("stop", source=source)

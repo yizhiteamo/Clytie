@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from clytie.config import HomeReport, load_home
+from clytie.config import HomeReport, load_home, safety_belt_settings
 from clytie.kernel.query import local_task, task_exit_code
 
 
@@ -18,7 +18,35 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
     from clytie.memory.status import notices as memory_notices
 
     notices = [*report.dialogue_notices, *memory_notices(report, clock=SystemClock())]
+    from clytie.supervisor.common import read
+
+    try:
+        health = (
+            read(Path(report.home) / "run/health.json", {}).get("companions", {})
+            if report.exists
+            else {}
+        )
+    except (OSError, ValueError, AttributeError):
+        health = {}
+    companions = []
     for companion in report.companions:
+        runtime = health.get(companion["id"], {}) if isinstance(health, dict) else {}
+        effective = report.plugin_configs.get(companion["id"])
+        companions.append(
+            {
+                **companion,
+                **(
+                    {"safety_belt_config": safety_belt_settings(effective["config"])}
+                    if effective and companion["valid"]
+                    else {}
+                ),
+                **{
+                    key: runtime[key]
+                    for key in ("safety_belt", "attention", "storage_observed_at")
+                    if key in runtime
+                },
+            }
+        )
         path = Path(report.home) / "companions" / companion["id"] / "boundary/state.json"
         if path.is_file():
             try:
@@ -36,6 +64,7 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
                 )
     return replace(
         report,
+        companions=tuple(companions),
         dialogue_notices=tuple(notices),
         failed_plugin_state=failed_status(report.home),
         ledger_errors=tuple(migration_status(report.home)),

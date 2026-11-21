@@ -62,8 +62,17 @@ def test_legacy_json_flags_validate_real_ledger_without_changing_file(tmp_path, 
 def test_legacy_json_flags_accept_ledger_before_optional_health_indexes(tmp_path, monkeypatch):
     path = ledger_file(tmp_path)
     db = sqlite3.connect(path)
-    db.execute("DROP INDEX health_tasks")
-    db.execute("DROP INDEX health_sending")
+    for name in (
+        "health_tasks",
+        "health_sending",
+        "group_sent",
+        "intent_trace",
+        "child_trace",
+        "belt_trips",
+        "attention_day",
+        "sent_message_id",
+    ):
+        db.execute(f"DROP INDEX {name}")
     db.commit()
     db.close()
     legacy_json(monkeypatch, path)

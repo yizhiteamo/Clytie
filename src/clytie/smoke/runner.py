@@ -34,20 +34,31 @@ def load_driver(home, plugin, clock):
     return getattr(cls(), declaration["factory"])(clock)
 
 
-async def exercise(case, driver, client, cid, tester, clock, interval, timeout_result, image=None):
+async def exercise(
+    case, driver, client, cid, tester, clock, interval, timeout_result, authorize, image=None
+):
     since = clock.now()
     start = clock.monotonic()
-    mid = (
-        await driver.send({k: v for k, v in case.items() if k != "image"}, image=image)
-        if image is not None
-        else await driver.send(case)
-    )
-    require(isinstance(mid, str) and mid, "send_unknown")
+    message_ids = set()
+    fields = {k: v for k, v in case.items() if k not in {"texts", "image"}}
+    for index, text in enumerate(case.get("texts") or [case["text"]]):
+        if index:
+            await clock.sleep(1)
+            await authorize()
+        message = dict(fields, text=text, mention=index == 0 and case.get("mention", True))
+        mid = (
+            await driver.send(message, image=image)
+            if image is not None
+            else await driver.send(message)
+        )
+        require(isinstance(mid, str) and mid and mid not in message_ids, "send_unknown")
+        message_ids.add(mid)
     timeout_result["failure"] = "timeout_record"
 
     replies, reactions = [], []
 
     async def listen():
+        reaction_target = None
         async for event in driver.events():
             require(
                 isinstance(event, (SmokeReply, SmokeReaction))
@@ -61,7 +72,12 @@ async def exercise(case, driver, client, cid, tester, clock, interval, timeout_r
                     "invalid_observation",
                 )
                 replies.append(dict(chars=event.chars, image=event.image, at=event.at))
-            elif event.message_id == mid:
+            elif event.message_id in message_ids:
+                require(
+                    reaction_target in (None, event.message_id),
+                    "ambiguous_reaction_target",
+                )
+                reaction_target = event.message_id
                 require(
                     event.state in {"accepted", "running", "done", "failed"}
                     and type(event.added) is bool,
@@ -130,12 +146,15 @@ async def run(
     report = {"started_at": started.isoformat(), "result": "stopped", "cases": []}
     driver = None
     try:
-        cfg, cases, target = prepare(home)
+        cfg, cases, target, messages = prepare(home)
         cid = cfg["companion"]
         report["companion"] = cid
         images = sum(c["expect"]["image"] for c in cases)
         require(
-            ask(f"{cid}，{len(cases)} 条用例，预计 {images} 张图片。输入 y 运行：").strip() == "y",
+            ask(
+                f"{cid}，{len(cases)} 条用例，{messages} 条消息，预计 {images} 张图片。输入 y 运行："
+            ).strip()
+            == "y",
             "not_confirmed",
         )
         client = client_type(home)
@@ -150,8 +169,8 @@ async def run(
         driver = driver_loader(home, target.channel, clock)
         config = freeze(cfg["driver"]["config"])
         await driver.connect(config, ConfiguredSecrets(home, config))
-        visual = []
-        for case in cases:
+
+        async def authorize():
             require(target_config(home, cid, cfg["tester"]) == target, "target_changed")
             count, account = await driver.authorize(target)
             require(
@@ -163,6 +182,12 @@ async def run(
             )
             report.update(member_count=count, tester_account_index=account)
             require(target_config(home, cid, cfg["tester"]) == target, "target_changed")
+
+        visual = []
+        for case in cases:
+            if case.get("reply_to_last"):
+                require(report["cases"] and report["cases"][-1].get("replies"), "no_previous_reply")
+            await authorize()
             timeout_result = {"result": "failed", "failure": "timeout_send"}
             try:
                 item = await timed(
@@ -175,6 +200,7 @@ async def run(
                         clock,
                         target.min_interval_seconds,
                         timeout_result,
+                        authorize,
                         case_image(home, case),
                     ),
                     clock,

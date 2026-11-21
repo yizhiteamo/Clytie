@@ -14,6 +14,7 @@ from types import ModuleType
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
 from clytie.sdk.behavior import (
+    Judge,
     ReactOnly,
     collect_context_sections,
     merge_attention,
@@ -1037,7 +1038,17 @@ class PluginHost(MigrationMixin):
             if hasattr(feed, "aclose"):
                 await feed.aclose()
 
-    async def behavior(self, companion_id, phase, input, *, mentioned=False, scene=None):
+    async def behavior(
+        self,
+        companion_id,
+        phase,
+        input,
+        *,
+        mentioned=False,
+        scene=None,
+        judge_origin=None,
+        resume_registration=None,
+    ):
         point = "behavior." + phase
         event = input[0] if isinstance(input, tuple) else input
         scene = scene or getattr(getattr(event, "conversation", None), "scene", "public_group")
@@ -1048,8 +1059,12 @@ class PluginHost(MigrationMixin):
             ids = {intent.conversation_id for intent in input}
             conversation_id = next(iter(ids)) if len(ids) == 1 else None
         opinions = []
+        judges = []
         current = list(input) if phase == "before_send" else input
         for reg in self.registrations(companion_id, point):
+            registration = (reg.plugin_id, reg.key)
+            if resume_registration is not None and registration != resume_registration:
+                continue
             supplied = list(current) if phase == "before_send" else current
             result = await self.invoke(
                 companion_id,
@@ -1075,6 +1090,12 @@ class PluginHost(MigrationMixin):
                         "plugin.invalid_form_change", plugin_id=reg.plugin_id, phase=phase
                     )
             else:
+                if isinstance(result, Judge):
+                    if resume_registration is not None:
+                        self.log.warning("plugin.invalid_attention", plugin_id=reg.plugin_id)
+                        result = None
+                    else:
+                        judges.append((result, registration))
                 opinions.append((reg.priority, reg.plugin_id, result))
         conversation = getattr(event, "conversation", None)
         message = getattr(event, "message", None)
@@ -1087,12 +1108,15 @@ class PluginHost(MigrationMixin):
         if phase == "before_attention":
             return merge_before_attention(opinions, owner_private=owner_private)
         if phase == "attention":
-            return merge_attention(
+            merged = merge_attention(
                 opinions,
                 private=conversation is not None and conversation.kind == "private",
                 mentioned=mentioned,
                 owner_private=owner_private,
             )
+            if isinstance(merged, Judge) and judge_origin is not None:
+                judge_origin.append(next(key for opinion, key in judges if opinion is merged))
+            return merged
         return current if phase in {"after_generation", "before_send"} else None
 
     async def context_sections(self, companion_id, request, *, conversation_id=None):

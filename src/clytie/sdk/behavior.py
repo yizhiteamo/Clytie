@@ -15,6 +15,7 @@ from .types import (
     LinkPart,
     Message,
     MessagePart,
+    MessageRef,
     ReplyDraft,
     SDKModel,
     TaskSummary,
@@ -50,16 +51,42 @@ class Defer(SDKModel):
     seconds: float = Field(ge=0)
 
 
+class JudgeFacts(SDKModel):
+    participants: int = Field(ge=0, strict=True)
+    share: float = Field(ge=0, le=1, strict=True)
+    rounds_with_same_person: int = Field(ge=0, strict=True)
+    counterpart_fast: bool = Field(strict=True)
+    fatigue: Literal["none", "some", "high"]
+    ignored_recently: bool = Field(strict=True)
+    owner_spoke: bool = Field(strict=True)
+    name_hit: bool = Field(strict=True)
+
+
+class Judge(SDKModel):
+    type: Literal["judge"] = "judge"
+    facts: JudgeFacts
+
+
+class Judgment(SDKModel):
+    status: Literal["ok", "failed"]
+    join: bool = False
+    focus: MessageRef | None = None
+    new_topic: bool = False
+    calling_me: bool | None = None
+
+
 class Respond(SDKModel):
+    focus: MessageRef | None = None
+    recheck_after: int | None = Field(default=None, ge=1)
     type: Literal["respond"] = "respond"
 
 
 BeforeAttentionDirective = Annotated[
     Ignore | ReactOnly | Mode | Normal, Field(discriminator="type")
 ]
-AttentionDirective = Annotated[Skip | Defer | Respond, Field(discriminator="type")]
+AttentionDirective = Annotated[Skip | Defer | Judge | Respond, Field(discriminator="type")]
 Directive = Annotated[
-    Ignore | ReactOnly | Mode | Normal | Skip | Defer | Respond, Field(discriminator="type")
+    Ignore | ReactOnly | Mode | Normal | Skip | Defer | Judge | Respond, Field(discriminator="type")
 ]
 
 
@@ -75,7 +102,8 @@ class BeforeAttentionHandler(Protocol):
 
 class AttentionHandler(Protocol):
     async def __call__(
-        self, input: tuple[EventEnvelope, list[Message]]
+        self,
+        input: tuple[EventEnvelope, list[Message]] | tuple[EventEnvelope, list[Message], Judgment],
     ) -> AttentionDirective | None: ...
 
 
@@ -123,7 +151,13 @@ def merge_attention(
     delays = [item.seconds for item in available if isinstance(item, Defer)]
     if delays:
         return Defer(seconds=min(max(delays), max_delay))
-    if available or private or mentioned or owner_private:
+    for item in available:
+        if isinstance(item, Judge):
+            return Respond() if owner_private else item
+    for item in available:
+        if isinstance(item, Respond):
+            return item
+    if private or mentioned or owner_private:
         return Respond()
     return Skip()
 

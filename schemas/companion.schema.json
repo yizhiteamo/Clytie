@@ -11,6 +11,21 @@
       "type": "string",
       "minLength": 1
     },
+    "attention": {
+      "type": "object",
+      "properties": {
+        "judge": {
+          "type": "object",
+          "properties": {
+            "persona_chars": {"type": "integer", "minimum": 0, "default": 1500},
+            "messages": {"type": "integer", "minimum": 0, "default": 20},
+            "seconds": {"type": "number", "exclusiveMinimum": 0, "default": 20}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "agent": {
       "type": "object",
       "properties": {
@@ -320,6 +335,15 @@
     "boundary": {
       "type": "object",
       "properties": {
+        "safety_belt": {
+          "type": "object",
+          "properties": {
+            "replies": {"type": "integer", "minimum": 50, "maximum": 1000, "default": 200},
+            "window_minutes": {"type": "integer", "minimum": 10, "maximum": 120, "default": 30},
+            "pause_minutes": {"type": "integer", "minimum": 5, "maximum": 240, "default": 30}
+          },
+          "additionalProperties": false
+        },
         "admission": {
           "type": "string",
           "enum": ["test_only", "registered", "owner_present"],
