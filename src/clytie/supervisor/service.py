@@ -251,26 +251,14 @@ class Supervisor:
                             else "unknown"
                         )
                         row["silenced"] = bool(msg.get("silenced", False))
-                        from clytie.admission import REASONS
+                        from clytie.admission import admission_status
 
-                        admission = msg.get("admission", {})
-                        counts = (
-                            admission.get("rejected", {}) if isinstance(admission, dict) else {}
+                        admission = msg.get("admission")
+                        if not isinstance(admission, dict):
+                            admission = {}
+                        row["admission"] = admission_status(
+                            admission.get("mode"), admission.get("rejected")
                         )
-                        row["admission"] = {
-                            "mode": admission.get("mode")
-                            if isinstance(admission, dict)
-                            and admission.get("mode")
-                            in {"registered", "test_only", "owner_present"}
-                            else "unknown",
-                            "rejected": {
-                                key: value
-                                for key, value in counts.items()
-                                if key in REASONS and type(value) is int and value >= 0
-                            }
-                            if isinstance(counts, dict)
-                            else {},
-                        }
                         row["warnings"] = list(msg.get("warnings", []))
                         summary = msg.get("appearance_check")
                         if isinstance(summary, str) and re.fullmatch(
