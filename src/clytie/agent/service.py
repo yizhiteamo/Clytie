@@ -33,7 +33,7 @@ from clytie.sdk.types import (
 )
 from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
-from . import addressed
+from .addressed import ConversationMessages
 from .appearance import VIEW, Appearance, load_appearance, reference_message, self_check
 from .context import Context, message
 from .image_context import ImageContext, view_tool
@@ -111,6 +111,7 @@ class Agent:
         kernel.delivery.admission = self.admission
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
+        self.conversation_messages = ConversationMessages(self.ledger, config.get("names", {}))
         self.judgments = AttentionJudgments(self)
         self.safety_belt = SafetyBelt(self, notifier=notifier)
         self.model_registration = (
@@ -649,9 +650,7 @@ class Agent:
         return await self.attention(batch_key)
 
     async def _mark_addressed(self, event, finalization):
-        return await finalization.persist(
-            addressed.mark, self.ledger, self.config.get("names", {}), event
-        )
+        return await finalization.persist(self.conversation_messages.mark, event)
 
     async def attention(self, key, *, judgment=None, registration=None):
         batch = self.batches[key]
@@ -997,7 +996,7 @@ class Agent:
                 )
             )
             since = (
-                await self.kernel.persist(trace, addressed.watermark, self.ledger)
+                await self.kernel.persist(trace, self.conversation_messages.watermark)
                 if recheck
                 else None
             )
@@ -1360,14 +1359,14 @@ class Agent:
         interleaved = 0
         if focus:
             position = await self.kernel.persist(
-                trace, addressed.focus_position, self.ledger, conversation, focus
+                trace, self.conversation_messages.focus_position, conversation, focus
             )
             if position is None:
                 focus = None
             else:
                 interleaved = len(
                     await self.kernel.persist(
-                        trace, addressed.messages_after, self.ledger, conversation, position
+                        trace, self.conversation_messages.messages_after, conversation, position
                     )
                 )
         draft = ReplyDraft(
@@ -1443,7 +1442,7 @@ class Agent:
             self.log.info("outbound.style", trace_id=trace)
         if since is not None:
             recent = await self.kernel.persist(
-                trace, addressed.messages_after, self.ledger, conversation, since
+                trace, self.conversation_messages.messages_after, conversation, since
             )
             if len(recent) >= respond.recheck_after and not await self.judgments.recheck(
                 conversation,

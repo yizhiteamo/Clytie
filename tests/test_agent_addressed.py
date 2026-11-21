@@ -207,3 +207,48 @@ async def test_recheck_threshold_and_direct_exemption(tmp_path, monkeypatch, cou
             for x in agent.ledger.rows("audit")
         )
     await finish(agent)
+
+
+async def test_natural_reply_and_recheck_use_owned_ledger(tmp_path, monkeypatch):
+    from clytie.backup.coordination import run_sync
+
+    from .test_storage_agent_lifecycle import inbound, ready_runtime
+
+    async with ready_runtime(tmp_path) as runtime:
+        agent = runtime.agent
+        first = inbound(runtime, scene="public_group", role="member")
+        generation = asyncio.Event()
+        proceed = asyncio.Event()
+
+        def decide(phase, data):
+            if phase == "attention":
+                if data[0].event_id == first.event_id:
+                    return Respond(focus=first.message.ref, recheck_after=1)
+                return Skip()
+
+        observe(agent, monkeypatch, decide)
+        replies = []
+        original = agent.model_call
+
+        async def scripted(method, *args, **kw):
+            if method != "generate":
+                return await original(method, *args, **kw)
+            replies.append(args[0])
+            if len(replies) == 1:
+                generation.set()
+                await proceed.wait()
+                return ModelTurn(finish="stop", text="fictional draft", usage={})
+            return ModelTurn(finish="stop", text='{"send":false}', usage={})
+
+        monkeypatch.setattr(agent, "model_call", scripted)
+        trace = await agent.receive(first)
+        await generation.wait()
+        await agent.receive(
+            inbound(runtime, scene="public_group", role="member", actor="another_member")
+        )
+        proceed.set()
+        await agent.drain()
+        record = await run_sync(agent.ledger, agent.ledger.get, "record", trace)
+        assert (record["exec_status"], record["delivery_status"]) == ("ok", "none")
+        assert len(replies) == 2
+    assert not runtime.storage_owner._thread.is_alive()
