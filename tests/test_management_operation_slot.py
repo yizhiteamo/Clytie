@@ -8,7 +8,7 @@ import pytest
 from clytie.api.management_journal import Journal
 from clytie.api.management_worker import execute
 from clytie.api.memory import MemoryAPI
-from clytie.backup.io_client import IoClient, _stage
+from clytie.backup.io_client import IoClient, _stage, current_client, io_scope
 from clytie.clock import SystemClock
 from clytie.memory.transfer import Transfers
 from clytie.plugin_host.support import timed
@@ -79,6 +79,11 @@ def test_slot_rejects_overlap_wrong_execution_and_released_capability(tmp_path):
     with pytest.raises(IoBudgetError, match="mismatch"):
         with slot.borrow(object()):
             pass
+    with io_scope(client):
+        with slot.borrow(slot.binding, cleanup=True):
+            assert current_client() is None
+            assert _stage.get()["thread"] == threading.get_ident()
+        assert current_client() is client and _stage.get() is None
     slot.release()
     with pytest.raises(IoBudgetError, match="released"):
         with slot.borrow(slot.binding):

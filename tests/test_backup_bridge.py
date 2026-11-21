@@ -258,12 +258,7 @@ async def test_controller_shutdown_creates_once_after_worker_cancel_drain(tmp_pa
     assert len(state["shutdowns"]) == 1
 
 
-@pytest.mark.parametrize("online", [True], indirect=True)
-async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(online):  # noqa: F811
-    import asyncio
-
-    from tests.test_backup_workers import completed
-
+def live_backup_workers(owner):
     from clytie.api.operations import companion_operation
     from clytie.backup.controller import CaptureBridge
     from clytie.backup.keys import BackupKeys
@@ -271,7 +266,6 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
     from clytie.config import repository_root
     from clytie.supervisor.common import Audit
 
-    owner, holder = online
     BackupKeys(owner.home, owner.clock, repository=repository_root()).ensure()
     calls = []
 
@@ -290,6 +284,17 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
     )
     sessions = attach_test_capture_channel(supervisor, owner)
     workers = BackupWorkers(owner.home, owner.clock, capture_handler=CaptureBridge(supervisor))
+    return workers, sessions, calls
+
+
+@pytest.mark.parametrize("online", [True], indirect=True)
+async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(online):  # noqa: F811
+    import asyncio
+
+    from tests.test_backup_workers import completed
+
+    owner, holder = online
+    workers, sessions, calls = live_backup_workers(owner)
     store = owner.host.memory_resources[owner.cid][0]
     from clytie.storage.handle import StoreHandle
 
@@ -328,5 +333,104 @@ async def test_worker_bridge_uses_live_provider_and_keeps_writes_responsive(onli
     assert len(writes) > 2
     assert set(write_threads) == {owner.storage_owner._thread.ident}
     assert sessions
-    assert not supervisor.backup_io.sessions[sessions[owner.cid]].endpoints
-    assert supervisor.backup_io.budget.status()["charged"]["read"] > 0
+    assert not workers.io_control.sessions[sessions[owner.cid]].endpoints
+    assert workers.io_control.budget.status()["charged"]["read"] > 0
+
+
+@pytest.mark.parametrize("source", ["database", "asset"])
+async def test_cancel_during_live_copy_finishes_chat_and_releases_resources(
+    tmp_path_factory, monkeypatch, source
+):
+    import asyncio
+    import threading
+
+    from tests.test_agent_placeholders import with_parts
+    from tests.test_backup_workers import completed
+    from tests.test_storage_agent_lifecycle import inbound, private_home
+
+    from clytie.backup import assets, capture, runtime_capture
+    from clytie.backup.coordination import run_sync
+    from clytie.clock import SystemClock
+    from clytie.plugin_host.support import timed
+    from clytie.sdk.types import ImagePart
+    from clytie.supervisor.companion import Companion
+
+    runtime = Companion(private_home(tmp_path_factory.mktemp("io")), "companion_a", SystemClock())
+    await runtime.start()
+    workers, sessions, _ = live_backup_workers(runtime)
+    operation = "c" * 32
+    loop = asyncio.get_running_loop()
+    entered, resume = asyncio.Event(), threading.Event()
+    views = []
+    capture_group = runtime_capture.capture_group
+
+    async def capture_view(*args, **kwargs):
+        view = await capture_group(*args, **kwargs)
+        views.append(view)
+        return view
+
+    def copied():
+        loop.call_soon_threadsafe(entered.set)
+        assert resume.wait(30), "copy did not receive its release signal"
+
+    monkeypatch.setattr(runtime_capture, "capture_group", capture_view)
+    try:
+        ledger = runtime.kernel.ledger
+        if source == "database":
+            copy = capture.copy_database
+
+            class Source:
+                def __init__(self, db):
+                    self.execute = db.execute
+                    self.db = db
+
+                def backup(self, target, *, pages, progress, sleep):
+                    def observed(*args):
+                        progress(*args)
+                        copied()
+
+                    self.db.backup(target, pages=pages, progress=observed, sleep=sleep)
+
+            def copy_batch(db, target, **kwargs):
+                return copy(Source(db), target, **kwargs)
+
+            monkeypatch.setattr(capture, "copy_database", copy_batch)
+        else:
+            incoming = with_parts(inbound(runtime), [ImagePart()])
+            key, new = await run_sync(ledger, ledger.claim_inbound, incoming)
+            assert new
+            asset = await runtime.host.asset_store.put(
+                runtime.cid, b"fictional asset", "image/png", "inbound_media", inbound_only=True
+            )
+            assert await run_sync(ledger, ledger.update_media, key, 0, "ok", asset)
+            read = assets.io_read
+
+            def read_block(*args, **kwargs):
+                block = read(*args, **kwargs)
+                if block:
+                    copied()
+                return block
+
+            monkeypatch.setattr(assets, "io_read", read_block)
+
+        await workers.execute("create", {"scope": "instance"}, operation)
+        await timed(entered.wait(), runtime.clock, 30)
+        process = workers.processes[operation]
+        trace = await runtime.agent.receive(inbound(runtime))
+        assert (await workers.cancel(operation))["cancel_requested"]
+        await runtime.agent.drain()
+        record = await run_sync(ledger, ledger.get, "record", trace)
+        assert record["exec_status"] == "ok" and record["delivery_status"] == "sent"
+        resume.set()
+        result = await completed(workers, operation)
+        assert result["phase"] == "cancelled" and result["cancel_requested"]
+        assert process.returncode is not None and not workers.processes
+        assert views and all(view.closed and not view.resource_pending for view in views)
+        assert not workers.io_control.sessions[sessions[runtime.cid]].endpoints
+        assert workers.io_control.budget.status()["active"] is None
+    finally:
+        resume.set()
+        if workers.tasks:
+            await workers.stop("cancel")
+        await runtime.stop()
+    assert not runtime.storage_owner._thread.is_alive()

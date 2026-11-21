@@ -22,11 +22,13 @@ from .test_supervisor_startup import home_copy
 async def test_companion_owns_real_connections_through_shutdown(tmp_path, monkeypatch):
     loop_thread = threading.get_ident()
     observed = []
+    lifecycles = {}
     for kind in (Ledger, MemoryStore):
         for name in ("__init__", "close"):
             original = getattr(kind, name)
 
             def observed_call(self, *args, _original=original, _kind=kind, _name=name, **kwargs):
+                lifecycles.setdefault(self, []).append(_name)
                 observed.append((_kind.__name__, _name, threading.get_ident()))
                 return _original(self, *args, **kwargs)
 
@@ -48,7 +50,9 @@ async def test_companion_owns_real_connections_through_shutdown(tmp_path, monkey
         await run_sync(runtime.kernel.ledger, runtime.kernel.ledger.health_counts)
     finally:
         await runtime.stop()
-    assert observed
+    assert not runtime.storage_owner._thread.is_alive()
+    assert {type(store) for store in lifecycles} == {Ledger, MemoryStore}
+    assert all(events == ["__init__", "close"] for events in lifecycles.values())
     assert all(thread != loop_thread for _, _, thread in observed)
     assert len({thread for _, _, thread in observed}) == 1
 
