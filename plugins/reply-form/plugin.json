@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "reply-form",
+  "name": "聊天回复形态",
+  "summary": "按聊天语境分段、引用与间隔发送。",
+  "category": "behavior",
+  "version": "0.1.0",
+  "requires": {
+    "sdk": ">=0.16,<0.17"
+  },
+  "entry": "plugin:Plugin",
+  "permissions": [],
+  "contributes": {
+    "behavior": {
+      "after_generation": {
+        "handler": "shape"
+      },
+      "before_send": {
+        "handler": "pace"
+      }
+    },
+    "context_section": {
+      "handler": "hint",
+      "budget_chars": 100
+    }
+  },
+  "config": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "tuning": {
+        "type": "object",
+        "default": {},
+        "additionalProperties": false,
+        "properties": {
+          "min_chars": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 60
+          },
+          "max_parts_private": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 3
+          },
+          "max_parts_group": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 2
+          },
+          "interval_seconds": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": 0
+            },
+            "minItems": 2,
+            "maxItems": 2,
+            "default": [
+              1,
+              2
+            ]
+          }
+        }
+      }
+    }
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  },
+  "failure_default": {},
+  "hot_reload": true,
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": []
+}
