@@ -77,6 +77,30 @@ class SDKModel(BaseModel):
         return cls.model_validate(values)
 
 
+class ProactiveSubmission(SDKModel):
+    status: Literal["accepted", "paused", "busy"]
+    trace_id: TraceId | None = None
+
+    @model_validator(mode="after")
+    def accepted_has_trace(self):
+        if (self.status == "accepted") != (self.trace_id is not None):
+            raise ValueError("only an accepted submission has a trace_id")
+        return self
+
+
+class ProactiveOutcome(SDKModel):
+    status: Literal[
+        "pending", "sent", "unknown", "declined", "superseded", "failed", "interrupted", "not_found"
+    ]
+    sent_at: UTCDateTime | None = None
+
+    @model_validator(mode="after")
+    def sent_has_time(self):
+        if (self.status == "sent") != (self.sent_at is not None):
+            raise ValueError("only a sent outcome has a sent_at timestamp")
+        return self
+
+
 class Visibility(str, Enum):
     PRIVATE = "private"
     PUBLIC = "public"
@@ -373,7 +397,8 @@ class ModelTurn(SDKModel):
 
 class Invocation(SDKModel):
     companion_id: str
-    actor: Actor
+    actor: Actor | None
+    origin: Literal["message", "proactive"] = "message"
     conversation: Conversation
     trace_id: TraceId
     task_id: TaskId | None = None
@@ -536,6 +561,7 @@ class ModelFeatures(SDKModel):
 
 
 class ReplyDraft(SDKModel):
+    kind: Literal["reply", "proactive"] = "reply"
     focus: MessageRef | None = None
     interleaved: int = Field(default=0, ge=0)
     parts: FrozenList[MessagePart] = Field(default_factory=FrozenList)
@@ -678,7 +704,8 @@ class TaskStartedPayload(SDKModel):
     task_id: TaskId
     trace_id: TraceId
     tool: str
-    actor_id: str
+    actor_id: str | None
+    origin: Literal["message", "proactive"] = "message"
     conversation_id: str
 
 
@@ -687,7 +714,8 @@ class TaskSummary(SDKModel):
     trace_id: TraceId
     tool: str
     status: Literal["ok", "error", "denied", "cancelled"]
-    actor_id: str
+    actor_id: str | None
+    origin: Literal["message", "proactive"] = "message"
     conversation_id: str
     scene: str
     started_at: UTCDateTime

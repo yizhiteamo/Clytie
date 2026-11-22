@@ -203,7 +203,8 @@ async def test_proactive_outbound_no_fallback_or_abilities(tmp_path):
     agent, channel, model = await make_agent(
         tmp_path, *[{"finish": "stop", "text": "fictional_internal"}] * 2
     )
-    trace = await agent.submit("test_group", topic="fictional topic", reason="test")
+    submission = await agent.submit("test_group", topic="fictional topic", reason="test")
+    trace = submission.trace_id
     await agent.drain()
     assert not channel.sent and len(model.requests) == 2
     assert agent.ledger.get("record", trace)["error"]["code"] == "outbound_blocked"

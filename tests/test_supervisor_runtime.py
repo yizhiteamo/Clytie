@@ -40,8 +40,9 @@ async def test_silence_owner_inbound_reactions_and_proactive_no_replay(tmp_path)
     message = event(a)
     assert await a.receive(message) is None
     assert a.ledger.get("inbound", message.event_id)["reason"] == "silenced"
-    trace = await a.submit("owner_private", topic="fictional topic", reason="fictional")
-    assert a.ledger.get("record", trace) is None
+    submission = await a.submit("owner_private", topic="fictional topic", reason="fictional")
+    assert submission.status == "paused" and submission.trace_id is None
+    assert not a.ledger.rows("record")
     assert model.requests == [] and channel.sent == [] and channel.reacts == []
     a.kernel.delivery.silenced = False
     assert await a.receive(message) is None

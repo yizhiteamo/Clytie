@@ -64,6 +64,25 @@ async def test_queue_maximum_and_same_conversation_never_overlap(tmp_path):
     kernel.ledger.close()
 
 
+async def test_reserved_proactive_record_precedes_later_owner_reply_at_capacity(tmp_path):
+    kernel, _, clock = setup(tmp_path)
+    queue = ConversationQueue(clock, maximum=1)
+    owner = Actor(actor_id="owner", role="owner", channel_id="fake")
+    release = asyncio.Event()
+    order = []
+
+    async def record(label):
+        order.append(label)
+
+    queue.submit("other_chat", owner, release.wait)
+    queue.submit("owner_private", None, lambda: record("proactive"), reserved=True)
+    queue.submit("owner_private", owner, lambda: record("reply"))
+    release.set()
+    await queue.drain()
+    assert order == ["proactive", "reply"]
+    kernel.ledger.close()
+
+
 async def test_default_permission_denies_before_prepare_and_quota_denial(tmp_path):
     kernel, channel, clock = setup(tmp_path)
     r, inv, _ = await new_record(kernel)

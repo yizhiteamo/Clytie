@@ -314,6 +314,8 @@ class Context:
                     )
                 }
             )
+            if row.get("proactive"):
+                summaries[-1]["origin"] = "proactive"
             summaries[-1]["summary"] = [
                 {
                     "plan": (i.get("plan") or {}).get("summary", ""),

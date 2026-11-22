@@ -1,12 +1,13 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from clytie.sdk.behavior import valid_after_generation, valid_before_send
-from clytie.sdk.testing import MockClock
+from clytie.sdk.testing import FakeContext, MockClock
 from clytie.sdk.testing.lifecycle import plugin_from_manifest
-from clytie.sdk.testing.samples import TRACE_ID, sample_event, sample_intent
-from clytie.sdk.types import ContextRequest, DeliverySplit, ReplyDraft, TextPart
+from clytie.sdk.testing.samples import TRACE_ID, sample_conversation, sample_event, sample_intent
+from clytie.sdk.types import ContextRequest, DeliverySplit, MentionPart, ReplyDraft, TextPart
 
 MANIFEST = Path(__file__).parents[1] / "plugin.json"
 
@@ -86,6 +87,102 @@ async def test_only_split_replies_are_paced(tmp_path):
         assert all(1 <= (b - a).total_seconds() <= 2 for a, b in zip(times, times[1:]))
         assert paced[0].not_before is None and paced[-1] == asset
         assert valid_before_send([*intents, asset], paced)
+
+
+@pytest.mark.parametrize("task_id", [None, "aaaaaaaa"])
+async def test_split_proactive_uses_its_own_interval_even_with_a_task(tmp_path, task_id):
+    clock = MockClock()
+    async with plugin_from_manifest(MANIFEST, root=tmp_path, clock=clock) as loaded:
+        paragraphs = ["这是虚构的第" + str(i) + "条主动消息。" for i in range(8)]
+        draft = private_draft("\n\n".join(paragraphs), task_id=task_id)
+        shaped = await loaded.handler("behavior.after_generation")(draft)
+        assert shaped.form == "split" and shaped.task_id == task_id
+        assert [part.text for part in shaped.parts] == [
+            *paragraphs[:5],
+            "\n\n".join(paragraphs[5:]),
+        ]
+        assert valid_after_generation(draft, shaped)
+        first_time = clock.now() + timedelta(seconds=10)
+        items = [
+            sample_intent().model_copy(
+                update={
+                    "kind": shaped.kind,
+                    "task_id": shaped.task_id,
+                    "conversation_id": shaped.conversation.conversation_id,
+                    "parts": [part],
+                    "split": DeliverySplit(group_id="proactive", index=i, total=6),
+                    "not_before": first_time if i == 0 else None,
+                }
+            )
+            for i, part in enumerate(shaped.parts)
+        ]
+        send = loaded.handler("behavior.before_send")
+        paced = await send(items)
+        assert paced[0].not_before == first_time
+        times = [intent.not_before for intent in paced]
+        assert all(at is not None for at in times)
+        assert all(2 <= (b - a).total_seconds() <= 4 for a, b in zip(times, times[1:]))
+        assert valid_before_send(items, paced)
+        regular_task = [
+            item.model_copy(update={"kind": "reply", "task_id": "aaaaaaaa"}) for item in items
+        ]
+        assert await send(regular_task) == regular_task
+
+
+def private_draft(text, *, task_id=None):
+    return ReplyDraft(
+        kind="proactive",
+        trace_id=TRACE_ID,
+        form="plain",
+        task_id=task_id,
+        parts=[TextPart(text=text)],
+        conversation=sample_conversation().model_copy(
+            update={"conversation_id": "owner_private", "kind": "private", "scene": "owner_private"}
+        ),
+    )
+
+
+@pytest.mark.parametrize("limit", [1, 4])
+async def test_proactive_respects_custom_limit_and_split_eligibility(tmp_path, limit):
+    ctx = FakeContext(root=tmp_path, config={"tuning": {"max_parts_proactive": limit}})
+    async with plugin_from_manifest(MANIFEST, ctx) as loaded:
+        shape = loaded.handler("behavior.after_generation")
+        exact = "文" * 29 + "。\n\n" + "字" * 30
+        short = private_draft(exact)
+        assert await shape(short) == short
+        long = private_draft("这是一条虚构句子。" * 9)
+        shaped = await shape(long)
+        assert len(shaped.parts) == limit
+        assert valid_after_generation(long, shaped)
+        merged = private_draft("完整" * 40)
+        assert await shape(merged) == merged
+        mixed = long.model_copy(
+            update={"parts": [*long.parts, MentionPart(actor_id="owner", is_self=False)]}
+        )
+        assert await shape(mixed) == mixed
+
+
+async def test_proactive_interval_configuration_and_unsplit_delivery(tmp_path):
+    tuning = {"interval_seconds": [1, 1], "interval_seconds_proactive": [3, 3]}
+    ctx = FakeContext(root=tmp_path, config={"tuning": tuning})
+    async with plugin_from_manifest(MANIFEST, ctx) as loaded:
+        config = loaded.manifest["config"]["properties"]["tuning"]["properties"]
+        assert config["max_parts_proactive"]["default"] == 6
+        assert config["interval_seconds_proactive"]["default"] == [2, 4]
+        items = [
+            sample_intent().model_copy(
+                update={"kind": "proactive", "split": DeliverySplit(group_id="p", index=i, total=2)}
+            )
+            for i in range(2)
+        ]
+        single = items[0].model_copy(update={"split": None})
+        paced = await loaded.handler("behavior.before_send")([*items, single])
+        assert paced[1].not_before == ctx.clock.now() + timedelta(seconds=3)
+        assert paced[2] == single
+    ctx = FakeContext(root=tmp_path, config={"tuning": {"interval_seconds_proactive": [4, 2]}})
+    with pytest.raises(ValueError, match="interval_seconds_proactive"):
+        async with plugin_from_manifest(MANIFEST, ctx):
+            pass
 
 
 @pytest.mark.parametrize(

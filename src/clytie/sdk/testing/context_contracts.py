@@ -12,6 +12,7 @@ from clytie.sdk.types import (
     HttpResponse,
     MemoryRecord,
     ModelTurn,
+    ProactiveSubmission,
     ProcessResult,
 )
 
@@ -236,9 +237,11 @@ async def assert_credentials_contract(credentials, reference, value, *, errors):
 
 
 async def assert_proactive_contract(proactive, parts):
-    assert isinstance(
-        await proactive.submit("test_group", topic="fictional topic", reason="contract"), str
-    )
+    submission = await proactive.submit("test_group", topic="fictional topic", reason="contract")
+    assert isinstance(submission, ProactiveSubmission) and submission.status == "accepted"
+    assert (await proactive.result(submission.trace_id)).status == "pending"
+    assert (await proactive.result("f" * 32)).status == "not_found"
+    await assert_task_cancellation(lambda: proactive.result(submission.trace_id))
     await assert_task_cancellation(
         lambda: proactive.submit("test_group", topic="fictional topic", reason="contract")
     )

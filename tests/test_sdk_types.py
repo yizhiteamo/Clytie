@@ -141,6 +141,8 @@ def samples():
     ]
     return [
         t.ChannelState(),
+        t.ProactiveSubmission(status="accepted", trace_id="a" * 32),
+        t.ProactiveOutcome(status="sent", sent_at=AT),
         addressed,
         t.RecollectMessage(number=1, speaker="speaker_1", role="owner", text="fictional"),
         t.RecollectRemembered(

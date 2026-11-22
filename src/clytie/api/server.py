@@ -40,7 +40,7 @@ ROUTES = [
     *[("POST", "/admin/" + x) for x in ("password", "logout-all")],
     *[("POST", "/supervisor/" + x) for x in ("stop", "escalate")],
     ("POST", "/silence"),
-    *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart")],
+    *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart", "proactive")],
     ("GET", "/companions/<cid>/smoke/records"),
     *[("GET" if route == appearance.ROOT else "POST", route) for route in appearance.FIELDS],
     ("GET", "/companions/<cid>/tasks/<task_id>"),

@@ -11,10 +11,18 @@ class ConversationQueue:
         self.pending, self.running = [], {}
         self.sequence = 0
 
-    def submit(self, conversation_id, actor, operation):
+    def submit(self, conversation_id, actor, operation, *, reserved=False):
         future = asyncio.get_running_loop().create_future()
         self.sequence += 1
-        item = (self.sequence, self.clock.monotonic(), conversation_id, actor, operation, future)
+        item = (
+            self.sequence,
+            self.clock.monotonic(),
+            conversation_id,
+            actor,
+            operation,
+            future,
+            reserved,
+        )
         self.pending.append(item)
         self._pump()
         return future
@@ -27,6 +35,13 @@ class ConversationQueue:
             return (not owner, item[0])
 
         self.pending.sort(key=priority)
+        # A proactive submission reserves an idle conversation before it queues.
+        # Later replies cannot overtake it while other conversations occupy all workers.
+        reservations = {
+            cid: seq
+            for seq, _, cid, _, _, future, reserved in self.pending
+            if reserved and not future.cancelled()
+        }
         for item in tuple(self.pending):
             if len(self.running) >= self.maximum:
                 break
@@ -34,13 +49,13 @@ class ConversationQueue:
             if future.cancelled():
                 self.pending.remove(item)
                 continue
-            if cid in self.running:
+            if cid in self.running or (cid in reservations and item[0] > reservations[cid]):
                 continue
             self.pending.remove(item)
             self.running[cid] = background(self._run(item))
 
     async def _run(self, item):
-        _, _, cid, _, operation, future = item
+        _, _, cid, _, operation, future, _ = item
         try:
             result = await operation()
         except asyncio.CancelledError:

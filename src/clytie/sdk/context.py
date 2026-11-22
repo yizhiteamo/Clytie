@@ -18,6 +18,8 @@ from .types import (
     MessagePart,
     ModelRequest,
     ModelTurn,
+    ProactiveOutcome,
+    ProactiveSubmission,
     ProcessResult,
 )
 
@@ -169,11 +171,16 @@ class Proactive(Protocol):
         material: JsonObject | None = None,
         parts: list[MessagePart] | None = None,
         reason: str,
-    ) -> str: ...
+        tools: bool = False,
+    ) -> ProactiveSubmission: ...
+
+    async def result(self, trace_id: str) -> ProactiveOutcome: ...
 
 
-def validate_proactive(*, topic=None, material=None, parts=None):
+def validate_proactive(*, topic=None, material=None, parts=None, tools=False):
     """共享 SDK 参数约束；目标会话与场景仍由本体验证。"""
+    if not isinstance(tools, bool):
+        raise ValueError("tools must be a boolean")
     if (topic is None) == (parts is None):
         raise ValueError("provide exactly one of topic or parts")
     if topic is not None and not isinstance(topic, str):

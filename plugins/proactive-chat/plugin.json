@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "id": "proactive-chat",
+  "name": "主动私聊",
+  "summary": "按作息、节日和聊天间隔，在主人的私聊里提出开口的话题。",
+  "category": "behavior",
+  "version": "0.1.0",
+  "requires": {"sdk": ">=0.18,<0.19"},
+  "entry": "plugin:Plugin",
+  "permissions": ["message.proactive"],
+  "contributes": {
+    "behavior": {
+      "message_received": {"handler": "incoming"},
+      "after_generation": {"handler": "focus"},
+      "before_send": {"handler": "before_send"}
+    },
+    "events": {"subscribe": ["message.received", "reply.sent"], "handler": "on_event"},
+    "schedule": [{"id": "tick", "every": "PT1M", "handler": "on_tick"}],
+    "api_routes": [{
+      "method": "GET", "path": "/plugins/proactive-chat/status", "handler": "status", "audit": false
+    }]
+  },
+  "config": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["conversation"],
+    "properties": {
+      "conversation": {"type": "string", "minLength": 1},
+      "silence_hours": {
+        "type": "array", "minItems": 2, "maxItems": 2, "default": [2, 3],
+        "items": {"type": "number", "minimum": 1, "maximum": 24}
+      },
+      "min_gap_minutes": {"type": "integer", "minimum": 5, "maximum": 240, "default": 30},
+      "backoff_minutes": {
+        "type": "array", "minItems": 1, "default": [30, 60, 120, 240],
+        "items": {"type": "integer", "minimum": 5, "maximum": 1440}
+      },
+      "max_openings_per_day": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+      "max_attempts_per_day": {"type": "integer", "minimum": 1, "maximum": 200, "default": 40},
+      "chatting_minutes": {"type": "integer", "minimum": 1, "maximum": 60, "default": 10},
+      "retry_after_decline_hours": {
+        "type": "array", "minItems": 2, "maxItems": 2, "default": [1, 2],
+        "items": {"type": "number", "minimum": 0.5, "maximum": 24}
+      },
+      "owner_rest": {
+        "type": "object", "additionalProperties": false,
+        "default": {"from": "00:00", "to": "08:00", "active_minutes": 30},
+        "properties": {
+          "from": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+          "to": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+          "active_minutes": {"type": "integer", "minimum": 0, "maximum": 120, "default": 30}
+        }
+      },
+      "companion_rest": {
+        "type": "object", "additionalProperties": false,
+        "default": {
+          "workday": {"from": "01:00", "to": "09:30"},
+          "restday": {"from": "01:30", "to": "10:30"}
+        },
+        "properties": {
+          "workday": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "from": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+              "to": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"}
+            }
+          },
+          "restday": {
+            "type": "object", "additionalProperties": false,
+            "properties": {
+              "from": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"},
+              "to": {"type": "string", "pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"}
+            }
+          }
+        }
+      },
+      "morning_jitter_minutes": {"type": "integer", "minimum": 0, "maximum": 60, "default": 20},
+      "topics": {
+        "type": "array", "uniqueItems": true, "default": ["good_morning", "long_silence", "festival"],
+        "items": {"enum": ["good_morning", "long_silence", "festival"]}
+      }
+    }
+  },
+  "data": {"version": 1, "on_uninstall": "keep"},
+  "hot_reload": true
+}

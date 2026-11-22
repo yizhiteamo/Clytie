@@ -84,6 +84,13 @@ def owned_task(ledger, task_id, *, full=False):
 
 async def companion_operation(runtime, op, args):
     home, clock, cid, host = runtime.home, runtime.clock, runtime.cid, runtime.host
+    if op == "proactive":
+        from clytie.backup.coordination import CaptureError
+
+        try:
+            return await runtime.agent.proactive_pause.set(args["paused"])
+        except CaptureError as exc:
+            raise APIError(exc.code, 409) from None
     if op == "backup_capture":
         from clytie.backup.controller import capture_request
 

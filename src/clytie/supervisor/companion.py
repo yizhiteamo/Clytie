@@ -15,6 +15,7 @@ from clytie.plugin_host.locking import OperationBusy
 from clytie.plugin_host.support import HostLog, timed
 from clytie.sdk import CancelToken, PluginUnavailable
 from clytie.sdk.channel import channel_state
+from clytie.sdk.context import ServiceUnavailable
 
 from .common import finish_shutdown, read
 
@@ -37,6 +38,7 @@ class Companion:
         self.root = repo_root or repository_root()
         self.log = HostLog()
         self.host = host or PluginHost(self.root, home, clock=clock)
+        self.host.proactive_backends[cid] = (self._proactive_submit, self._proactive_result)
         self.runtime = LedgerRuntime(home, cid, clock, log=self.log)
         self.runtime.owner_managed = True
         self.storage_owner = None
@@ -56,6 +58,19 @@ class Companion:
         self.on_phase = lambda phase: None
         self.forward_safety_trip = None
         self.stop_requested = lambda: False
+
+    async def _proactive_submit(self, plugin_id, conversation_id, **options):
+        if self.agent is None:
+            raise ServiceUnavailable("companion_starting")
+        return await self.agent.submit(conversation_id, plugin_id=plugin_id, **options)
+
+    async def _proactive_result(self, plugin_id, trace_id):
+        # Plugins reconcile outstanding traces during start, after ledger recovery
+        # and before the model and Agent have been assembled.
+        ledger = self.runtime.ledger
+        if ledger is None:
+            raise ServiceUnavailable("companion_starting")
+        return await run_sync(ledger, ledger.proactive_result, plugin_id, trace_id)
 
     async def start(self):
         try:
@@ -272,6 +287,7 @@ class Companion:
         return await run_sync(ledger, function, *args, **kwargs)
 
     async def _stop(self, mode, *, orphan=False):
+        self.host.proactive_backends.pop(self.cid, None)
         if mode == "cancel" or self.escalated.is_set():
             self.cancel_management()
         if not self.agent:
@@ -475,6 +491,8 @@ class Companion:
     def _mark_cancelled(self, trace):
         with self.kernel.ledger.transaction():
             record = self.kernel.ledger.get("record", trace)
+            if record.get("proactive") and not record.get("proactive_result"):
+                record["proactive_result"] = "interrupted"
             record["cancelled"] = True
             self.kernel.ledger.put("record", trace, record)
             return record

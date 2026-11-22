@@ -1105,6 +1105,9 @@ def load_home(
                 model_config = merged
             elif kind == "channels":
                 channel_configs[position[1]] = merged
+        for tool in _entries(_entries(data.get("proactive")).get("tools")):
+            if tool.startswith("core_") or tool not in declared_tools:
+                reader.issue(file, ("proactive", "tools", tool), "assembled capability tool", tool)
         for tool in _entries(data.get("tool_scopes")):
             if tool not in declared_tools:
                 dialogue_notices.append(

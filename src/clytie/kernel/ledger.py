@@ -6,6 +6,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from uuid import uuid4
 
+from clytie.sdk.types import ProactiveOutcome
 from clytie.storage.owner import before_storage_commit
 
 from .projection import redact, visible
@@ -15,6 +16,10 @@ EXEC_TERMINAL = {"ok", "error", "denied", "cancelled", "interrupted"}
 INTENT_TERMINAL = {"sent", "failed", "unknown"}
 TABLES = {"inbound", "inbound_media", "record", "invocation", "intent", "attempt", "dedupe"}
 MEDIA_INDEX = """CREATE INDEX media_record ON inbound_media(json_extract(data,'$.record_id'))"""
+ACTIVE_RECORD = (
+    "(json_extract(data,'$.exec_status') IN ('running','pending') "
+    "OR json_extract(data,'$.delivery_status')='pending')"
+)
 SCHEMA_SQL = (
     *(
         f'CREATE TABLE "{table}" (id TEXT PRIMARY KEY, data TEXT NOT NULL)'
@@ -27,6 +32,11 @@ SCHEMA_SQL = (
     MEDIA_INDEX,
 )
 HEALTH_SQL = (
+    "CREATE INDEX IF NOT EXISTS active_conversation ON record("
+    "json_extract(data,'$.conversation_id')) WHERE " + ACTIVE_RECORD,
+    "CREATE INDEX IF NOT EXISTS proactive_calls_by_day ON invocation("
+    "json_extract(data,'$.proactive_day'),json_extract(data,'$.tool')) "
+    "WHERE json_extract(data,'$.proactive_day') IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS health_tasks ON record("
     "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))",
     "CREATE INDEX IF NOT EXISTS health_sending ON intent(json_extract(data,'$.status'))",
@@ -171,7 +181,59 @@ class Ledger:
                 conversation_id=event.conversation.conversation_id,
             )
             self.put("inbound", event.event_id, data)
+            if event.message and event.message.sender.role == "owner":
+                self._supersede_proactive(event.conversation.conversation_id)
         return event.event_id, True
+
+    def _supersede_proactive(self, conversation_id):
+        # The inbound claim, capability start, and first send attempt are ordered
+        # by the ledger writer. Once execution or transmission starts, let it finish.
+        row = self.db.execute(
+            "SELECT data FROM record WHERE "
+            + ACTIVE_RECORD
+            + " AND json_extract(data,'$.conversation_id')=? AND json_extract(data,'$.proactive')=1",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return
+        record = json.loads(row[0])
+        trace = record["trace_id"]
+        if (
+            record.get("proactive_result")
+            or record.get("started_at")
+            or self.db.execute(
+                "SELECT 1 FROM intent WHERE json_extract(data,'$.trace_id')=? "
+                "AND json_extract(data,'$.attempts')>0 LIMIT 1",
+                (trace,),
+            ).fetchone()
+        ):
+            return
+        record.update(
+            proactive_result="superseded",
+            cancelled=True,
+            exec_status="cancelled",
+            finished_at=self.now(),
+            error={"code": "superseded", "message": ""},
+        )
+        self.put("record", trace, record)
+        self.audit("proactive.superseded", trace_id=trace)
+
+    def proactive_result(self, plugin_id, trace):
+        record = self.get("record", trace) if isinstance(trace, str) else None
+        if not plugin_id or not record or record.get("proactive_plugin") != plugin_id:
+            return ProactiveOutcome(status="not_found")
+        if first_sent := record.get("proactive_sent_at"):
+            return ProactiveOutcome(status="sent", sent_at=first_sent)
+        delivery = record["delivery_status"]
+        if delivery == "unknown":
+            return ProactiveOutcome(status="unknown")
+        if outcome := record.get("proactive_result"):
+            return ProactiveOutcome(status=outcome)
+        if record["exec_status"] == "interrupted":
+            return ProactiveOutcome(status="interrupted")
+        if record["exec_status"] not in EXEC_TERMINAL or delivery == "pending":
+            return ProactiveOutcome(status="pending")
+        return ProactiveOutcome(status="failed")
 
     def update_media(self, record_id, part_index, status, asset=None, *, first_frame=False):
         with self.transaction():
@@ -225,6 +287,8 @@ class Ledger:
         prepared_trace=None,
         watermark=None,
         partial_groups=(),
+        proactive=False,
+        proactive_plugin=None,
     ):
         with self.transaction():
             event = self.get("inbound", event_id) if event_id else None
@@ -237,10 +301,24 @@ class Ledger:
             source = (
                 event["conversation"] if event else dump(conversation or invocation.conversation)
             )
+            if (
+                proactive
+                and self.db.execute(
+                    "SELECT 1 FROM record WHERE "
+                    + ACTIVE_RECORD
+                    + " AND json_extract(data,'$.conversation_id')=? LIMIT 1",
+                    (source["conversation_id"],),
+                ).fetchone()
+            ):
+                return None
             actor = (
                 event["message"]["sender"]
                 if event and event.get("message")
-                else (dump(invocation.actor) if invocation else None)
+                else (
+                    dump(invocation.actor)
+                    if invocation and invocation.actor and not proactive
+                    else None
+                )
             )
             if prepared_trace and self.record_opened_since(source["conversation_id"], watermark):
                 prepared_trace = None
@@ -267,6 +345,9 @@ class Ledger:
                 notified=False,
                 error=None,
             )
+            if proactive:
+                record["proactive"] = True
+                record["proactive_plugin"] = proactive_plugin
             if prepared_trace:
                 record["model_calls"] = 1
                 for group in partial_groups:
@@ -301,7 +382,19 @@ class Ledger:
         encoded = encode(key)
         return next((r for r in self.rows("invocation") if r["idem_key"] == encoded), None)
 
-    def claim_invocation(self, trace, plugin_id, call, plugin_key, *, timeout, schema):
+    def proactive_counts(self):
+        day = self.clock.now().astimezone(self.clock.local_tz).date().isoformat()
+        return dict(
+            self.db.execute(
+                "SELECT json_extract(data,'$.tool'), count(*) FROM invocation "
+                "WHERE json_extract(data,'$.proactive_day')=? GROUP BY json_extract(data,'$.tool')",
+                (day,),
+            )
+        )
+
+    def claim_invocation(
+        self, trace, plugin_id, call, plugin_key, *, timeout, schema, proactive_limit=None
+    ):
         with self.transaction():
             r = self.get("record", trace)
             key = [
@@ -316,6 +409,16 @@ class Ledger:
                 return found, False
             if r["exec_status"] in EXEC_TERMINAL or r["cancelled"]:
                 raise ValueError("record closed")
+            proactive_day = None
+            if proactive_limit is not None:
+                proactive_day = self.clock.now().astimezone(self.clock.local_tz).date().isoformat()
+                used = self.db.execute(
+                    "SELECT count(*) FROM invocation WHERE json_extract(data,'$.proactive_day')=? "
+                    "AND json_extract(data,'$.tool')=?",
+                    (proactive_day, call.tool),
+                ).fetchone()[0]
+                if used >= proactive_limit:
+                    return None, False
             first = r["kind"] == "chat"
             if first:
                 ids = {x["task_id"] for x in self.rows("record")}
@@ -333,6 +436,7 @@ class Ledger:
             self.put("record", trace, r)
             invocation = dict(
                 invocation_id=uuid4().hex,
+                origin="proactive" if r.get("proactive") else "message",
                 trace_id=trace,
                 plugin_id=plugin_id,
                 tool=call.tool,
@@ -347,6 +451,10 @@ class Ledger:
                 started_at=None,
                 finished_at=None,
             )
+            if proactive_day is not None:
+                invocation["proactive_day"] = proactive_day
+            if r.get("proactive"):
+                self.audit("proactive.tool", trace_id=trace, tool=call.tool, origin="proactive")
             self.put("invocation", invocation["invocation_id"], invocation)
         return invocation, first
 
@@ -355,9 +463,13 @@ class Ledger:
             inv = self.get("invocation", invocation_id)
             if inv["status"] != "pending":
                 return False
+            r = self.get("record", inv["trace_id"])
+            if r.get("proactive_result") == "superseded":
+                inv.update(status="cancelled", finished_at=self.now())
+                self.put("invocation", invocation_id, inv)
+                return False
             inv.update(status="running", started_at=self.now())
             self.put("invocation", invocation_id, inv)
-            r = self.get("record", inv["trace_id"])
             r["started_at"] = r["started_at"] or self.now()
             self.put("record", r["trace_id"], r)
         return True
@@ -498,6 +610,11 @@ class Ledger:
                 )
                 intent["error_written_at"] = self.now()
                 self.put("intent", intent_id, intent)
+                if status == "sent" and not intent["status_reaction"]:
+                    record = self.get("record", intent["trace_id"])
+                    if record.get("proactive") and not record.get("proactive_sent_at"):
+                        record["proactive_sent_at"] = value["at"]
+                        self.put("record", record["trace_id"], record)
                 self._aggregate(intent["trace_id"])
                 if status == "sent" and on_confirmed:
                     on_confirmed(intent)
