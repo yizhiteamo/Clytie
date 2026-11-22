@@ -508,3 +508,58 @@ async def test_explicit_restart_does_not_leak_reason_into_crash(tmp_path, reason
     await spin()
     await assert_latest_exit_reason(svc, notifier, clock, tmp_path)
     await svc.stop()
+
+
+@pytest.mark.parametrize("code", [5, 32])
+def test_state_read_retries_windows_sharing_until_success(tmp_path, monkeypatch, code):
+    from clytie.supervisor import common
+
+    path = tmp_path / "health.json"
+    path.write_bytes(b'{"valid":true}')
+    original = type(path).read_bytes
+    calls = []
+
+    def read_bytes(self):
+        calls.append(self)
+        if len(calls) <= 2:
+            error = PermissionError()
+            error.winerror = code
+            raise error
+        return original(self)
+
+    monkeypatch.setattr(common, "platform", "win32")
+    monkeypatch.setattr(type(path), "read_bytes", read_bytes)
+    assert read(path) == {"valid": True}
+    assert calls == [path] * 3
+
+
+@pytest.mark.parametrize(
+    "platform,code,retry", [("linux", 5, False), ("win32", 19, False), ("win32", 32, True)]
+)
+def test_state_read_propagates_error_with_bounded_wait(
+    tmp_path, monkeypatch, platform, code, retry
+):
+    from clytie.supervisor import common
+
+    path = tmp_path / "health.json"
+    error = PermissionError()
+    error.winerror = code
+    waits = []
+    calls = []
+
+    def fail(self):
+        calls.append(self)
+        raise error
+
+    monkeypatch.setattr(common, "platform", platform)
+    monkeypatch.setattr(type(path), "read_bytes", fail)
+    monkeypatch.setattr(common.SystemClock, "monotonic", lambda self: sum(waits))
+    monkeypatch.setattr(common.Event, "wait", lambda self, delay: waits.append(delay))
+    with pytest.raises(PermissionError) as caught:
+        read(path)
+    assert caught.value is error
+    if retry:
+        assert calls == [path] * (len(waits) + 1)
+        assert sum(waits) == pytest.approx(0.2) and all(wait <= 0.01 for wait in waits)
+    else:
+        assert calls == [path] and not waits
