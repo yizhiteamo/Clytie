@@ -77,6 +77,35 @@ async def test_daily_limit_and_stranger_skip(tmp_path):
         await finish(agent)
 
 
+async def test_recollect_daily_limit_resets_at_instance_midnight(tmp_path):
+    from clytie.config import load_home
+
+    from .host_helpers import ROOT
+
+    agent, _, model = await make_agent(
+        tmp_path,
+        {"finish": "stop", "text": "[]"},
+        {"finish": "stop", "text": "[]"},
+        changes={"memory": {"recollect": {"daily_limit": 1}}},
+    )
+    try:
+        agent.host.configure_report(load_home(ROOT / "examples/home", repo_root=ROOT))
+        clock = agent.clock
+        clock.advance(15 * 3600)
+        await clock.drain()
+        for i, expected_day in enumerate(["2000-01-01", "2000-01-02"], 1):
+            item = event(agent)
+            agent.ledger.claim_inbound(item)
+            agent.ledger.ignore(item.event_id)
+            await clock.advance_and_drain(30 * 60)
+            progress = agent.recollector.progress("owner_private")
+            assert len(model.requests) == i
+            assert (progress["day"], progress["count"]) == (expected_day, 1)
+        assert clock.now().date().isoformat() == "2000-01-01"
+    finally:
+        await finish(agent)
+
+
 async def test_retracted_window_raw_chat_unchanged_no_derived_retracted_record(tmp_path):
     agent, _, model = await make_agent(
         tmp_path,

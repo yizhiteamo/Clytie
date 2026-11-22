@@ -1,6 +1,22 @@
 {
   "plugins": [
     {
+      "category": "behavior",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "chat-timing",
+      "name": "聊天时机",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "合并连续消息，按群内参与情况决定是否接话。",
+      "version": "0.1.0"
+    },
+    {
       "category": "memory",
       "conflicts": [],
       "dependencies": {},
@@ -169,6 +185,22 @@
         "url": null
       },
       "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
+      "version": "0.1.0"
+    },
+    {
+      "category": "behavior",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "reply-form",
+      "name": "聊天回复形态",
+      "permissions": [],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "按聊天语境分段、引用与间隔发送。",
       "version": "0.1.0"
     }
   ],
