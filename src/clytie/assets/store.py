@@ -312,7 +312,9 @@ class AssetStore:
     def _save(self, rows):
         value = AssetSnapshot(uuid.uuid4().hex, tuple(rows)).as_dict()
         validate_registry(value)
-        atomic_write(self._safe("shared/assets/registry.json"), canonical(value))
+        atomic_write(
+            self._safe("shared/assets/registry.json"), canonical(value), retry_sharing=True
+        )
 
     def _prepare_registration(self, row):
         snapshot = self.snapshot()
