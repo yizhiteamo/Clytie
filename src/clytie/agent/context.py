@@ -226,7 +226,7 @@ class Context:
             )
         }
 
-    def _snapshot(self, conversation, use=None):
+    def _snapshot(self, conversation, preparing):
         ledger = self.agent.ledger
         with ledger.transaction():
             tables = self._read_tables()
@@ -242,6 +242,7 @@ class Context:
                 for a in snapshot.rows("audit")
                 if a["kind"] == "partial_group_context"
             }
+            pending = set()
             for group, rows in groups.items():
                 if (
                     group not in announced
@@ -249,11 +250,11 @@ class Context:
                     and not all(r["status"] == "sent" for r in rows)
                     and not any(r["status"] in {"pending", "sending", "retry_wait"} for r in rows)
                 ):
-                    if use is None:
-                        ledger.audit("partial_group_context", group_id=group)
+                    if preparing:
+                        pending.add(group)
                     else:
-                        use.partial_groups.add(group)
-            return tables
+                        ledger.audit("partial_group_context", group_id=group)
+            return tables, pending
 
     async def build(
         self,
@@ -270,7 +271,12 @@ class Context:
         use=None,
     ):
         agent = self.agent
-        ledger = LedgerSnapshot(await run_sync(agent.ledger, self._snapshot, conversation, use))
+        tables, pending = await run_sync(
+            agent.ledger, self._snapshot, conversation, use is not None
+        )
+        if use is not None:
+            use.partial_groups.update(pending)
+        ledger = LedgerSnapshot(tables)
         media = {(row["record_id"], row["part_index"]): row for row in ledger.rows("inbound_media")}
         if not agent.features.supports_images:
             capabilities += "\n当前模型看不到图片"

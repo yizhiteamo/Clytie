@@ -79,7 +79,9 @@ class RecollectionModel:
                 agent.ledger.audit(
                     "memory.recollect_model",
                     purpose=purpose,
-                    usage=result.usage.model_dump(mode="json"),
+                    usage=result.usage.model_dump(
+                        mode="json", include={"input_tokens", "output_tokens"}
+                    ),
                     finish=result.finish,
                 )
 

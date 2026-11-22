@@ -214,24 +214,24 @@ class MemoryContext:
             count += 1
         chosen = [r for r in visible if r.record_id in selected]
         if use is None:
-            await run_sync(self.store, reinforce, self.store, chosen)
+            await run_sync(self.store, lambda rows: reinforce(self.store, rows), chosen)
         else:
             use.memories.update((r.record_id, r.revision) for r in chosen)
         return [ChatMessage(role="system", parts=[TextPart(text="记忆：\n" + "\n".join(lines))])]
 
     async def reinforce_used(self, revisions):
-        def apply():
-            records = [self.store.get_raw(key) for key in revisions]
+        def apply(selected):
+            records = [self.store.get_raw(key) for key in selected]
             reinforce(
                 self.store,
                 [
                     r
                     for r in records
-                    if r and not r.retracted and r.revision == revisions[r.record_id]
+                    if r and not r.retracted and r.revision == selected[r.record_id]
                 ],
             )
 
-        await run_sync(self.store, apply)
+        await run_sync(self.store, apply, revisions)
 
     async def guard(self, text, scene):
         try:

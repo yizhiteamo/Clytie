@@ -370,3 +370,56 @@ async def test_prepare_deadline_includes_context_but_usage_times_only_model(tmp_
         None,
     )
     await finish(agent)
+
+
+async def test_adopt_partial_group_across_storage_owner(tmp_path):
+    from clytie.backup.coordination import run_sync
+
+    from .test_storage_agent_lifecycle import inbound, ready_runtime
+
+    async with ready_runtime(tmp_path) as runtime:
+        agent = runtime.agent
+        ledger = runtime.kernel.ledger
+        item = inbound(runtime)
+        group_id = "fictional-split"
+
+        def seed_partial():
+            old = ledger.open_record(conversation=item.conversation)
+            ledger.seal(old["trace_id"], "ok")
+            with ledger.transaction():
+                for index, status in enumerate(["sent", "failed"]):
+                    key = f"fictional-part-{index}"
+                    ledger.put(
+                        "intent",
+                        key,
+                        dict(
+                            intent_id=key,
+                            trace_id=old["trace_id"],
+                            conversation_id=item.conversation.conversation_id,
+                            status=status,
+                            status_reaction=False,
+                            parts=[],
+                            split={"index": index, "group_id": group_id},
+                        ),
+                    )
+
+        await run_sync(ledger, seed_partial)
+        await enable(agent.host, "chat-timing")
+        await agent.receive(item)
+        current = draft(agent, item)
+        await current.task
+        assert current.use.partial_groups == {group_id}
+        audit = await run_sync(ledger, ledger.rows, "audit")
+        assert not any(row["kind"] == "partial_group_context" for row in audit)
+        batch = agent.batches[item.conversation.conversation_id, item.message.sender.actor_id]
+        timer = batch["timer"]
+        await agent.clock.advance_and_drain(3)
+        await timer
+        await agent.drain()
+        audit = await run_sync(ledger, ledger.rows, "audit")
+        assert [row["group_id"] for row in audit if row["kind"] == "partial_group_context"] == [
+            group_id
+        ]
+        assert (await run_sync(ledger, ledger.get, "record", current.trace))[
+            "delivery_status"
+        ] == "sent"
