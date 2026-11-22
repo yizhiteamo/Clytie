@@ -155,7 +155,13 @@ def normalize_event(ctx, payload, expected_account):
         channel_id=channel,
         conversation=conversation,
         message=Message(
-            ref=reference, sender=ctx.identity.resolve_actor(sender), parts=parts, sent_at=sent_at
+            ref=reference,
+            sender=ctx.identity.resolve_actor(sender),
+            parts=parts,
+            sent_at=sent_at,
+            reply_to=next(
+                (part.message_ref for part in parts if isinstance(part, QuotePart)), None
+            ),
         ),
         received_at=ctx.clock.now(),
     ), count

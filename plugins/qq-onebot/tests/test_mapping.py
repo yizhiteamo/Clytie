@@ -115,6 +115,19 @@ def test_qq_mapping_all_inbound_parts(mapping, ctx):
     assert again.message.parts[8].sticker_id == actual[8].sticker_id
 
 
+def test_qq_mapping_uses_first_valid_reply_as_target(mapping, ctx):
+    segments = [segment("reply", id=None), segment("reply", id="-41"), segment("reply", id="7")]
+    result, malformed = mapping.normalize_event(ctx, event(segments), "1000000000")
+    assert malformed == 1
+    unknown, first, second = result.message.parts
+    assert isinstance(unknown, UnknownPart)
+    assert isinstance(first, QuotePart) and isinstance(second, QuotePart)
+    assert [p.message_ref.platform_message_id for p in (first, second)] == ["-41", "7"]
+    assert result.message.reply_to == first.message_ref
+    result, _ = mapping.normalize_event(ctx, event(segments[:1]), "1000000000")
+    assert result.message.reply_to is None
+
+
 @pytest.mark.parametrize(
     "changes",
     [

@@ -43,11 +43,13 @@ def normalized(value, *, compact=False):
 
 
 def fast_cancel(message, words):
-    # 删除结构化的 @自己；其他提及或媒体不可能是纯文字取消。
-    if any(
-        p.type not in {"text", "mention"} or p.type == "mention" and not p.is_self
-        for p in message.parts
-    ):
+    seen_quote = False
+    for part in message.parts:
+        if part.type == "text" or (part.type == "mention" and part.is_self):
+            continue
+        if part.type == "quote" and not seen_quote and part.message_ref == message.reply_to:
+            seen_quote = True
+            continue
         return None
     value = "".join(p.text for p in message.parts if p.type == "text")
 
