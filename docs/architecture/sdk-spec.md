@@ -129,7 +129,7 @@
 
 ### 1.6 能力
 
-**Invocation**（能力执行时的调用信息）：`companion_id`、`actor: Actor`、`conversation: Conversation`、`trace_id`、`task_id: str?`。
+**Invocation**（能力执行时的调用信息）：`companion_id`、`actor: Actor?`、`origin: message|proactive`、`conversation: Conversation`、`trace_id`、`task_id: str?`。主动开口中 `actor` 为空、`origin = proactive`，插件不能把这次调用当作任何人的请求（SDK 0.18，proactive-spec §4.1）。
 
 **Plan**：`summary: str`（写入账本）、`heavy: bool`、`data: dict`（插件自用）。
 
@@ -292,7 +292,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 | `before_send` | list[DeliveryIntent] | 修改后的 list[DeliveryIntent] |
 | `task_completed` | 任务摘要 | 不返回 |
 
-`ReplyDraft`：`parts`、`conversation`、`task_id?`、`trace_id`、`form: plain|split|card`、`quote: MessageRef?`。
+`ReplyDraft`：`parts`、`conversation`、`task_id?`、`trace_id`、`form: plain|split|card`、`quote: MessageRef?`、`kind: reply|proactive`（SDK 0.18，本体填写，插件不能修改）。
 `CompanionState`：`companion_id`、各插件通过服务公布的状态摘要（只读）。
 
 ### 5.6 其他扩展点
@@ -409,13 +409,13 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 |---|---|
 | `message.received` | `event_id`、`trace_id`、`conversation_id`、`scene`、`actor_id` |
 | `reply.sent` | `trace_id`、`conversation_id`、`intent_ids: list`、`task_id?` |
-| `task.started` | `task_id`、`trace_id`、`tool`、`actor_id`、`conversation_id` |
+| `task.started` | `task_id`、`trace_id`、`tool`、`actor_id?`、`origin`、`conversation_id` |
 | `task.completed` / `task.failed` | `TaskSummary`（下表） |
 | `companion.state_changed` | `companion_id`、`plugin_id`、`state: JsonObject` |
 | `quota.changed` | `model_plugin`、`snapshot: QuotaSnapshot?`、`protection_mode: bool` |
 | `plugin.enabled` / `plugin.disabled` | `plugin_id`、`companion_id`、`reason?` |
 
-**TaskSummary**：`task_id`、`trace_id`、`tool`、`status: ok|error|denied|cancelled`、`actor_id`、`conversation_id`、`scene`、`started_at`、`finished_at`、`asset_ids: list`、`error_code?`。`task_completed` 环节的输入就是 `TaskSummary`。
+**TaskSummary**：`task_id`、`trace_id`、`tool`、`status: ok|error|denied|cancelled`、`actor_id?`、`origin: message|proactive`、`conversation_id`、`scene`、`started_at`、`finished_at`、`asset_ids: list`、`error_code?`。`task_completed` 环节的输入就是 `TaskSummary`。主动任务的 `actor_id` 为空（SDK 0.18，proactive-spec §4.1）。
 
 **CompanionState**：`companion_id`、`states: dict[plugin_id, JsonObject]`。`states` 的内容来自各插件通过 `ctx.state.set()` 公布的最新状态（见 7.5），只读。
 
@@ -443,13 +443,13 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 | `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
 | `credentials` | 实例配置 `credentials.<ref>.plugins` 列出本插件 | `async read(ref) -> str`；失败抛 `CredentialUnavailable(code)`。平台插件另有 `account_secret()`。见 runtime-services-spec §1 和 ADR 0031 |
 | `websocket` | `network` | 只有客户端：`async connect(url, *, headers=None, timeout_s=10, max_message_bytes=16 MB) -> WebSocketConnection`（`send_text`、`receive(cancel)`、`close`、`closed`、`close_code`）。只收发文本帧，插件停止时宿主关闭全部连接。详见 ADR 0030（阶段二 B2，用户已确认） |
-| `proactive` | `message.proactive` | `async submit(conversation_id, *, topic: str \| None = None, material: JsonObject \| None = None, parts: list[MessagePart] \| None = None, reason: str, tools: bool = False) -> str \| None`（返回 `trace_id`，暂停主动聊天时返回 `None`；话题与直接发送二选一，仍经过边界和出站检查，见下） |
+| `proactive` | `message.proactive` | `async submit(conversation_id, *, topic: str \| None = None, material: JsonObject \| None = None, parts: list[MessagePart] \| None = None, reason: str, tools: bool = False) -> ProactiveSubmission`；`async result(trace_id) -> ProactiveOutcome`（话题与直接发送二选一，仍经过边界和出站检查，见下） |
 | `subprocess` | `subprocess` | `async run(args: list[str], *, timeout_s, env=None, max_output_bytes=10 MB) -> ProcessResult`（`returncode: int`、`stdout: bytes`、`stderr: bytes`、`truncated: bool`）；不经过 shell，工作目录固定为插件私有目录；输出超过上限时截断并置 `truncated` |
 | `identity` | 实现了 `channel` 扩展点的插件自动获得 | `resolve_actor(account) -> Actor`、`resolve_conversation(kind, platform_id) -> Conversation`、`account_for(actor_id) -> str \| None`、`platform_id_for(conversation_id) -> str \| None`、`self_account() -> str \| None`（本单元绑定的平台账号，未绑定为 `None`，见 ADR 0032）；映射来自实例配置 |
 
 - `bytes` 类型的字段（`HttpResponse.body`、`ProcessResult.stdout/stderr` 等）序列化为 JSON 时使用标准 Base64 字符串，反序列化时还原为 `bytes`。解码为文本由插件自己负责（子进程和网页的编码不一定是 UTF-8，也可能是二进制）。
 - `gpu` 权限没有对应属性，只用于告诉宿主和用户"这个插件会使用 GPU"。
-- `proactive.submit`（agent-spec §15，用户已确认）：`topic` 与 `parts` 同时给出或都不给时抛 `ValueError`。话题方式可附 `material`，文字由模型结合上下文生成，可以选择不发；带 `tools = true` 时按 proactive-spec §4 提供能力，否则不提供。直接发送只允许 `sticker`、`image`、`audio`、`video`、`file`，含 `text`、`card`、`link` 等文字类部分时抛 `ValueError`，提示改用话题方式。`reason` 写入日志和审计，不交给模型。目标会话必须在实例配置登记，未登记或陌生人私聊抛 `ValueError`，不创建记录。返回这次主动消息的 `trace_id`，插件不能读取账本。伴侣的"暂停主动聊天"打开时，话题方式和直接发送都返回 `None`，不建记录（proactive-spec §5）。
+- `proactive.submit`（agent-spec §15，用户已确认）：`topic` 与 `parts` 同时给出或都不给时抛 `ValueError`。话题方式可附 `material`，文字由模型结合上下文生成，可以选择不发；带 `tools = true` 时按 proactive-spec §4 提供能力，否则不提供。直接发送只允许 `sticker`、`image`、`audio`、`video`、`file`，含 `text`、`card`、`link` 等文字类部分时抛 `ValueError`，提示改用话题方式。`reason` 写入日志和审计，不交给模型。目标会话必须在实例配置登记，未登记或陌生人私聊抛 `ValueError`，不创建记录。返回 `ProactiveSubmission`：`status: accepted|paused|busy`，`accepted` 时带 `trace_id`；暂停主动聊天或目标会话正忙时不建记录（proactive-spec §5.1、§5.2）。`result(trace_id)` 只能查本插件提交的编号，返回 `ProactiveOutcome`：`status: pending|sent|unknown|declined|superseded|failed|interrupted|not_found`、`sent_at?`，不含文字（proactive-spec §5.3）。插件不能读取账本。
 - **记忆权限规则**（宿主负责裁剪，插件无法改变）：
   1. 只有 `memory.write`：只能写入新记录，不能 `search`、`get`、`revise`、`retract`。`revise` / `retract` 只能作用于当前场景下读得到的记录。
   2. 场景**由宿主绑定**，插件不能传入或修改。宿主在调用环节、工具、上下文段落等处理某条事件时，把该事件的场景绑定到这次调用；`search`、`get`、`revise`、`retract` 都按绑定的场景过滤。
@@ -588,6 +588,8 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 ### SDK 0.18 主动开口使用能力（用户 2026-11-22 确认）
 
 - `proactive.submit` 新增 `tools: bool = False`。为真时，这次主动开口按 proactive-spec §4 提供能力。
-- `proactive.submit` 的返回值改为 `str | None`。伴侣的"暂停主动聊天"打开时返回 `None`（proactive-spec §5）。
+- `proactive.submit` 的返回值从 `str` 改为 `ProactiveSubmission`；新增 `proactive.result`（proactive-spec §5.2、§5.3，实现时补充）。
+- `Invocation.actor` 改为可空，新增 `Invocation.origin`；`task.started`、`TaskSummary` 的 `actor_id` 改为可空，新增 `origin`（proactive-spec §4.1，实现时补充）。
+- `ReplyDraft` 新增本体填写、插件不能修改的 `kind`（proactive-spec §6，实现时补充）。
 - 能力状态的原因代码新增 `proactive_limit`（agent-spec §5）。
-- 已有插件不用修改：不传 `tools` 时行为不变；只有开关打开时才会收到 `None`。决策记录见 ADR 0036。
+- 0.x 不兼容变更，写入 CHANGELOG。插件需要检查：使用 `submit` 返回值的地方、假设 `Invocation.actor` 有值的能力插件、假设任务事件 `actor_id` 有值的订阅者。决策记录见 ADR 0036。
