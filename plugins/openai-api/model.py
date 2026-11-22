@@ -13,6 +13,12 @@ from clytie.sdk.types import ModelFeatures, ModelTurn, TokenUsage, ToolCall
 MAX_BYTES = 20 * 1024 * 1024
 
 
+def cached_input(usage, details_key):
+    details = usage.get(details_key)
+    value = details.get("cached_tokens") if isinstance(details, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
 class OpenAIModel:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -300,6 +306,7 @@ class OpenAIModel:
         usage = {}
         raw_usage = data.get("usage")
         if isinstance(raw_usage, dict):
+            usage["cached_input_tokens"] = cached_input(raw_usage, "prompt_tokens_details")
             for source, target in (
                 ("prompt_tokens", "input_tokens"),
                 ("completion_tokens", "output_tokens"),
@@ -339,6 +346,7 @@ class OpenAIModel:
                 for key in ("input_tokens", "output_tokens")
                 if type(raw_usage.get(key)) is int and raw_usage[key] >= 0
             }
+            usage["cached_input_tokens"] = cached_input(raw_usage, "input_tokens_details")
         if data.get("status") != "completed":
             return self._error("incomplete_response", usage=usage)
         try:

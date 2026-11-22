@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -40,6 +41,7 @@ from .image_context import ImageContext, view_tool
 from .judgment import AttentionJudgments
 from .persona import Persona
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
+from .prewrite import Prewrites
 from .safety_belt import SafetyBelt
 from .vision import ImageFetcher
 
@@ -166,6 +168,8 @@ class Agent:
         self.model_health = "unknown"
         self.model_error_code = None
         self.shutting_down = False
+        self.prewrites = Prewrites(self)
+        self.opening = {}
         kernel.config = config
         kernel.permissions = lambda actor, tool: (
             self.reason(actor, tool)
@@ -599,9 +603,7 @@ class Agent:
         mentioned = any(p.type == "mention" and p.is_self for p in event.message.parts)
         cancel = fast_cancel(
             event.message,
-            self.config.get("tasks", {}).get(
-                "cancel_words", ["取消", "停", "停止", "停下", "别做了"]
-            ),
+            self.cancel_words(),
         )
         if (
             event.conversation.kind == "group"
@@ -635,11 +637,22 @@ class Agent:
             return record["trace_id"]
         batch_key = (event.conversation.conversation_id, event.message.sender.actor_id)
         if batch_key in self.batches:
-            self.batches[batch_key]["events"].append(event)
-            self.batches[batch_key]["finalizations"].append(finalization)
+            batch = self.batches[batch_key]
+            batch["events"].append(event)
+            batch["finalizations"].append(finalization)
             state["handed"] = True
+            if batch.get("prepare_allowed"):
+                batch["generation"] += 1
+                generation = batch["generation"]
+                previous = batch.pop("timer", None)
+                if previous is not None:
+                    previous.cancel()
+                await self.prewrites.discard(batch, "batch_changed")
+                if generation == batch["generation"]:
+                    return await self.attention(batch_key)
             return None
         batch = {
+            "generation": 0,
             "events": [event],
             "finalizations": [finalization],
             "started": self.clock.monotonic(),
@@ -654,10 +667,14 @@ class Agent:
 
     async def attention(self, key, *, judgment=None, registration=None):
         batch = self.batches[key]
+        generation = batch["generation"]
         try:
             return await self._attention(key, batch, judgment, registration)
         except BaseException as exc:
+            if batch["generation"] != generation:
+                raise
             if not batch.get("queued"):
+                await self.prewrites.discard(batch, "stopped" if self.shutting_down else "error")
                 if self.batches.get(key) is batch:
                     self.batches.pop(key)
                 finalization = batch["finalizations"][0]
@@ -677,6 +694,7 @@ class Agent:
     async def _attention(self, key, batch, judgment, registration):
         finalization = batch["finalizations"][0]
         event = batch["events"][-1]
+        generation = batch["generation"]
         supplied = (event, [e.message for e in batch["events"]])
         origin = []
         if judgment is not None:
@@ -692,6 +710,9 @@ class Agent:
             ),
         )
 
+        if generation != batch["generation"]:
+            return None
+
         def paused():
             return (
                 event.conversation.kind == "group"
@@ -702,7 +723,18 @@ class Agent:
         remaining = 120 - (self.clock.monotonic() - batch["started"])
         defer = isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0)
         already_paused = defer and await finalization.persist(paused)
-        if defer and not already_paused:
+        if generation != batch["generation"]:
+            return None
+        if defer and not already_paused and not self.shutting_down:
+            if opinion.prepare and event is not batch["events"][-1]:
+                return await self.attention(key)
+            batch["prepare_allowed"] = opinion.prepare
+            if opinion.prepare:
+                await self.prewrites.start(batch)
+            else:
+                await self.prewrites.discard(batch, "skipped")
+            if generation != batch["generation"]:
+                return None
             deadline = self.clock.now() + timedelta(seconds=max(0, remaining))
 
             async def later():
@@ -716,17 +748,22 @@ class Agent:
                             deadline=deadline,
                             finalization=finalization,
                         )
-                    await self.attention(key, judgment=result, registration=origin[0])
+                    if batch["generation"] == generation:
+                        await self.attention(key, judgment=result, registration=origin[0])
                 else:
                     await self.clock.sleep(min(opinion.seconds, remaining))
-                    await self.attention(key)
+                    if batch["generation"] == generation:
+                        await self.attention(key)
 
             async def deferred():
                 try:
                     await later()
                 except BaseException:
-                    if self.batches.get(key) is batch:
+                    if self.batches.get(key) is batch and generation == batch["generation"]:
                         self.batches.pop(key, None)
+                        await self.prewrites.discard(
+                            batch, "stopped" if self.shutting_down else "error"
+                        )
                         await finalization.persist(
                             self._ignore_unhandled, [e.event_id for e in batch["events"]]
                         )
@@ -734,14 +771,39 @@ class Agent:
                             responsibility.release()
                     raise
 
-            self.track(finalization.follow(deferred()))
+            batch["timer"] = finalization.track(self.track(deferred()))
             return None
         self.batches.pop(key)
+        # Reserve the order of batches which have already reached their final opinion.
+        cid = event.conversation.conversation_id
+        predecessor = self.opening.get(cid)
+        submitted = asyncio.get_running_loop().create_future()
+        self.opening[cid] = submitted
+        try:
+            if predecessor:
+                await asyncio.shield(predecessor)
+            return await self._respond(batch, opinion, paused, already_paused)
+        finally:
+            submitted.set_result(None)
+            if self.opening.get(cid) is submitted:
+                del self.opening[cid]
+
+    async def _respond(self, batch, opinion, paused, already_paused):
         event = batch["events"][-1]
+        finalization = batch["finalizations"][0]
+        reason = None
 
         def should_open():
+            nonlocal reason
             safety_paused = already_paused or paused()
-            if safety_paused or isinstance(opinion, Skip):
+            if safety_paused or isinstance(opinion, Skip) or self.shutting_down:
+                reason = (
+                    "stopped"
+                    if self.shutting_down
+                    else "safety_paused"
+                    if safety_paused
+                    else "skipped"
+                )
                 self._ignore_unhandled(
                     [e.event_id for e in batch["events"]],
                     "safety_paused" if safety_paused else None,
@@ -749,16 +811,56 @@ class Agent:
                 return False
             return True
 
+        prepared_round = None
+        draft = batch.get("draft")
+        if draft and not (isinstance(opinion, Skip) or already_paused or self.shutting_down):
+            # Avoid waiting for an obsolete model request. Recheck both guards when
+            # opening the record, since another batch may finish during the wait.
+            def invalidated():
+                if paused():
+                    return "safety_paused"
+                if self.ledger.record_opened_since(
+                    event.conversation.conversation_id, draft.watermark
+                ):
+                    return "stale"
+                return None
+
+            invalid = await finalization.persist(invalidated)
+            if invalid:
+                already_paused = invalid == "safety_paused"
+                await self.prewrites.discard(batch, invalid)
+            elif batch.get("draft") is draft:
+                prepared_round = await self.prewrites.result(batch)
+        batch["opening_record"] = True
         record = await self.kernel.open_record(
-            event_id=event.event_id, finalization=finalization, guard=should_open
+            event_id=event.event_id,
+            finalization=finalization,
+            guard=should_open,
+            **(
+                {
+                    "prepared_trace": draft.trace,
+                    "watermark": draft.watermark,
+                    "partial_groups": draft.use.partial_groups,
+                }
+                if prepared_round
+                else {}
+            ),
         )
         if record is None:
+            await self.prewrites.discard(batch, reason)
             for responsibility in batch["finalizations"]:
                 responsibility.release()
             return None
+        if prepared_round and record["trace_id"] != draft.trace:
+            await self.prewrites.discard(batch, "stale")
+            prepared_round = None
         trace = record["trace_id"]
         batch["trace"] = trace
         self._bind_finalization(trace, finalization)
+        if prepared_round:
+            self.prewrites.adopt(batch)
+            if draft.use.memories:
+                await self.memory.reinforce_used(draft.use.memories)
         await finalization.persist(
             self.ledger.merge, [e.event_id for e in batch["events"][:-1]], trace
         )
@@ -767,9 +869,7 @@ class Agent:
         extra = ""
         cancel = fast_cancel(
             event.message,
-            self.config.get("tasks", {}).get(
-                "cancel_words", ["取消", "停", "停止", "停下", "别做了"]
-            ),
+            self.cancel_words(),
         )
         # 在同会话队列前执行控制动作，否则无法取消队首正在运行的聊天。
         if cancel is not None:
@@ -784,6 +884,7 @@ class Agent:
                 event.message.sender,
                 batch["events"],
                 mode=batch["mode"],
+                prepared_round=prepared_round,
                 respond=opinion if isinstance(opinion, Respond) else None,
                 extra=extra,
             ),
@@ -791,6 +892,11 @@ class Agent:
         batch["queued"] = True
         self.track(self._settle_record(trace, finalization, future))
         return trace
+
+    def cancel_words(self):
+        return self.config.get("tasks", {}).get(
+            "cancel_words", ["取消", "停", "停止", "停下", "别做了"]
+        )
 
     async def cancel(self, event, args):
         return await self.kernel.cancel(
@@ -818,14 +924,24 @@ class Agent:
                 finalization.release()
 
     async def _generate(
-        self, trace, messages, specs, conversation, token, finalization, *, rewrite=False
+        self,
+        trace,
+        messages,
+        specs,
+        conversation,
+        token,
+        finalization,
+        *,
+        rewrite=False,
+        prepared=False,
+        deadline=None,
     ):
         token.raise_if_cancelled()
-        record = await finalization.persist(self.ledger.get, "record", trace)
-        limit = self.clock.now() + timedelta(
+        record = None if prepared else await finalization.persist(self.ledger.get, "record", trace)
+        limit = deadline or self.clock.now() + timedelta(
             seconds=self.config.get("agent", {}).get("model_call_seconds", 120)
         )
-        if record["deadline"]:
+        if record and record["deadline"]:
             deadline = datetime.fromisoformat(record["deadline"])
             limit = min(limit, deadline) if rewrite else deadline
 
@@ -835,26 +951,36 @@ class Agent:
                 record["model_calls"] = record.get("model_calls", 0) + 1
                 self.ledger.put("record", trace, record)
 
-        await finalization.persist(record_model_call)
+        if not prepared:
+            await finalization.persist(record_model_call)
         token.raise_if_cancelled()
         child = token.child()
-        task = asyncio.create_task(
-            self.model_call(
-                "generate",
-                ModelRequest(
-                    messages=messages,
-                    tools=specs,
-                    trace_id=trace,
-                    budget=Budget(
-                        deadline=limit,
-                        max_tool_rounds=self.config.get("agent", {}).get("max_tool_rounds", 4),
-                    ),
-                ),
-                child,
-                scene=conversation.scene,
-                conversation_id=conversation.conversation_id,
-            )
+        request = ModelRequest(
+            messages=messages,
+            tools=specs,
+            trace_id=trace,
+            budget=Budget(
+                deadline=limit,
+                max_tool_rounds=self.config.get("agent", {}).get("max_tool_rounds", 4),
+            ),
         )
+        duration_ms = None
+
+        async def call():
+            nonlocal duration_ms
+            started = self.clock.monotonic()
+            try:
+                return await self.model_call(
+                    "generate",
+                    request,
+                    child,
+                    scene=conversation.scene,
+                    conversation_id=conversation.conversation_id,
+                )
+            finally:
+                duration_ms = round((self.clock.monotonic() - started) * 1000)
+
+        task = asyncio.create_task(call())
         finalization.track(task)
         timer = asyncio.create_task(self.clock.sleep_until(limit))
         cancelled = asyncio.create_task(token.wait())
@@ -873,6 +999,9 @@ class Agent:
                 plugin=self.config["model"]["plugin"],
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
+                duration_ms=duration_ms,
+                cached_input_tokens=result.usage.cached_input_tokens,
+                **({} if rewrite else {"prepared": prepared}),
                 image_count=sum(p.type == "image" for m in messages for p in m.parts),
                 image_bytes=sum(
                     p.asset.size for m in messages for p in m.parts if p.type == "image" and p.asset
@@ -891,9 +1020,12 @@ class Agent:
             def audit_late_model_result():
                 with self.ledger.transaction():
                     audit_usage(result, "late")
-                    self.ledger.audit(
-                        "model.late_result", trace_id=trace, content=result.model_dump(mode="json")
-                    )
+                    if not prepared:
+                        self.ledger.audit(
+                            "model.late_result",
+                            trace_id=trace,
+                            content=result.model_dump(mode="json"),
+                        )
 
             await finalization.persist(audit_late_model_result)
 
@@ -946,7 +1078,8 @@ class Agent:
             cancelled.cancel()
             await asyncio.gather(timer, cancelled, return_exceptions=True)
 
-    async def run(self, trace, conversation, actor, events, **options):
+    @asynccontextmanager
+    async def _presence(self, trace, conversation, actor, events):
         from clytie.memory.presence import bind_presence
 
         actors = set()
@@ -969,7 +1102,83 @@ class Agent:
                     ):
                         actors.add(msg["sender"]["actor_id"])
         with bind_presence(conversation.conversation_id, actors):
+            yield
+
+    async def run(self, trace, conversation, actor, events, **options):
+        async with self._presence(trace, conversation, actor, events):
             return await self._run(trace, conversation, actor, events, **options)
+
+    async def _wait_for_images(self, events):
+        ids = {e.event_id for e in events}
+        pending = [task for (key, _), task in self.media_jobs.items() if key in ids]
+        if pending:
+            timer = asyncio.create_task(self.clock.sleep(15))
+            complete = asyncio.gather(*pending, return_exceptions=True)
+            try:
+                await asyncio.wait((timer, complete), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                timer.cancel()
+                await asyncio.gather(timer, return_exceptions=True)
+
+    async def _round_context(
+        self,
+        trace,
+        conversation,
+        actor,
+        events,
+        mode,
+        extra,
+        proactive,
+        dialogue,
+        rounds,
+        picked,
+        selected_refs,
+        use=None,
+    ):
+        specs, states = await self.tools(conversation, actor, proactive)
+        exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
+        limit = self.config.get("vision", {}).get("max_images", 30)
+        images = ImageContext(limit - len(selected_refs))
+        images.picked = picked
+        context = await self.context.build(
+            conversation,
+            actor,
+            events,
+            states,
+            mode=mode,
+            extra=extra,
+            proactive=proactive,
+            memory_trace=trace,
+            images=images,
+            **({"use": use} if use is not None else {}),
+        )
+        request_messages = [*context, *dialogue]
+        images.apply(request_messages)
+        if selected_refs:
+            request_messages.append(reference_message(selected_refs))
+        candidates = self.appearance.dialogue_refs(limit)
+        if (
+            candidates
+            and images.attached
+            and self.features.supports_tools
+            and not proactive
+            and self.scope_allows(actor, "core_view_image", conversation)
+            and self.scope_allows(actor, VIEW.name, conversation)
+        ):
+            specs.append(VIEW)
+        # Picks apply to the next request, which has the full image budget again.
+        images.limit = limit
+        view = view_tool(limit)
+        if (
+            images.available()
+            and self.features.supports_tools
+            and not proactive
+            and self.scope_allows(actor, view.name, conversation)
+        ):
+            specs.append(view)
+        if exhausted:
+            request_messages.append(message("system", "工具轮数已用完，请直接回复"))
+        return specs, candidates, images, request_messages
 
     async def _run(
         self,
@@ -983,6 +1192,7 @@ class Agent:
         proactive=False,
         direct=None,
         respond=None,
+        prepared_round=None,
     ):
         token = self.kernel.tokens.setdefault(trace, CancelToken())
         self.kernel.record_tasks[trace] = asyncio.current_task()
@@ -990,16 +1200,8 @@ class Agent:
             assets, dialogue, rounds = [], [], 0
             picked = []
             selected_refs = []
-            ids = {e.event_id for e in events}
-            pending = [task for (key, _), task in self.media_jobs.items() if key in ids]
-            if pending:
-                timer = asyncio.create_task(self.clock.sleep(15))
-                complete = asyncio.gather(*pending, return_exceptions=True)
-                try:
-                    await asyncio.wait((timer, complete), return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    timer.cancel()
-                    await asyncio.gather(timer, return_exceptions=True)
+            if prepared_round is None:
+                await self._wait_for_images(events)
             if direct is not None:
                 record = await self.kernel.persist(trace, self.ledger.get, "record", trace)
                 intents = [self.intent(record, [part], kind="proactive") for part in direct]
@@ -1022,52 +1224,30 @@ class Agent:
             )
             while True:
                 token.raise_if_cancelled()
-                specs, states = await self.tools(conversation, actor, proactive)
-                exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
                 limit = self.config.get("vision", {}).get("max_images", 30)
-                images = ImageContext(limit - len(selected_refs))
-                images.picked = picked
-                context = await self.context.build(
-                    conversation,
-                    actor,
-                    events,
-                    states,
-                    mode=mode,
-                    extra=extra,
-                    proactive=proactive,
-                    memory_trace=trace,
-                    images=images,
-                )
-                request_messages = [*context, *dialogue]
-                images.apply(request_messages)
-                if selected_refs:
-                    request_messages.append(reference_message(selected_refs))
-                selected_refs = []
-                candidates = self.appearance.dialogue_refs(limit)
-                if (
-                    candidates
-                    and images.attached
-                    and self.features.supports_tools
-                    and not proactive
-                    and self.scope_allows(actor, "core_view_image", conversation)
-                    and self.scope_allows(actor, VIEW.name, conversation)
-                ):
-                    specs.append(VIEW)
-                # Picks apply to the next request, which has the full image budget again.
-                images.limit = limit
+                exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
                 view = view_tool(limit)
-                if (
-                    images.available()
-                    and self.features.supports_tools
-                    and not proactive
-                    and self.scope_allows(actor, view.name, conversation)
-                ):
-                    specs.append(view)
-                if exhausted:
-                    request_messages.append(message("system", "工具轮数已用完，请直接回复"))
-                turn = await self.generate(
-                    trace, request_messages, [] if exhausted else specs, conversation, token
-                )
+                if prepared_round is not None:
+                    specs, candidates, images, turn = prepared_round
+                    prepared_round = None
+                else:
+                    specs, candidates, images, messages = await self._round_context(
+                        trace,
+                        conversation,
+                        actor,
+                        events,
+                        mode,
+                        extra,
+                        proactive,
+                        dialogue,
+                        rounds,
+                        picked,
+                        selected_refs,
+                    )
+                    turn = await self.generate(
+                        trace, messages, [] if exhausted else specs, conversation, token
+                    )
+                selected_refs = []
                 if turn.finish == "cancelled":
                     token.cancel("model_cancelled")
                     raise asyncio.CancelledError
@@ -1623,6 +1803,8 @@ class Agent:
     async def drain(self):
         while self.intake_tasks:
             await asyncio.gather(*tuple(self.intake_tasks), return_exceptions=True)
+        while self.opening:
+            await asyncio.gather(*(asyncio.shield(f) for f in tuple(self.opening.values())))
         await self.kernel.queue.drain()
         await self.safety_belt.drain()
         await self.kernel.reactions.drain()

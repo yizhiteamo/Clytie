@@ -97,7 +97,7 @@ class Plugin:
             else:
                 due = min(state.last_in + self.t.group_quiet, arrivals[0][0] + self.t.group_max)
             if now < due:
-                return Defer(seconds=due - now)
+                return Defer(seconds=due - now, prepare=private or direct or named)
         if private:
             return Respond(focus=event.message.ref if direct or named else None)
         if direct:
@@ -135,6 +135,7 @@ class Plugin:
         start, stop = state.thresholds(band)
         fatigue = "high" if state.fatigue >= stop else "some" if state.fatigue >= start else "none"
         return Judge(
+            prepare=named,
             facts=JudgeFacts(
                 participants=people,
                 share=share,
@@ -144,7 +145,7 @@ class Plugin:
                 ignored_recently=state.level > 0,
                 owner_spoke=owner,
                 name_hit=named,
-            )
+            ),
         )
 
     async def before_send(self, intents):

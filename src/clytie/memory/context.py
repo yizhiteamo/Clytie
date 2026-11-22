@@ -130,7 +130,7 @@ class MemoryContext:
         suffix = "很久以前的事，记不太清了" if record.decay.frozen else ""
         return f"{label} {record.content}（{when}）{suffix}"
 
-    async def build(self, trace, conversation, query):
+    async def build(self, trace, conversation, query, *, use=None):
         session = self.session(trace)
         identity = self.retrieval.embedder_id
         if identity != getattr(self, "_embedding_identity", None):
@@ -212,11 +212,26 @@ class MemoryContext:
             selected.add(record.record_id)
             used += len(label)
             count += 1
-        await run_sync(
-            self.store,
-            lambda: reinforce(self.store, [r for r in visible if r.record_id in selected]),
-        )
+        chosen = [r for r in visible if r.record_id in selected]
+        if use is None:
+            await run_sync(self.store, reinforce, self.store, chosen)
+        else:
+            use.memories.update((r.record_id, r.revision) for r in chosen)
         return [ChatMessage(role="system", parts=[TextPart(text="记忆：\n" + "\n".join(lines))])]
+
+    async def reinforce_used(self, revisions):
+        def apply():
+            records = [self.store.get_raw(key) for key in revisions]
+            reinforce(
+                self.store,
+                [
+                    r
+                    for r in records
+                    if r and not r.retracted and r.revision == revisions[r.record_id]
+                ],
+            )
+
+        await run_sync(self.store, apply)
 
     async def guard(self, text, scene):
         try:

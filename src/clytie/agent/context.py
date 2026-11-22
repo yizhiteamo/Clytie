@@ -226,7 +226,7 @@ class Context:
             )
         }
 
-    def _snapshot(self, conversation):
+    def _snapshot(self, conversation, use=None):
         ledger = self.agent.ledger
         with ledger.transaction():
             tables = self._read_tables()
@@ -249,7 +249,10 @@ class Context:
                     and not all(r["status"] == "sent" for r in rows)
                     and not any(r["status"] in {"pending", "sending", "retry_wait"} for r in rows)
                 ):
-                    ledger.audit("partial_group_context", group_id=group)
+                    if use is None:
+                        ledger.audit("partial_group_context", group_id=group)
+                    else:
+                        use.partial_groups.add(group)
             return tables
 
     async def build(
@@ -264,9 +267,10 @@ class Context:
         proactive=False,
         memory_trace=None,
         images=None,
+        use=None,
     ):
         agent = self.agent
-        ledger = LedgerSnapshot(await run_sync(agent.ledger, self._snapshot, conversation))
+        ledger = LedgerSnapshot(await run_sync(agent.ledger, self._snapshot, conversation, use))
         media = {(row["record_id"], row["part_index"]): row for row in ledger.rows("inbound_media")}
         if not agent.features.supports_images:
             capabilities += "\n当前模型看不到图片"
@@ -377,7 +381,10 @@ class Context:
             memory_messages = await agent.memory_context(conversation, actor)
         else:
             memory_messages = await agent.memory.build(
-                memory_trace or "context", conversation, memory_query
+                memory_trace or "context",
+                conversation,
+                memory_query,
+                **({"use": use} if use is not None else {}),
             )
         result[memory_position:memory_position] = memory_messages
         remaining, kept = limits.get("max_chars", 20_000), []

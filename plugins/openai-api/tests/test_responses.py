@@ -139,10 +139,19 @@ def test_config_rejects_invalid_options(field, value):
 
 async def test_responses_text_usage_and_fixed_fields(create):
     ctx, model = create(
-        output(text_item("a"), text_item("b"), usage={"input_tokens": 11, "output_tokens": 5})
+        output(
+            text_item("a"),
+            text_item("b"),
+            usage={
+                "input_tokens": 11,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 4},
+            },
+        )
     )
     turn = await model.generate(sample_request(ctx.clock), CancelToken())
     assert turn.text == "ab" and turn.finish == "stop"
+    assert turn.usage.cached_input_tokens == 4
     assert turn.usage.input_tokens == 11 and turn.usage.output_tokens == 5
     args, kwargs = ctx.http.calls[0]
     assert args == ("POST", "https://example.invalid/v1/responses")
@@ -178,6 +187,7 @@ async def test_parallel_calls_text_and_missing_usage(create):
     assert turn.finish == "tool_calls" and turn.text == "fictional reply"
     assert [c.call_id for c in turn.tool_calls] == ["call_a", "call_b"]
     assert turn.usage.input_tokens is None and turn.usage.output_tokens is None
+    assert turn.usage.cached_input_tokens is None
 
 
 async def test_reasoning_once_order_whitelist_and_trace_isolation(create):

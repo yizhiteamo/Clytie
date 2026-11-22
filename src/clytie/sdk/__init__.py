@@ -8,7 +8,7 @@ from .context import CredentialUnavailable, PluginContext, WebSocketClosed
 from .plugin import PluginUnavailable
 from .types import QUOTA_UNKNOWN, ChannelState
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 __all__ = [
     "BackupEntry",
     "BackupProvider",

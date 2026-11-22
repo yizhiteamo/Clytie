@@ -1097,7 +1097,7 @@ class PluginHost(MigrationMixin):
                         self.log.warning("plugin.invalid_attention", plugin_id=reg.plugin_id)
                         result = None
                     else:
-                        judges.append((result, registration))
+                        judges.append(registration)
                 opinions.append((reg.priority, reg.plugin_id, result))
         conversation = getattr(event, "conversation", None)
         message = getattr(event, "message", None)
@@ -1117,7 +1117,7 @@ class PluginHost(MigrationMixin):
                 owner_private=owner_private,
             )
             if isinstance(merged, Judge) and judge_origin is not None:
-                judge_origin.append(next(key for opinion, key in judges if opinion is merged))
+                judge_origin.append(judges[0])
             return merged
         return current if phase in {"after_generation", "before_send"} else None
 

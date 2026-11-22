@@ -281,6 +281,7 @@ class Companion:
             return dict(state="stopped", stopped=[], not_stopped={}, reason=None)
         agent, kernel = self.agent, self.kernel
         agent.shutting_down = True
+        await agent.prewrites.stop()
         if orphan:
             kernel.delivery.session_ending = True
         for scheduler in self.host.schedulers.values():
