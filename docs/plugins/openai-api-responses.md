@@ -52,6 +52,7 @@
 - 有工具调用时 `finish` 为 `tool_calls`，否则为 `stop`。
 - `status` 不是 `completed`（例如 `incomplete`），或者出现拒绝内容（`refusal`）时，返回 `incomplete_response`，不冒充完整成功。
 - 用量：`usage.input_tokens`、`usage.output_tokens` 映射到 `TokenUsage`；缺失时保持未知，不填 0（agent-spec §11.1）。
+- 缓存命中（SDK 0.17）：`usage.input_tokens_details.cached_tokens` 映射到 `cached_input_tokens`；Chat Completions 模式取 `usage.prompt_tokens_details.cached_tokens`。缺失或不是非负整数时为未知，不填 0。
 - 错误状态码的分类、PR #108 的诊断字段（`code`、`type`、`param`）与 Chat Completions 模式相同；仍然不记录 `error.message`。
 
 ## 6. 不做

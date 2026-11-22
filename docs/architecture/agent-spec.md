@@ -34,6 +34,7 @@
 - `before_attention` 返回 `Ignore`：入站记为 `ignored`，不创建记录。`ReactOnly` 按 kernel-spec §13.4 处理。`Mode(name, params)`：本次处理带上这个模式，上下文中注入一行"当前模式：name"，模式的具体表现由发出它的插件通过 `context_section` 提供。
 - **批次按"会话 + 发送人"划分（用户已确认）**：每个批次只包含同一个人的消息，因此一条记录只对应一个请求人，权限、保障模式、越界计数和取消都归属这个人。不同人的消息不会合并；他们说的话仍按第 4.4 节出现在聊天记录中，她能看到整个群的讨论。
 - `attention` 返回 `Defer(seconds)`：把这条消息放进它的**待处理批次**，到时间后带着整批再判断一次。期间同一个人在同一会话的新消息加入同一批次，重新判断时一起作为输入。本体对单个批次的累计延迟上限沿用 120 秒（sdk-spec §6）。
+  - `Defer` 或 `Judge` 带 `prepare` 时，等待期间本体预写回复；批次有新消息就丢掉重写。批次规则不变。见 chat-behavior-spec §3.5（SDK 0.17）。
 - `Respond`：以批次中**最后一条**入站消息打开记录（`source_event_id` 指向它）；批次中更早的消息改为新状态 `merged`，并记录 `merged_into = trace_id`。上下文中它们按原顺序出现。
   - `inbound.state` 新增 `merged`，账本模式版本加一，按 kernel-spec §14 迁移。
   - 重启时，批次中仍在等待的消息按 `received` 处理，即 `dropped_on_restart`（kernel-spec §2），不恢复批次。
@@ -189,6 +190,7 @@
 - 条件：去掉 @自己、首尾空白和首尾的标点、表情之后，消息文字**完全等于** `tasks.cancel_words` 中的一项（默认 `["取消", "停", "停止", "停下", "别做了"]`），或者是"其中一项 + 空格（可省略）+ 8 位十六进制编号"。
   - 编号先转为小写再交给取消入口。
   - 只用完全相等判断，"停车场""别停"都不匹配。这是 overview.md §5 唯一允许的程序判断，其余意图一律由模型判断（L1）。
+  - 消息可以带一段与 `reply_to` 一致的引用段（QQ 等平台引用回复时会带上）。其他引用、第二段引用、媒体和提及别人时都不算取消（2026-11-22 补充，与 PR #172 一致）。
 - 匹配时，打开记录后、调用模型之前，按 kernel-spec §8 调用取消入口：带引用就用 `reply_to`，带编号就用 `task_id`，否则用默认的选择方式。
 - 取消结果（`cancelled`、`not_found` 等）作为一行说明附在本次消息之后，仍然调用模型，由她用自己的口吻回应。模型不可用时按第 10 节处理。
 - **群聊中没有 @ 她的取消（用户已确认）**：这类消息通常会被 `attention` 跳过，到不了上面的流程。因此在防重之后、行为环节之前，单独判断一次：
@@ -341,6 +343,12 @@
 普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。轻量判断和发送前复核以 `purpose=attention` 记录 token、耗时与结构化结果，状态按会话汇总当天调用数和 token。未按时拿到结果的判断记为 `attention.failed`，计入次数，不含 token。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
 
 **字段**：`trace_id`、`purpose`（`reply`、`rewrite`、`attention` 或 `appearance_check`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
+
+**补充字段**（B7 补测后追加，用户 2026-11-22 确认）：
+- `duration_ms`：从发出模型请求到拿到结果的毫秒数，只算模型调用本身，不含组装上下文。迟到的结果记到它到达为止。轻量判断原来就记这一项。
+- `cached_input_tokens`：来自 `TokenUsage`（SDK 0.17），服务没给时为 `null`，不写 0。
+- `prepared`：这次调用是预写（chat-behavior-spec §3.5）时为真，只出现在 `purpose = reply` 中。
+- 这三项用来分清回复慢在模型本身，还是在组装上下文和附图。补测报告按记录给出分段耗时，不另建测量框架。
 
 **时点**：
 - 每个返回的 `ModelTurn` 恰好记录一次，在本体第一次拿到它的时候记。
