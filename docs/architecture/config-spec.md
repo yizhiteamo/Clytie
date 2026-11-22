@@ -102,6 +102,7 @@
 | `task_reactions.audience` | `all` / `owner` | `all` | 所有有权限发起任务的人 / 只有主人的委托 |
 | `task_reactions.emojis` | `{accepted, running, done, failed}` | 👌、⏳、✅、❌ | 各为非空字符串，由平台插件映射为平台表情 |
 | `task_reactions.min_interval_seconds` | 整数 | 2 | 0–30 |
+| `proactive.tools` | `{工具名: {daily: 整数}}` | 空（主动开口不用能力） | 工具名必须是已装配的能力工具，不能以 `core_` 开头；`daily` 1–200（proactive-spec §4，SDK 0.18） |
 
 实例 `limits.max_task_seconds` 见第 2 节。
 

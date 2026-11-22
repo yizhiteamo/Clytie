@@ -154,6 +154,7 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/architecture/vision-spec.md` | B6 看图：取图、附图规则、`core_view_image`、截图文字、后续演进 |
 | `docs/architecture/appearance-spec.md` | V2 认出自己的形象：形象资料、导入检查、认图规则、自检、`core_view_appearance` |
 | `docs/architecture/chat-behavior-spec.md` | B7 群聊行为：被叫到的标记、轻量判断、群聊安全带、`chat-timing` 与 `reply-form` 插件 |
+| `docs/architecture/proactive-spec.md` | B8 主动私聊与睡眠作息：`proactive-chat` 插件、主动开口使用能力、暂停主动聊天、B8b 已确认的方向 |
 | `docs/architecture/runtime-services-spec.md` | 阶段二运行时服务：插件凭据、生产 HTTP/WebSocket |
 | `docs/architecture/backup-spec.md` | A4.3 备份与维护：在线快照、保留与容量、副本、恢复切换、旧实例与密钥 |
 | `docs/architecture/api-spec.md` | A4.2 本机 API、登录、审计、CLI、后台运行与插件路由 |
