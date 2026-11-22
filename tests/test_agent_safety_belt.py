@@ -155,10 +155,10 @@ async def test_belt_notifies_owner_with_system_fallback(tmp_path, response):
     )
     check = agent.outbound.check
 
-    async def outbound(text, scene):
+    async def outbound(text, scene, **kwargs):
         if text == "fictional blocked topic":
             return {"privacy": ["fictional restriction"]}
-        return await check(text, scene)
+        return await check(text, scene, **kwargs)
 
     agent.outbound.check = outbound
     await group_reply(agent)
