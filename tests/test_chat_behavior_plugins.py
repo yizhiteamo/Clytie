@@ -1,18 +1,24 @@
 """用生产 Companion 装配假模型、假平台和清单声明的订阅者。"""
 
 import asyncio
+import json
 
+import pytest
 import yaml
 
 from clytie.clock import SystemClock
+from clytie.plugin_host.identity import IdentityResolver
 from clytie.plugin_host.support import timed
-from clytie.sdk.testing import FakeChannel, FakeModel, MockClock
+from clytie.sdk.testing import FakeChannel, FakeModel, FakeWebSocket, MockClock
+from clytie.sdk.types import ModelTurn
 from clytie.supervisor.companion import Companion
 
-from .host_helpers import SOURCE, plugin
-from .test_agent import ScriptModel
+from .host_helpers import SOURCE, enable, plugin
+from .test_agent import ScriptModel, finish, make_agent
 from .test_agent_acceptance import ECHO
+from .test_agent_addressed import group
 from .test_config import write_yaml
+from .test_openai_api_integration import Protocol
 from .test_storage_agent_lifecycle import inbound, private_home
 
 
@@ -110,9 +116,7 @@ async def test_companion_group_receipts_and_task_events(tmp_path, monkeypatch):
             assert seen.count("reply.sent") == 2 + i
             assert (await status())["natural_today"] == i + 1
         channel = next(iter(runtime.channels.values()))
-        assert "".join(p.text for item in channel.sent[:2] for p in item.parts) == "\n\n".join(
-            paragraphs
-        )
+        assert [p.text for item in channel.sent[:2] for p in item.parts] == paragraphs
         assert (await status())["activity"] == "high"
         await clock.advance_and_drain(50)
         assert (await status())["activity"] == "low"
@@ -136,3 +140,89 @@ async def test_companion_group_receipts_and_task_events(tmp_path, monkeypatch):
     finally:
         await runtime.stop()
     assert runtime.kernel.bus.closed
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleaved):
+    entered, resume = asyncio.Event(), asyncio.Event()
+    paragraphs = ["虚构第一句。" * 8, "虚构第二句。" * 8]
+
+    async def generate(request, cancel):
+        entered.set()
+        await resume.wait()
+        return ModelTurn(finish="stop", text="\n\n".join(paragraphs), usage={})
+
+    agent, _, model = await make_agent(tmp_path, generate)
+    host = agent.host
+    protocol = Protocol()
+    backends = host.backends
+    host.backends = lambda cid, pid: {
+        **backends(cid, pid),
+        **({"websocket": FakeWebSocket([protocol])} if pid == "qq-onebot" else {}),
+    }
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets/test.txt").write_text("fictional-token", encoding="utf-8")
+    secret_field = "secret"
+    host.accounts = {
+        "fake": {"channel": "qq-onebot", "account": "1000000001", secret_field: "test.txt"}
+    }
+    host.identities[agent.cid, "qq-onebot", "fake"] = IdentityResolver(
+        "fake",
+        "qq-onebot",
+        {
+            "accounts": host.accounts,
+            "conversations": {
+                "test_group": {
+                    "channel": "qq-onebot",
+                    "kind": "group",
+                    "platform_id": "1000000003",
+                    "scene": "public_group",
+                }
+            },
+        },
+    )
+    host.unit_configs[agent.cid, "qq-onebot"] = [
+        {"role": "channel", "account": "fake", "config": {"url": "ws://example.invalid/"}}
+    ]
+    host.configure(
+        agent.cid,
+        plugins={
+            "chat-timing": {"config": {"judge": "rules", "tuning": {"medium_probability": 0}}},
+            "reply-form": {"config": {"tuning": {"interval_seconds": [0, 0]}}},
+        },
+    )
+    try:
+        for pid in ("qq-onebot", "chat-timing", "reply-form"):
+            await enable(host, pid)
+        channel = host.runtimes[agent.cid, "qq-onebot"].plugin.create_channel()
+        agent.kernel.delivery.channels["fake"] = channel
+        await channel.connect()
+        called = group(agent, mention=True)
+        ref = called.message.ref.model_copy(update={"platform_message_id": "-7"})
+        called = called.model_copy(
+            update={
+                "event_id": "fake:-7",
+                "message": called.message.model_copy(update={"ref": ref}),
+            }
+        )
+        await agent.receive(called)
+        await agent.clock.advance_and_drain(3)
+        await timed(entered.wait(), SystemClock(), 5)
+        if interleaved:
+            await agent.receive(group(agent, actor="another_member"))
+            await agent.clock.advance_and_drain(5)
+        resume.set()
+        await agent.drain()
+        messages = [
+            c["params"]["message"]
+            for raw in protocol.sent
+            if (c := json.loads(raw))["action"] == "send_group_msg"
+        ]
+        first = [{"type": "text", "data": {"text": paragraphs[0]}}]
+        if interleaved:
+            first.insert(0, {"type": "reply", "data": {"id": "-7"}})
+        assert messages == [first, [{"type": "text", "data": {"text": paragraphs[1]}}]]
+        assert len(model.requests) == 1
+    finally:
+        resume.set()
+        await finish(agent)

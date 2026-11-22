@@ -5,18 +5,36 @@ from datetime import timedelta
 
 from clytie.sdk.types import ContextSection, TextPart
 
+# HTTP URLs can contain ASCII sentence punctuation in the path, query and fragment.
+URL = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", re.IGNORECASE)
+SENTENCE = re.compile(r"""([。！？!?…]+)[”’」』）)】》〉〕\]"']*""")
+
+
+def sentence_ends(text):
+    urls = iter(URL.finditer(text))
+    url = next(urls, None)
+    for mark in SENTENCE.finditer(text):
+        while url and url.end() <= mark.start():
+            url = next(urls, None)
+        if url and url.start() <= mark.start() and mark.end(1) < url.end():
+            continue
+        following = text[mark.end(1) : mark.end(1) + 1]
+        if mark[1][-1] in "?!" and following.isascii() and following.isalnum():
+            continue
+        if mark.end() < len(text):
+            yield mark.end()
+
 
 def split_text(text, limit):
-    """在原字符串上选断点，连同空行、标点和空白原样保留。"""
-    start = len(text) - len(text.lstrip())
-    end = len(text.rstrip())
+    """优先在空行处分条，然后选择靠近等分点的句末。"""
+    text = text.strip()
     cuts = [
-        m.end() for m in re.finditer(r"\r?\n[ \t]*(?:\r?\n[ \t]*)+", text) if start < m.end() < end
+        m.end() for m in re.finditer(r"\r?\n[ \t]*(?:\r?\n[ \t]*)+", text) if m.end() < len(text)
     ]
     if cuts:
         cuts = cuts[: limit - 1]
     else:
-        ends = [m.end() for m in re.finditer(r"[。！？!?…]+", text) if m.end() < end]
+        ends = list(sentence_ends(text))
         groups = min(limit, len(ends) + 1)
         cuts = []
         for i in range(1, groups):
@@ -25,7 +43,7 @@ def split_text(text, limit):
             cut = min(available, key=lambda p: abs(p - len(text) * i / groups))
             cuts.append(cut)
             ends = [p for p in ends if p > cut]
-    return [text[a:b] for a, b in zip([0, *cuts], [*cuts, len(text)])]
+    return [text[a:b].strip() for a, b in zip([0, *cuts], [*cuts, len(text)])]
 
 
 class Plugin:

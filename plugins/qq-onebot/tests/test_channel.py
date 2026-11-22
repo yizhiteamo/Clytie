@@ -97,7 +97,12 @@ def intent(*, react=False):
         update={
             "channel_id": "qq-onebot",
             "emoji": "👌" if react else None,
-            "target": sample.target.model_copy(update={"channel_id": "qq-onebot"}),
+            "target": sample.target.model_copy(
+                update={
+                    "channel_id": "qq-onebot",
+                    "platform_message_id": sample.target.platform_message_id if react else "-7",
+                }
+            ),
         }
     )
 
@@ -122,7 +127,12 @@ async def test_bound_channel_reference_differs_from_plugin_id(tmp_path):
         ("group", "1000000003")
     ].model_copy(update={"channel_id": "example_bot"})
     channel = load_channel()(ctx)
-    sample = intent().model_copy(update={"channel_id": "example_bot"})
+    sample = intent().model_copy(
+        update={
+            "channel_id": "example_bot",
+            "target": intent().target.model_copy(update={"channel_id": "example_bot"}),
+        }
+    )
     reaction = intent(react=True).model_copy(
         update={
             "channel_id": "example_bot",
@@ -819,4 +829,25 @@ async def test_full_notice_queue_does_not_block_membership_reply_or_heartbeat(tm
         if query is not None:
             query.cancel()
             await asyncio.gather(query, return_exceptions=True)
+        await channel.close()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"channel_id": "other"},
+        {"conversation_id": "other"},
+        {"platform_message_id": "invalid"},
+    ],
+)
+async def test_invalid_reply_target_stops_before_transport(tmp_path, change):
+    _, channel, protocol = make(tmp_path)
+    sample = intent()
+    await channel.connect()
+    try:
+        reply = sample.model_copy(update={"target": sample.target.model_copy(update=change)})
+        receipt = await channel.send(reply, CancelToken())
+        assert receipt.status == "failed" and receipt.error.code == "invalid_request"
+        assert [call["action"] for call in protocol.actions] == ["get_login_info"]
+    finally:
         await channel.close()

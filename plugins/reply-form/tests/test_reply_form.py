@@ -34,7 +34,9 @@ async def test_split_preserves_original_text(tmp_path, kind, text, count):
         )
         result = await loaded.handler("behavior.after_generation")(draft)
         assert len(result.parts) == count
-        assert "".join(p.text for p in result.parts) == text
+        assert "".join("".join(p.text.split()) for p in result.parts) == "".join(text.split())
+        if count > 1:
+            assert all(p.text == p.text.strip() for p in result.parts)
         assert result.form == ("split" if count > 1 else "plain")
         assert valid_after_generation(draft, result)
 
@@ -84,3 +86,34 @@ async def test_only_split_replies_are_paced(tmp_path):
         assert all(1 <= (b - a).total_seconds() <= 2 for a, b in zip(times, times[1:]))
         assert paced[0].not_before is None and paced[-1] == asset
         assert valid_before_send([*intents, asset], paced)
+
+
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ('他问我"你明天来吗？"', '我想了想，说"应该会来吧。"然后…'),
+        ("他问：「你来吗？」", "然后走了"),
+        ("（他同意了！）", "于是大家出发"),
+        ("第一句话。", "\n第二句话"),
+        ("第一段", "\n\n  第二段"),
+        ("看 https://example.com/?a=1。", "接着说"),
+        ("看 https://example.com/one!?/two。", "接着说"),
+        ("问?a答!2。", "接着说"),
+        ("你来吗?", "我去"),
+    ],
+)
+async def test_sentence_cuts_preserve_quotes_urls_and_trim(tmp_path, left, right):
+    clock = MockClock()
+    async with plugin_from_manifest(MANIFEST, root=tmp_path, clock=clock) as loaded:
+        # 让第一个句末位于中点附近，右段自身也可含句末。
+        first = "前" * 36 + left
+        second = right + "后" * 36
+        draft = ReplyDraft(
+            trace_id=TRACE_ID,
+            form="plain",
+            parts=[TextPart(text=first + second)],
+            conversation=sample_event(clock).conversation,
+        )
+        result = await loaded.handler("behavior.after_generation")(draft)
+        assert [part.text for part in result.parts] == [first, second.strip()]
+        assert valid_after_generation(draft, result)

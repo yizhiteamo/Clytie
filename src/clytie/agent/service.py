@@ -1490,7 +1490,7 @@ class Agent:
                 record,
                 parts,
                 kind=kind,
-                target=draft.quote,
+                target=draft.quote if i == 0 else None,
                 split={"group_id": group, "index": i, "total": len(groups)}
                 if len(groups) > 1
                 else None,

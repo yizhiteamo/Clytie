@@ -94,7 +94,10 @@ async def test_name_confirmation(module, tmp_path, judgment, expected):
     clock.advance(3)
     query = await plugin.attention((event, [event.message]))
     assert isinstance(query, Judge) and query.facts.name_hit
-    assert isinstance(await plugin.attention((event, [event.message], judgment)), expected)
+    decision = await plugin.attention((event, [event.message], judgment))
+    assert isinstance(decision, expected)
+    if expected is Respond:
+        assert decision == Respond(focus=event.message.ref)
 
 
 def test_share_and_pair_fatigue(module):
@@ -201,7 +204,7 @@ def test_activity_rules_and_decay_of_backoff(module):
         state.replied(sent, "member", False, True)
         state.refresh(sent + 180, "today")
         assert state.backoff_end == sent + 180 + min(7200, 900 * 2**i)
-    assert state.willingness(2, True, True, 1000) == 0
+    assert state.willingness(2, True, True, 1000) == pytest.approx(0.45)
     state.refresh(state.backoff_end, "tomorrow")
     assert state.level == state.natural == 0
 
@@ -215,7 +218,7 @@ async def test_mention_at_start_of_batch_remains_addressed(module, tmp_path):
     await plugin.incoming(second)
     clock.advance(3)
     decision = await plugin.attention((second, [first.message, second.message]))
-    assert decision == Respond()
+    assert decision == Respond(focus=second.message.ref)
 
 
 @pytest.mark.parametrize(
@@ -255,4 +258,87 @@ def test_quiet_streak_restarts_after_a_warm_reply(module):
     assert group.level == 2
     group.replied(500, "member", False, True)
     group.refresh(680, "today")
-    assert group.level == 1 and group.backoff_end == 680 + 900
+    assert group.level == 1 and group.backoff_end == 380 + 1800
+    group.replied(2400, "member", False, True)
+    group.incoming(2410, "third", False)
+    group.replied(2500, "member", False, True)
+    group.refresh(2680, "today")
+    assert group.level == 1 and group.backoff_end == 2680 + 900
+
+
+@pytest.mark.parametrize("gap,fast", [(2, True), (10, False)])
+def test_paired_burst_counts_each_reply_from_round_four(module, gap, fast):
+    group = module.Group(module.Tuning(), 0)
+    group.incoming(0, "member", False)
+    group.replied(1, "member", False, False)
+    for pair in range(2):
+        now = group.last_reply + gap
+        group.incoming(now, "member", False)
+        group.incoming(now + 1, "member", False)
+        for offset in (2, 3):
+            group.replied(now + offset, "member", False, False)
+            rounds = 2 + pair * 2 + offset - 2
+            assert group.rounds == rounds and group.fast is fast
+            assert group.fatigue == max(0, rounds - 3) * (1.5 if fast else 1)
+
+
+@pytest.mark.parametrize("band,misses,expected", [(1, 2, 0.05), (0, 1, 0)])
+def test_cold_streak_downgrades_activity_once(module, band, misses, expected):
+    group = module.Group(module.Tuning(), 0)
+    for i in range(misses):
+        group.replied(i * 200, "member", False, True)
+        group.refresh(i * 200 + 180, "today")
+    now = group.last_reply + 301
+    group.refresh(now, "today")
+    assert group.level == misses
+    assert group.willingness(band, False, False, now) == expected
+
+
+@pytest.mark.parametrize(
+    "address", [{"mention": True}, {"reply_to_self": True}, {"name": "external"}]
+)
+async def test_addressed_focus_without_recheck_in_rules(module, tmp_path, address):
+    plugin, clock = await setup(module, tmp_path, judge="rules")
+    event = message(clock, 1, **address)
+    await plugin.incoming(event)
+    clock.advance(3)
+    assert await plugin.attention((event, [event.message])) == Respond(focus=event.message.ref)
+
+
+async def test_status_combines_unregistered_groups(module, tmp_path):
+    plugin, clock = await setup(
+        module,
+        tmp_path,
+        activity="low",
+        conversations={"anon:first": "high"},
+        schedule=[{"from": "08:00", "to": "08:01", "activity": "medium"}],
+    )
+    for cid, fatigue, level, judgments, natural in [
+        ("anon:first", 2, 3, 7, 1),
+        ("anon:second", 5, 1, 2, 6),
+        ("test_group", 1, 0, 1, 0),
+    ]:
+        state = plugin.group(cid, clock.monotonic())
+        state.fatigue, state.level, state.backoff_end = fatigue, level, 1000
+        state.judgments, state.natural = judgments, natural
+    response = await plugin.status({})
+    assert "anon:" not in str(response)
+    rows = response["json"]["groups"]
+    assert set(rows) == {"未登记的群", "test_group"}
+    assert rows["未登记的群"] == dict(
+        activity="medium", fatigue=5, ignored_level=3, judgments_today=9, natural_today=7
+    )
+    clock.advance(60)
+    assert (await plugin.status({}))["json"]["groups"]["未登记的群"]["activity"] == "low"
+
+
+async def test_reloaded_addressed_batch_continues_without_wait(module, tmp_path):
+    plugin, clock = await setup(module, tmp_path)
+    event = message(clock, 1, mention=True)
+    batch = (event, [event.message])
+    await plugin.incoming(event)
+    assert await plugin.attention(batch) == Defer(seconds=3)
+    ctx = plugin.ctx
+    await plugin.stop()
+    await plugin.start(ctx)
+    assert await plugin.attention(batch) == Respond(focus=event.message.ref)

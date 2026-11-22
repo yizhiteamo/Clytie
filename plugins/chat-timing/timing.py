@@ -64,7 +64,7 @@ class Group:
             self.consecutive_misses += 1
             self.level = self.consecutive_misses
             duration = min(self.t.backoff_max, self.t.backoff_start * 2 ** min(self.level - 1, 30))
-            self.backoff_end = missed + duration
+            self.backoff_end = max(self.backoff_end, missed + duration)
         if now >= self.backoff_end:
             self.level = 0
 
@@ -101,8 +101,11 @@ class Group:
         people, share = self.share()
         if share > 2 / (people + 1):
             self.fatigue += 1
-        if not owner and not self.mixed and self.first_speaker == actor:
-            if self.partner == actor and now - self.last_reply <= self.t.share_window:
+        continuation = self.first_speaker is None and self.partner == actor
+        if not owner and not self.mixed and (self.first_speaker == actor or continuation):
+            if continuation:
+                self.rounds += 1
+            elif self.partner == actor and now - self.last_reply <= self.t.share_window:
                 self.rounds += 1
                 self.fast = (
                     self.quick_answer if self.rounds == 2 else self.fast and self.quick_answer
@@ -113,7 +116,7 @@ class Group:
             self.partner = actor
             if self.rounds >= self.t.pair_rounds:
                 self.fatigue += 1.5 if self.fast else 1
-        else:
+        elif self.first_speaker is not None or owner:
             self.rounds = 0
             self.partner = None
             self.fast = False
@@ -134,7 +137,7 @@ class Group:
         return self.t.fatigue_start * scale, self.t.fatigue_stop * scale
 
     def willingness(self, band, owner, question, now):
-        band = min(2, band + int(owner)) - self.level
+        band = min(2, band + int(owner)) - int(self.level > 0)
         if band < 0:
             return 0
         start, stop = self.thresholds(band)

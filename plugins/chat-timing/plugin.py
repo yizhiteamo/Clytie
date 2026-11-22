@@ -77,7 +77,7 @@ class Plugin:
 
     def response(self, event, natural=False, focus=None):
         remember(self.responding, event.event_id, (event.message.sender.role == "owner", natural))
-        return Respond(focus=focus, recheck_after=15 if natural else None)
+        return Respond(focus=focus or event.message.ref, recheck_after=15 if natural else None)
 
     async def attention(self, input):
         event, batch, *results = input
@@ -86,11 +86,10 @@ class Plugin:
         private = event.conversation.kind == "private"
         state = None if private else self.group(cid, now)
         arrivals = [self.arrivals[m.ref] for m in batch if m.ref in self.arrivals]
-        if not arrivals:
-            arrivals = [(now, event.addressed or Addressed())]
-        direct = any(mark.mention or mark.reply_to_self for _, mark in arrivals)
-        named = any(mark.name for _, mark in arrivals)
-        if not results:
+        marks = [mark for _, mark in arrivals] or [event.addressed or Addressed()]
+        direct = any(mark.mention or mark.reply_to_self for mark in marks)
+        named = any(mark.name for mark in marks)
+        if arrivals and not results:
             if private or direct or named:
                 due = min(
                     arrivals[-1][0] + self.t.addressed_quiet, arrivals[0][0] + self.t.addressed_max
@@ -100,7 +99,7 @@ class Plugin:
             if now < due:
                 return Defer(seconds=due - now)
         if private:
-            return Respond()
+            return Respond(focus=event.message.ref if direct or named else None)
         if direct:
             return self.response(event)
         if results:
@@ -129,9 +128,7 @@ class Plugin:
             if self.ctx.random.random() >= state.willingness(band, owner, question, now):
                 return Skip()
         if self.ctx.config.get("judge", "model") == "rules":
-            return self.response(
-                event, natural=not named, focus=None if named else event.message.ref
-            )
+            return self.response(event, natural=not named)
         state.last_judge = now
         state.judgments += 1
         people, share = state.share()
@@ -199,11 +196,20 @@ class Plugin:
         groups = {}
         for cid in self.groups:
             state = self.group(cid, self.ctx.clock.monotonic())
-            groups[cid] = dict(
-                activity=BANDS[self.band(cid)],
-                fatigue=state.fatigue,
-                ignored_level=state.level,
-                judgments_today=state.judgments,
-                natural_today=state.natural,
+            anonymous = cid.startswith("anon:")
+            label = "未登记的群" if anonymous else cid
+            row = groups.setdefault(
+                label,
+                dict(
+                    activity=BANDS[self.band(None if anonymous else cid)],
+                    fatigue=0.0,
+                    ignored_level=0,
+                    judgments_today=0,
+                    natural_today=0,
+                ),
             )
+            row["fatigue"] = max(row["fatigue"], state.fatigue)
+            row["ignored_level"] = max(row["ignored_level"], state.level)
+            row["judgments_today"] += state.judgments
+            row["natural_today"] += state.natural
         return {"status": 200, "json": {"groups": groups}}

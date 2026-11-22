@@ -153,6 +153,7 @@ async def test_real_host_onebot_credentials_event_and_asset_send(tmp_path):
         intent = sample_intent().model_copy(
             update={
                 "channel_id": "example_bot",
+                "target": None,
                 "parts": [TextPart(text="fictional reply"), ImagePart(asset=asset)],
             }
         )
