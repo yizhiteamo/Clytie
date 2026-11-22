@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from clytie.plugin_host.support import timed
 from clytie.sdk import CancelToken
@@ -17,6 +19,7 @@ class Notifications:
         self.clock, self.log, self.audit = clock, log, audit
         self.plugins = list(plugins)
         self.cooldown = cooldown_hours * 3600
+        self.zone = ZoneInfo("UTC")
         self.states = read(self.path, {})
         self.problems = {}
         self.silenced = False
@@ -29,6 +32,33 @@ class Notifications:
     async def update(self, problems, *, pending=()):
         async with self._lock:
             await self._update(dict(problems), set(pending))
+
+    async def _send(self, notice):
+        for notifier, outward in self.plugins:
+            if outward and self.silenced:
+                continue
+            token = CancelToken()
+            try:
+                result = await timed(notifier.notify(notice, token), self.clock, 10)
+                if result.status == "sent":
+                    return True
+            except Exception:
+                pass
+            finally:
+                token.cancel("notification_finished")
+        return False
+
+    async def safety_trip(self, cid, group, count, until):
+        from clytie.agent.safety_belt import notice_body, recovery_time
+
+        notice = Notice(
+            level="warn",
+            title="Clytie",
+            body=notice_body(group, count, recovery_time(until, self.clock.now(), self.zone)),
+            dedupe_key=f"safety_belt:{cid}:{uuid4().hex}",
+        )
+        if not await self._send(notice):
+            self.log.warning("safety_belt.notifier_unavailable", conversation_id=group)
 
     async def _update(self, problems, pending):
         self.problems = dict(problems)
@@ -49,18 +79,8 @@ class Notifications:
                 ).total_seconds()
                 if elapsed < (self.cooldown if previous["state"] == "cooldown" else 600):
                     continue
-            sent = False
             notice = Notice(level="warn", title="Clytie", body=body, dedupe_key=key)
-            for notifier, outward in self.plugins:
-                if outward and self.silenced:
-                    continue
-                try:
-                    result = await timed(notifier.notify(notice, CancelToken()), self.clock, 10)
-                    if result.status == "sent":
-                        sent = True
-                        break
-                except Exception:
-                    pass
+            sent = await self._send(notice)
             self.states[key] = {
                 "state": "cooldown" if sent else "failed",
                 "at": self.clock.now().isoformat(),

@@ -215,7 +215,14 @@ class ConversationRequest(SDKModel):
     request_ref: str
 
 
+class Addressed(SDKModel):
+    mention: bool = False
+    reply_to_self: bool = False
+    name: Literal["internal", "external"] | None = None
+
+
 class EventEnvelope(SDKModel):
+    addressed: Addressed | None = None
     event_id: str
     dedupable: bool = True
     type: str
@@ -528,6 +535,8 @@ class ModelFeatures(SDKModel):
 
 
 class ReplyDraft(SDKModel):
+    focus: MessageRef | None = None
+    interleaved: int = Field(default=0, ge=0)
     parts: FrozenList[MessagePart] = Field(default_factory=FrozenList)
     conversation: Conversation
     task_id: TaskId | None = None
@@ -542,6 +551,7 @@ class CompanionState(SDKModel):
 
 
 class ContextRequest(SDKModel):
+    conversation: Conversation | None = None
     scene: str
     actor: Actor | None = None
     budget_chars: int

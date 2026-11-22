@@ -27,6 +27,10 @@
 
 ## 2. 注意力判断与消息合并
 
+本体在准入和身份映射后按 chat-behavior-spec §2 标记被叫到的方式。没有插件意见时，私聊、直接 @ 或回复本伴侣已发送的消息会得到回应。
+`Judge` 将批次保留到后台判断结束，再将结果交给发起判断的处理器。判断使用本伴侣模型，等待时间计入批次已有的 120 秒期限。
+自然接话设置 `recheck_after` 时，从回复生成开始累计本会话新消息；达到条数就用新消息和草稿复核。撤回时写 `reply_withdrawn`，执行成功、没有交付意图。被叫到的回复直接走原交付流程。
+
 - `before_attention` 返回 `Ignore`：入站记为 `ignored`，不创建记录。`ReactOnly` 按 kernel-spec §13.4 处理。`Mode(name, params)`：本次处理带上这个模式，上下文中注入一行"当前模式：name"，模式的具体表现由发出它的插件通过 `context_section` 提供。
 - **批次按"会话 + 发送人"划分（用户已确认）**：每个批次只包含同一个人的消息，因此一条记录只对应一个请求人，权限、保障模式、越界计数和取消都归属这个人。不同人的消息不会合并；他们说的话仍按第 4.4 节出现在聊天记录中，她能看到整个群的讨论。
 - `attention` 返回 `Defer(seconds)`：把这条消息放进它的**待处理批次**，到时间后带着整批再判断一次。期间同一个人在同一会话的新消息加入同一批次，重新判断时一起作为输入。本体对单个批次的累计延迟上限沿用 120 秒（sdk-spec §6）。
@@ -96,6 +100,8 @@
 - 产物只做 kernel-spec §11 的格式和大小检查，出站检查不检查图片、音视频的内容。
 
 ## 4. 上下文装配
+
+在对外场景被内部名字叫到时，本体在回复上下文末尾提醒她不要说出内部名字，提醒只说明类别。轻量判断只使用场景人设、投影后的最近记录和本批消息、插件提供的固定事实；媒体用占位表示。
 
 ### 4.1 组成与顺序
 
@@ -332,9 +338,9 @@
 
 对话主干每拿到一个模型结果，就写一条 `model.usage` 审计。复用现有 audit，不迁移账本，不新增查询接口；用量的读取和提醒放到「额度感知」里程碑。
 
-普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
+普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。轻量判断和发送前复核以 `purpose=attention` 记录 token、耗时与结构化结果，状态按会话汇总当天调用数和 token。未按时拿到结果的判断记为 `attention.failed`，计入次数，不含 token。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
 
-**字段**：`trace_id`、`purpose`（`reply`、`rewrite` 或 `appearance_check`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
+**字段**：`trace_id`、`purpose`（`reply`、`rewrite`、`attention` 或 `appearance_check`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
 
 **时点**：
 - 每个返回的 `ModelTurn` 恰好记录一次，在本体第一次拿到它的时候记。

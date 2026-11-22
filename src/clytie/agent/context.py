@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta
+from typing import NamedTuple
 
 from pydantic import TypeAdapter
 
@@ -18,6 +19,16 @@ PART = TypeAdapter(MessagePart)
 
 def message(role, text):
     return ChatMessage(role=role, parts=[TextPart(text=text)])
+
+
+class HistoryMessage(NamedTuple):
+    at: str
+    role: str
+    sender: Actor | None
+    key: str
+    prefix: str
+    parts: list
+    ref: dict | None
 
 
 class LedgerSnapshot:
@@ -108,7 +119,10 @@ class Context:
             pos += len(self.render_parts([part])) + 1
         return offsets
 
-    async def quote(self, ref, conversation, authors=None, *, ledger=None, image_info=None):
+    async def quote(
+        self, ref, conversation, authors=None, *, ledger=None, image_info=None, render_parts=None
+    ):
+        render_parts = render_parts or self.render_parts
         if ledger is None:
             tables = await run_sync(self.agent.ledger, self._read_tables)
             ledger = LedgerSnapshot(tables)
@@ -125,7 +139,7 @@ class Context:
                                 parts, media, row["event_id"], row["received_at"], 1, prefix
                             )
                         )
-                    return self.render_parts(parts)
+                    return render_parts(parts)
                 return "引用了一条看不到的消息"
         for attempt in ledger.rows("attempt"):
             receipt = attempt.get("receipt")
@@ -152,8 +166,51 @@ class Context:
                             outgoing=True,
                         )
                     )
-                return self.render_parts(parts)
+                return render_parts(parts)
         return "引用了一条看不到的消息"
+
+    def history_rows(self, ledger, conversation, current_ids):
+        """Shared projection for the reply and attention models, before either applies its budget."""
+        for row in ledger.rows("inbound"):
+            if (
+                row["event_id"] in current_ids
+                or row["conversation_id"] != conversation.conversation_id
+                or row["state"] not in {"processing", "ignored", "merged"}
+                or row.get("reason") == "boundary_paused"
+                or not row.get("message")
+                or not self.visible(row, conversation)
+            ):
+                continue
+            msg = row["message"]
+            sender = Actor.model_validate(msg["sender"])
+            yield HistoryMessage(
+                row["received_at"],
+                "user",
+                sender,
+                row["event_id"],
+                f"{sender.role} {actor_label(sender)}：",
+                msg["parts"] or [],
+                msg.get("ref"),
+            )
+        for row in ledger.rows("intent"):
+            if (
+                row["conversation_id"] != conversation.conversation_id
+                or row["status"] not in {"sent", "unknown"}
+                or row["status_reaction"]
+            ):
+                continue
+            record = ledger.get("record", row["trace_id"])
+            if not self.visible(record, conversation):
+                continue
+            yield HistoryMessage(
+                row.get("created_at", record["created_at"]),
+                "assistant",
+                None,
+                row["intent_id"],
+                "[不确定是否发出]" if row["status"] == "unknown" else "",
+                row.get("parts") or [],
+                None,
+            )
 
     def _read_tables(self):
         return {
@@ -285,71 +342,29 @@ class Context:
         budget = agent.config.get("context", {}).get("material_budget_chars", 6000)
         sections = await agent.host.context_sections(
             agent.cid,
-            ContextRequest(scene=conversation.scene, actor=actor, budget_chars=budget),
+            ContextRequest(
+                scene=conversation.scene,
+                actor=actor,
+                budget_chars=budget,
+                conversation=conversation,
+            ),
             conversation_id=conversation.conversation_id,
         )
         if mode:
             result.append(message("system", "当前模式：" + mode.name))
         result.extend(message("system", s.title + "\n" + s.text) for s in sections)
         history = []
-        current_ids = {e.event_id for e in events}
-        for row in ledger.rows("inbound"):
-            if (
-                row["event_id"] in current_ids
-                or row["conversation_id"] != conversation.conversation_id
-                or row["state"] not in {"processing", "ignored", "merged"}
-                or row.get("reason") == "boundary_paused"
-                or not row.get("message")
-                or not self.visible(row, conversation)
-            ):
-                continue
-            sender = Actor.model_validate(row["message"]["sender"])
-            parts = [PART.validate_python(p) for p in row["message"]["parts"] or []]
-            content = self.render_parts(parts)
+        for item in self.history_rows(ledger, conversation, {e.event_id for e in events}):
+            parts = [PART.validate_python(p) for p in item.parts]
             history.append(
                 (
-                    row["received_at"],
-                    "user",
-                    f"{sender.role} {actor_label(sender)}：{content}",
-                    sender,
-                    f"{sender.role} {actor_label(sender)}：{text_parts(parts)}",
+                    item.at,
+                    item.role,
+                    item.prefix + self.render_parts(parts),
+                    item.sender,
+                    item.prefix + text_parts(parts),
                     self.image_offsets(
-                        parts,
-                        media,
-                        row["event_id"],
-                        row["received_at"],
-                        2,
-                        f"{sender.role} {actor_label(sender)}：",
-                    ),
-                )
-            )
-        for row in ledger.rows("intent"):
-            if (
-                row["conversation_id"] != conversation.conversation_id
-                or row["status"] not in {"sent", "unknown"}
-                or row["status_reaction"]
-            ):
-                continue
-            record = ledger.get("record", row["trace_id"])
-            if not self.visible(record, conversation):
-                continue
-            parts = [PART.validate_python(p) for p in row.get("parts") or []]
-            content = self.render_parts(parts)
-            history.append(
-                (
-                    row.get("created_at", record["created_at"]),
-                    "assistant",
-                    ("[不确定是否发出]" if row["status"] == "unknown" else "") + content,
-                    None,
-                    ("[不确定是否发出]" if row["status"] == "unknown" else "") + text_parts(parts),
-                    self.image_offsets(
-                        parts,
-                        media,
-                        row["intent_id"],
-                        row.get("created_at", record["created_at"]),
-                        2,
-                        "[不确定是否发出]" if row["status"] == "unknown" else "",
-                        True,
+                        parts, media, item.key, item.at, 2, item.prefix, item.role == "assistant"
                     ),
                 )
             )
@@ -411,4 +426,9 @@ class Context:
             result.insert(reminder_position, message("system", reminder))
         if extra:
             result.append(message("system" if proactive else "user", extra))
+        internal_scenes = agent.config.get("names", {}).get("internal_scenes", ["owner_private"])
+        if conversation.scene not in internal_scenes and any(
+            event.addressed and event.addressed.name == "internal" for event in events
+        ):
+            result.append(message("system", "这条消息用你的内部名字叫你。在这里不要说出这个名字。"))
         return result

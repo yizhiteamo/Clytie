@@ -16,7 +16,7 @@ from clytie.kernel.service import record_scope
 from clytie.kernel.task_card import render_task_card
 from clytie.plugin_host.memory import bind_scene
 from clytie.sdk import CancelToken
-from clytie.sdk.behavior import Defer, Ignore, Mode, ReactOnly, Skip
+from clytie.sdk.behavior import Defer, Ignore, Judge, Judgment, Mode, ReactOnly, Respond, Skip
 from clytie.sdk.context import validate_proactive
 from clytie.sdk.types import (
     Budget,
@@ -33,11 +33,14 @@ from clytie.sdk.types import (
 )
 from clytie.storage.owner import StorageBusy, StorageCancelled, StorageFailed
 
+from .addressed import ConversationMessages
 from .appearance import VIEW, Appearance, load_appearance, reference_message, self_check
 from .context import Context, message
 from .image_context import ImageContext, view_tool
+from .judgment import AttentionJudgments
 from .persona import Persona
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
+from .safety_belt import SafetyBelt
 from .vision import ImageFetcher
 
 REASONS = {
@@ -108,6 +111,9 @@ class Agent:
         kernel.delivery.admission = self.admission
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
+        self.conversation_messages = ConversationMessages(self.ledger, config.get("names", {}))
+        self.judgments = AttentionJudgments(self)
+        self.safety_belt = SafetyBelt(self, notifier=notifier)
         self.model_registration = (
             None
             if model is not None
@@ -439,6 +445,8 @@ class Agent:
             raise ValueError("wrong companion")
         if not await self.admission.accept_checked(event):
             return None
+        if event.addressed is not None:
+            event = event.model_copy(update={"addressed": None})
         images = {}
         if event.message:
             parts = list(event.message.parts)
@@ -555,11 +563,24 @@ class Agent:
                     await finalization.persist(self.ledger.ignore, key, "boundary_paused")
             return None
         if not event.dedupable:
+            event = await self._mark_addressed(event, finalization)
             await self.host.behavior(self.cid, "message_received", event)
             return None
         key, new = await self._claim_inbound(event, finalization, state)
         if not new:
             self.kernel.duplicates += 1
+            return None
+        event = await self._mark_addressed(event, finalization)
+        if (
+            event.message
+            and event.conversation.kind == "group"
+            and event.message.sender.role != "owner"
+            and await finalization.persist(
+                self.safety_belt.paused, event.conversation.conversation_id
+            )
+        ):
+            await finalization.persist(self.ledger.ignore, key, "safety_paused")
+            await self.host.behavior(self.cid, "message_received", event)
             return None
         channel = self.kernel.delivery.channels.get(event.channel_id)
         for index, part in state.get("images", {}).items():
@@ -626,15 +647,19 @@ class Agent:
         }
         self.batches[batch_key] = batch
         state["handed"] = True
-        return await self.attention(batch_key, mentioned)
+        return await self.attention(batch_key)
 
-    async def attention(self, key, mentioned):
+    async def _mark_addressed(self, event, finalization):
+        return await finalization.persist(self.conversation_messages.mark, event)
+
+    async def attention(self, key, *, judgment=None, registration=None):
         batch = self.batches[key]
         try:
-            return await self._attention(key, mentioned, batch)
+            return await self._attention(key, batch, judgment, registration)
         except BaseException as exc:
             if not batch.get("queued"):
-                self.batches.pop(key, None)
+                if self.batches.get(key) is batch:
+                    self.batches.pop(key)
                 finalization = batch["finalizations"][0]
                 if batch.get("trace"):
                     await self.kernel.seal(
@@ -649,33 +674,57 @@ class Agent:
                     responsibility.release()
             raise
 
-    async def _attention(self, key, mentioned, batch):
+    async def _attention(self, key, batch, judgment, registration):
         finalization = batch["finalizations"][0]
         event = batch["events"][-1]
+        supplied = (event, [e.message for e in batch["events"]])
+        origin = []
+        if judgment is not None:
+            supplied += (judgment,)
         opinion = await self.host.behavior(
             self.cid,
             "attention",
-            (event, [e.message for e in batch["events"]]),
-            mentioned=mentioned,
+            supplied,
+            judge_origin=origin,
+            resume_registration=registration,
+            mentioned=any(
+                e.addressed.mention or e.addressed.reply_to_self for e in batch["events"]
+            ),
         )
-        if isinstance(opinion, Defer) and self.clock.monotonic() - batch["started"] < 120:
-            delay = min(opinion.seconds, 120 - (self.clock.monotonic() - batch["started"]))
+
+        def paused():
+            return (
+                event.conversation.kind == "group"
+                and event.message.sender.role != "owner"
+                and self.safety_belt.paused(event.conversation.conversation_id)
+            )
+
+        remaining = 120 - (self.clock.monotonic() - batch["started"])
+        defer = isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0)
+        already_paused = defer and await finalization.persist(paused)
+        if defer and not already_paused:
+            deadline = self.clock.now() + timedelta(seconds=max(0, remaining))
 
             async def later():
-                await self.clock.sleep(delay)
-                await self.attention(
-                    key,
-                    any(
-                        p.type == "mention" and p.is_self
-                        for e in batch["events"]
-                        for p in e.message.parts
-                    ),
-                )
+                if isinstance(opinion, Judge):
+                    result = Judgment(status="failed")
+                    if remaining > 0:
+                        result = await self.judgments.decide(
+                            event.conversation,
+                            tuple(batch["events"]),
+                            opinion.facts,
+                            deadline=deadline,
+                            finalization=finalization,
+                        )
+                    await self.attention(key, judgment=result, registration=origin[0])
+                else:
+                    await self.clock.sleep(min(opinion.seconds, remaining))
+                    await self.attention(key)
 
             async def deferred():
                 try:
                     await later()
-                except asyncio.CancelledError:
+                except BaseException:
                     if self.batches.get(key) is batch:
                         self.batches.pop(key, None)
                         await finalization.persist(
@@ -688,14 +737,25 @@ class Agent:
             self.track(finalization.follow(deferred()))
             return None
         self.batches.pop(key)
-        if isinstance(opinion, Skip):
-            await finalization.persist(
-                self._ignore_unhandled, [e.event_id for e in batch["events"]]
-            )
+        event = batch["events"][-1]
+
+        def should_open():
+            safety_paused = already_paused or paused()
+            if safety_paused or isinstance(opinion, Skip):
+                self._ignore_unhandled(
+                    [e.event_id for e in batch["events"]],
+                    "safety_paused" if safety_paused else None,
+                )
+                return False
+            return True
+
+        record = await self.kernel.open_record(
+            event_id=event.event_id, finalization=finalization, guard=should_open
+        )
+        if record is None:
             for responsibility in batch["finalizations"]:
                 responsibility.release()
             return None
-        record = await self.kernel.open_record(event_id=event.event_id, finalization=finalization)
         trace = record["trace_id"]
         batch["trace"] = trace
         self._bind_finalization(trace, finalization)
@@ -724,6 +784,7 @@ class Agent:
                 event.message.sender,
                 batch["events"],
                 mode=batch["mode"],
+                respond=opinion if isinstance(opinion, Respond) else None,
                 extra=extra,
             ),
         )
@@ -921,6 +982,7 @@ class Agent:
         extra="",
         proactive=False,
         direct=None,
+        respond=None,
     ):
         token = self.kernel.tokens.setdefault(trace, CancelToken())
         self.kernel.record_tasks[trace] = asyncio.current_task()
@@ -943,6 +1005,21 @@ class Agent:
                 intents = [self.intent(record, [part], kind="proactive") for part in direct]
                 await self.finish(trace, "ok", intents)
                 return
+            recheck = (
+                respond
+                and respond.recheck_after
+                and conversation.kind == "group"
+                and not any(
+                    e.addressed
+                    and (e.addressed.mention or e.addressed.reply_to_self or e.addressed.name)
+                    for e in events
+                )
+            )
+            since = (
+                await self.kernel.persist(trace, self.conversation_messages.watermark)
+                if recheck
+                else None
+            )
             while True:
                 token.raise_if_cancelled()
                 specs, states = await self.tools(conversation, actor, proactive)
@@ -1076,7 +1153,16 @@ class Agent:
 
                 await self.kernel.persist(trace, audit_proactive_decline)
             intents = await self.outgoing(
-                trace, conversation, actor, events, text, assets, token, proactive=proactive
+                trace,
+                conversation,
+                actor,
+                events,
+                text,
+                assets,
+                token,
+                proactive=proactive,
+                respond=respond,
+                since=since,
             )
             token.raise_if_cancelled()
             await self.finish(trace, "ok", intents)
@@ -1285,9 +1371,27 @@ class Agent:
         *,
         proactive=False,
         fallback=False,
+        respond=None,
+        since=None,
     ):
         record = await self.kernel.persist(trace, self.ledger.get, "record", trace)
+        focus = respond.focus if respond else None
+        interleaved = 0
+        if focus:
+            position = await self.kernel.persist(
+                trace, self.conversation_messages.focus_position, conversation, focus
+            )
+            if position is None:
+                focus = None
+            else:
+                interleaved = len(
+                    await self.kernel.persist(
+                        trace, self.conversation_messages.messages_after, conversation, position
+                    )
+                )
         draft = ReplyDraft(
+            focus=focus,
+            interleaved=interleaved,
             parts=[TextPart(text=text)] if text else [],
             conversation=conversation,
             task_id=record["task_id"],
@@ -1322,6 +1426,8 @@ class Agent:
                 turn = await self.generate(trace, context, [], conversation, token, rewrite=True)
                 if turn.finish == "stop":
                     draft = ReplyDraft(
+                        focus=focus,
+                        interleaved=interleaved,
                         parts=[TextPart(text=turn.text or "")],
                         conversation=conversation,
                         task_id=record["task_id"],
@@ -1354,6 +1460,27 @@ class Agent:
             raise ValueError("outbound_blocked")
         if hits:
             self.log.info("outbound.style", trace_id=trace)
+        if since is not None:
+            recent = await self.kernel.persist(
+                trace, self.conversation_messages.messages_after, conversation, since
+            )
+            if len(recent) >= respond.recheck_after and not await self.judgments.recheck(
+                conversation,
+                recent,
+                text_parts(draft.parts),
+                trace=trace,
+                token=token,
+                deadline=datetime.fromisoformat(record["deadline"])
+                if record.get("deadline")
+                else None,
+            ):
+
+                def withdrawn():
+                    with self.ledger.transaction():
+                        self.ledger.audit("reply_withdrawn", trace_id=trace)
+
+                await self.kernel.persist(trace, withdrawn)
+                return []
         kind = "proactive" if proactive else "reply"
         groups = [[p] for p in draft.parts] if draft.form == "split" else [list(draft.parts)]
         groups = [g for g in groups if text_parts(g)]
@@ -1497,6 +1624,7 @@ class Agent:
         while self.intake_tasks:
             await asyncio.gather(*tuple(self.intake_tasks), return_exceptions=True)
         await self.kernel.queue.drain()
+        await self.safety_belt.drain()
         await self.kernel.reactions.drain()
         if self.media_jobs:
             await asyncio.gather(*tuple(self.media_jobs.values()), return_exceptions=True)

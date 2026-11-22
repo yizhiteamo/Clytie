@@ -156,12 +156,24 @@ def prepare(home):
     require(all(type(v) is int and v >= 0 for v in caps), "invalid_limits")
     require(isinstance(cases, list) and 0 < len(cases) <= caps[0], "case_limit")
     seen = set()
+    messages = 0
     for c in cases:
         e = c["expect"]
-        require(
-            ident(c["id"]) and c["id"] not in seen and isinstance(c["text"], str) and c["text"],
-            "invalid_case",
-        )
+        require(ident(c["id"]) and c["id"] not in seen, "invalid_case")
+        if "texts" in c:
+            texts = c["texts"]
+            require(
+                not {"text", "image", "reply_to_last"}.intersection(c)
+                and isinstance(texts, list)
+                and len(texts) >= 2
+                and all(isinstance(t, str) and t for t in texts),
+                "invalid_case",
+            )
+            messages += len(texts)
+        else:
+            require(isinstance(c.get("text"), str) and c["text"], "invalid_case")
+            require(type(c.get("reply_to_last", False)) is bool, "invalid_case")
+            messages += 1
         seen.add(c["id"])
         require(
             all(type(x) is bool for x in (e["reply"], e["image"], c.get("mention", True)))
@@ -182,7 +194,8 @@ def prepare(home):
             and not states[-1].startswith("optional:"),
             "invalid_reactions",
         )
+    require(messages <= caps[0], "case_limit")
     require(sum(c["expect"]["image"] for c in cases) <= caps[1], "image_limit")
     target = target_config(home, cfg["companion"], cfg["tester"])
     require(target.channel == driver["plugin"], "driver_channel_mismatch")
-    return cfg, cases, target
+    return cfg, cases, target, messages

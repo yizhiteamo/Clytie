@@ -64,6 +64,8 @@
 
 ## 3. 入站防重
 
+群聊安全带按本体确认首条回复已发送的时间统计，每条入站处理记录只计一次。暂停时仍登记其他人的入站消息和防重键，入站状态为 `ignored`，原因为 `safety_paused`。这些消息仍可出现在本群的聊天记录中。窗口、提醒及主人的例外见 chat-behavior-spec §4。
+
 - 防重键：`(companion_id, channel_id, platform_message_id)`。`channel_id` 是逻辑 `account_ref`，所以每个平台账号自成一个命名空间；不同伴侣各自独立。`event_id` 的格式保持 SDK 已定的 `channel_id:platform_message_id`。
 - 平台插件必须保证 `platform_message_id` 在本账号内唯一并且稳定。
 - 平台本身没有消息 ID 的事件（通知、撤回等）：插件用平台提供的稳定字段合成 ID，写进 `event_id`。

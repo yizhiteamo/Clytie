@@ -130,6 +130,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"  {label}：{plugin['id']} ({plugin['status']})")
             for persona in companion["persona"]:
                 print(f"  人设：{persona['layer']} ({persona['status']})")
+            if belt := companion.get("safety_belt_config"):
+                print(
+                    f"  群聊安全带配置：{belt['window_minutes']} 分钟内回复 {belt['replies']} 次，暂停 {belt['pause_minutes']} 分钟"
+                )
+            if observed := companion.get("storage_observed_at"):
+                print(f"  状态采样时间：{observed}")
+            for group, value in companion.get("safety_belt", {}).items():
+                from zoneinfo import ZoneInfo
+
+                from clytie.agent.safety_belt import recovery_time
+                from clytie.clock import SystemClock
+
+                for row in value if isinstance(value, list) else [value]:
+                    until = recovery_time(
+                        row["until"],
+                        SystemClock().now(),
+                        ZoneInfo(report.instance.get("timezone", "UTC")),
+                    )
+                    print(f"  群聊安全带：{group} 当天触发 {row['count']} 次，恢复时间 {until}")
+                    if row["owner_private_missing"]:
+                        print("  主人私聊未登记，已跳过私聊提醒")
+            for key, usage in companion.get("attention", {}).items():
+                print(f"  轻量判断：{key} 当天 {usage['count']} 次，共 {usage['tokens']} token")
         for error in report.errors:
             actual = json.dumps(error.to_dict()["actual"], ensure_ascii=False)
             print(f"{error.file}#{error.pointer}：期望 {error.expected}；实际 {actual}")

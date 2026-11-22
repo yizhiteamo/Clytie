@@ -291,12 +291,15 @@ def _legacy_ledger_schema(db):
     db.execute("PRAGMA trusted_schema=ON")
     expected_db = sqlite3.connect(":memory:")
     try:
-        for statement in (*SCHEMA_SQL, *HEALTH_SQL):
+        for statement in SCHEMA_SQL:
             if (
                 "inbound_media" in statement
                 and db.execute("PRAGMA user_version").fetchone()[0] == 2
             ):
                 continue
+            expected_db.execute(statement)
+        required = {name for (name,) in expected_db.execute("SELECT name FROM sqlite_master")}
+        for statement in HEALTH_SQL:
             expected_db.execute(statement)
         expected = {
             name: (kind, sql)
@@ -308,8 +311,7 @@ def _legacy_ledger_schema(db):
         name: (kind, sql)
         for name, kind, sql in db.execute("SELECT name,type,sql FROM sqlite_master")
     }
-    optional = {"health_tasks", "health_sending"}
-    if not (set(expected) - optional <= set(actual) <= set(expected)) or any(
+    if not (required <= set(actual) <= set(expected)) or any(
         item != expected[name] for name, item in actual.items()
     ):
         raise RestoreError("restore_database_invalid")

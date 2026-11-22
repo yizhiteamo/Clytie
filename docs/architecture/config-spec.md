@@ -115,6 +115,9 @@
 | `categories` | `{romance, persona_change, scripted_intimacy, intimate_images, owner_privacy}`，各为布尔值（全部 `true`） |
 | `never_publish` | 字符串列表（空）：对外场景中不允许出现的词句 |
 | `notify_owner` | 布尔值（`true`） |
+| `safety_belt.replies` | 群聊回复阈值，整数 50–1000（200） |
+| `safety_belt.window_minutes` | 群聊计数窗口分钟数，整数 10–120（30） |
+| `safety_belt.pause_minutes` | 群聊暂停分钟数，整数 5–240（30） |
 | `admission` | `test_only` / `registered` / `owner_present`（`registered`）：哪些会话可以处理，见 admission-spec |
 
 **`memory`**（全部可选，括号内为默认值）：
@@ -314,3 +317,5 @@ Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 
 ### 形象资料自检
 
 伴侣配置可设 `appearance.self_check`（布尔值，默认 `true`）。伴侣在启动时读取此项；没有形象资料时调用次数为零。关闭时仍可在对话中使用形象资料。触发、结果和用量审计见 appearance-spec §6。
+
+轻量判断的 `attention.judge.persona_chars` 默认 1500，`messages` 默认 20，分别控制场景人设字数和最近记录条数。非负整数可以设为零。`seconds` 默认 20 秒，须为正数，判断同时受批次剩余时间限制。

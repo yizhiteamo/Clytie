@@ -30,6 +30,19 @@ HEALTH_SQL = (
     "CREATE INDEX IF NOT EXISTS health_tasks ON record("
     "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))",
     "CREATE INDEX IF NOT EXISTS health_sending ON intent(json_extract(data,'$.status'))",
+    "CREATE INDEX IF NOT EXISTS group_sent ON intent("
+    "json_extract(data,'$.conversation_id'),json_extract(data,'$.error_written_at')) "
+    "WHERE json_extract(data,'$.kind')='reply' AND json_extract(data,'$.status')='sent'",
+    "CREATE INDEX IF NOT EXISTS intent_trace ON intent(json_extract(data,'$.trace_id'))",
+    "CREATE INDEX IF NOT EXISTS child_trace ON record(json_extract(data,'$.parent_trace_id'))",
+    "CREATE INDEX IF NOT EXISTS belt_trips ON audit(json_extract(data,'$.conversation_id'),id) "
+    "WHERE json_extract(data,'$.kind')='safety_belt.tripped'",
+    "CREATE INDEX IF NOT EXISTS attention_day ON audit("
+    "json_extract(data,'$.day'),json_extract(data,'$.conversation_id')) "
+    "WHERE json_extract(data,'$.purpose')='attention'",
+    "CREATE INDEX IF NOT EXISTS sent_message_id ON attempt("
+    "json_extract(data,'$.receipt.platform_message_id')) "
+    "WHERE json_extract(data,'$.receipt.status')='sent'",
 )
 
 
@@ -414,7 +427,7 @@ class Ledger:
             self._aggregate(intent["trace_id"])
         return n
 
-    def record_receipt(self, intent_id, n, receipt, *, retry=False):
+    def record_receipt(self, intent_id, n, receipt, *, retry=False, on_confirmed=None):
         with self.transaction():
             key = encode([intent_id, n])
             attempt = self.get("attempt", key)
@@ -451,6 +464,8 @@ class Ledger:
                 intent["error_written_at"] = self.now()
                 self.put("intent", intent_id, intent)
                 self._aggregate(intent["trace_id"])
+                if status == "sent" and on_confirmed:
+                    on_confirmed(intent)
             if late:
                 self.audit("late_receipt", trace_id=intent["trace_id"], content=value)
             return not late

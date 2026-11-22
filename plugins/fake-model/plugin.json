@@ -6,7 +6,7 @@
   "category": "model",
   "version": "0.2.0",
   "requires": {
-    "sdk": ">=0.7,<0.16"
+    "sdk": ">=0.7,<0.17"
   },
   "dependencies": {},
   "conflicts": [],

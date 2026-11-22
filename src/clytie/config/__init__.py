@@ -31,6 +31,14 @@ def compile_input_pattern(pattern):
     return re.compile(pattern, re.IGNORECASE)
 
 
+def safety_belt_settings(config):
+    values = config.get("boundary", {}).get("safety_belt", {})
+    return {
+        key: values.get(key, default)
+        for key, default in (("replies", 200), ("window_minutes", 30), ("pause_minutes", 30))
+    }
+
+
 _MISSING = object()
 
 
