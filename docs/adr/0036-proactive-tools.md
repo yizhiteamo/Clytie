@@ -15,8 +15,14 @@ agent-spec §15.2 规定主动开口不提供能力。这是 A3.2 时的暂定�
 3. 本体工具只提供只读的回想和看图：`core_recall`、`core_view_image`、`core_view_appearance`。
 4. 用了能力的主动记录升级为任务，主人可以取消。`requester` 为空，审计标明主动发起。没有任务状态回应，不附任务单。
 5. 每个能力在 `proactive.tools` 中有每天的上限。用完时原因代码为 `proactive_limit`。
-6. "暂停主动聊天"放在本体，对所有插件的话题方式和直接发送都有效，持久保存。暂停时 `submit` 返回 `None`。
-7. 以上属于 SDK 0.18。
+6. "暂停主动聊天"放在本体，对所有插件的话题方式和直接发送都有效，持久保存。暂停时 `submit` 的结果为 `paused`，不建记录。
+7. 实现时补充（2026-11-22）：
+   - `submit` 返回本次提交的结果（接受、暂停、会话正忙），提交插件可以用 `result` 查询自己提交的结果，重启后据此核对；
+   - 目标会话正忙由本体在建立记录时原子地挡住，插件看不到会话的排队状态；
+   - 主人在她写的时候给这个会话发了消息，没用能力的主动消息作废；
+   - 主动任务没有发起人：`Invocation.actor` 和任务事件的 `actor_id` 为空，`origin = proactive`；主人只是权限判定时参照的身份；
+   - 回复草稿带本体填写、插件不能修改的 `kind`，形式插件据此区分主动消息。
+8. 以上属于 SDK 0.18。
 
 ## 不选的方案
 
@@ -26,11 +32,15 @@ agent-spec §15.2 规定主动开口不提供能力。这是 A3.2 时的暂定�
 - **不设每天的上限**：插件出错或节奏配置得太松时，可能连续画图。
 - **把开关放在插件里**：换一个主动插件就失效；直接发送的表情和媒体也要一起停，需要放在本体统一处理。
 - **主动任务也附任务单**：任务单是回应委托用的，主动送的图附上"委托"会很生硬。
+- **把主人或伴侣自己填成 `actor`**：填主人会把主人记成发起人，记忆、审计和以后的额度归属都会错；伴侣自己没有对应的身份角色，硬造一个会混进权限表。
+- **让插件读会话的排队状态再决定提交**：检查和提交之间会插进新的回复，而且会把账本内容暴露给插件。
+- **用事件广播主动消息的结果**：其他订阅者会看到别的插件的提交情况；查询只对提交插件开放，重启后也能核对。
+- **让形式插件从交付意图判断是不是主动消息**：拆分在 `after_generation` 进行，那时还没有交付意图，`before_send` 又不能增删意图。
 
 ## 影响
 
-- SDK 0.18：`submit` 的 `tools` 参数和可能为空的返回值；能力状态的原因代码 `proactive_limit`。已有插件不用修改。
+- SDK 0.18（0.x 不兼容变更）：`submit` 的 `tools` 参数和新的返回值、`result`、可空的 `Invocation.actor` 和任务事件 `actor_id`、`origin`、`ReplyDraft.kind`、能力状态的原因代码 `proactive_limit`。使用 `submit` 返回值、假设 `actor` 有值的插件需要修改。
 - 新的伴侣配置 `proactive.tools`，默认为空。
-- 新的 API `POST /companions/<cid>/proactive`、CLI `clytie companion proactive`，以及审计 `proactive.paused`。
+- 新的 API `POST /companions/<cid>/proactive`、CLI `clytie companion proactive`，以及审计 `proactive.paused`、`proactive.busy`、`proactive.superseded`。
 - 主动画图有真实费用，上限由配置控制。
 - Issue #23 由本 ADR 和 proactive-spec §4 解决，实现合并后关闭。

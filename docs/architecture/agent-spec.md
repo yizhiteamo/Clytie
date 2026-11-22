@@ -454,15 +454,16 @@
 ```
 async submit(conversation_id, *, topic: str | None = None, material: JsonObject | None = None,
              parts: list[MessagePart] | None = None, reason: str,
-             tools: bool = False) -> str | None
+             tools: bool = False) -> ProactiveSubmission
+async result(trace_id) -> ProactiveOutcome
 ```
 
-`tools` 和可能为 `None` 的返回值是 SDK 0.18 新增的（proactive-spec §4、§5）。
+`tools`、`ProactiveSubmission` 和 `result` 是 SDK 0.18 新增的（proactive-spec §4、§5）。
 
 - **话题方式**（`topic`，可附 `material`）：例如"主人一下午没说话了""今天降温了""刚完成一幅画"。本体让她自己开口（第 15.2 节）。
 - **直接发送**（`parts`）：只允许 `sticker`、`image`、`audio`、`video`、`file`。含有 `text`、`card`、`link` 等任何文字类部分时抛 `ValueError`，提示改用话题方式。
 - `reason` 写入日志和审计，不交给模型。
-- 返回值是这次主动消息的 `trace_id`，插件可以凭它在日志中追查，但不能读取账本（kernel-spec §13.1）。伴侣的"暂停主动聊天"打开时返回 `None`，不建记录（proactive-spec §5）。
+- 返回值 `ProactiveSubmission` 说明这次提交被接受、因为暂停主动聊天而没发、还是因为会话正忙而没发；接受时带这次主动消息的 `trace_id`（proactive-spec §5.2）。插件可以凭 `trace_id` 在日志中追查，并用 `result` 查询本插件提交的结果（proactive-spec §5.3），但不能读取账本（kernel-spec §13.1）。
 
 ### 15.2 话题方式的生成
 
@@ -478,7 +479,8 @@ async submit(conversation_id, *, topic: str | None = None, material: JsonObject 
 - 目标会话必须是实例配置中登记过的会话；未登记的会话、陌生人私聊一律拒绝（抛 `ValueError`），不创建记录。
 - 主动消息不经过入站流程和行为环节 `before_attention` / `attention`；时机由提交它的插件负责（例如睡眠插件在她"睡着"时不提交）。
 - 直接发送的内容只做 kernel-spec §11 的格式和大小检查。
-- 没有使用能力的主动消息不是任务：不分配任务编号，不加任务状态回应，不附任务单。使用了能力时升级为任务，但仍没有任务状态回应和任务单（proactive-spec §4）。
+- 没有使用能力的主动消息不是任务：不分配任务编号，不加任务状态回应，不附任务单。使用了能力时升级为任务，但仍没有任务状态回应和任务单，也没有发起人（proactive-spec §4、§4.1）。
+- 目标会话正忙时不建记录（proactive-spec §5.2）。主人在她写的时候给这个会话发了消息，没用能力的主动消息作废（proactive-spec §5.4）。
 
 ### 15.4 实现技术澄清（只读询问 Claude 后采用）
 
