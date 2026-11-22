@@ -451,7 +451,11 @@ class Supervisor:
             await self.clock.sleep(1)
 
     def _valid_trip(self, group, value):
-        if not isinstance(group, str) or self.conversations.get(group) != "group":
+        from clytie.agent.safety_belt import UNREGISTERED_GROUP
+
+        if not isinstance(group, str) or (
+            self.conversations.get(group) != "group" and group != UNREGISTERED_GROUP
+        ):
             return False
         if type(value.get("count")) is not int or value["count"] < 0:
             return False
@@ -461,21 +465,34 @@ class Supervisor:
             return False
 
     def _conversation_status(self, values, field):
+        from clytie.agent.safety_belt import UNREGISTERED_GROUP, UNREGISTERED_USAGE
+
         result = {}
-        if isinstance(values, dict):
-            for key, row in values.items():
-                if key not in self.conversations or not isinstance(row, dict):
-                    continue
-                if field == "safety_belt" and self._valid_trip(key, row):
-                    result[key] = dict(
+        if not isinstance(values, dict):
+            return result
+        for key, value in values.items():
+            if field == "safety_belt":
+                anonymous = key == UNREGISTERED_GROUP
+                rows = value if anonymous and isinstance(value, list) else [value]
+                for row in rows:
+                    if not isinstance(row, dict) or not self._valid_trip(key, row):
+                        continue
+                    clean = dict(
                         count=row["count"],
                         until=row["until"],
                         owner_private_missing=row.get("owner_private_missing") is True,
                     )
-                elif field == "attention" and all(
-                    type(row.get(k)) is int and row[k] >= 0 for k in ("count", "tokens")
-                ):
-                    result[key] = dict(count=row["count"], tokens=row["tokens"])
+                    if anonymous:
+                        result.setdefault(key, []).append(clean)
+                    else:
+                        result[key] = clean
+            elif (
+                field == "attention"
+                and (key in self.conversations or key == UNREGISTERED_USAGE)
+                and isinstance(value, dict)
+                and all(type(value.get(k)) is int and value[k] >= 0 for k in ("count", "tokens"))
+            ):
+                result[key] = dict(count=value["count"], tokens=value["tokens"])
         return result
 
     async def refresh_old_instances(self):

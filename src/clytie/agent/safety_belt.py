@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from clytie.backup.coordination import run_sync
@@ -21,6 +22,7 @@ WITH RECURSIVE recent(trace) AS (
     WHERE json_extract(data,'$.kind')='reply' AND json_extract(data,'$.status')='sent'
       AND json_extract(data,'$.conversation_id')=:group
       AND json_extract(data,'$.error_written_at')>:cutoff
+      AND json_extract(data,'$.error_written_at')>=:resume
 ), ancestors(id, source, parent) AS (
     SELECT r.id, json_extract(r.data,'$.source_event_id'), json_extract(r.data,'$.parent_trace_id')
     FROM recent JOIN record r ON r.id=recent.trace
@@ -42,13 +44,24 @@ WITH RECURSIVE recent(trace) AS (
     WHERE json_extract(i.data,'$.conversation_id')=:group
       AND json_extract(i.data,'$.kind')='reply' AND json_extract(i.data,'$.status')='sent'
     GROUP BY f.root HAVING MIN(json_extract(i.data,'$.error_written_at'))>:cutoff
+                      AND MIN(json_extract(i.data,'$.error_written_at'))>=:resume
 )
 SELECT COUNT(*), MAX(first_confirmation) FROM replies
 """
 
 
+UNREGISTERED_GROUP = "一个未登记的群"
+UNREGISTERED_USAGE = "未登记的群"
+
+
+def recovery_time(until, now, zone):
+    target = datetime.fromisoformat(until).astimezone(zone)
+    same_day = target.date() == now.astimezone(zone).date()
+    return target.strftime("%H:%M" if same_day else "%Y-%m-%d %H:%M")
+
+
 def notice_body(group, count, until):
-    return f"Clytie 系统通知：群 {group} 今天第 {count} 次触发群聊安全带，恢复时间 {until}。"
+    return f"Clytie 系统通知：{group} 今天第 {count} 次触发群聊安全带，恢复时间 {until}。"
 
 
 class SafetyBelt:
@@ -62,11 +75,21 @@ class SafetyBelt:
         agent.kernel.delivery.safety_belt = self
 
     def _latest(self, group):
-        row = self.ledger.db.execute(
-            "SELECT data FROM audit WHERE json_extract(data,'$.kind')='safety_belt.tripped' "
-            "AND json_extract(data,'$.conversation_id')=? ORDER BY id DESC LIMIT 1",
-            (group,),
-        ).fetchone()
+        if group in self.agent.admission.conversations:
+            row = self.ledger.db.execute(
+                "SELECT data FROM audit WHERE json_extract(data,'$.kind')='safety_belt.tripped' "
+                "AND json_extract(data,'$.conversation_id')=? ORDER BY id DESC LIMIT 1",
+                (group,),
+            ).fetchone()
+        else:
+            # 用既有回复记录关联真实会话，不在安全带审计或对外投影中保存匿名编号。
+            row = self.ledger.db.execute(
+                "SELECT a.data FROM audit a JOIN record r ON r.id=json_extract(a.data,'$.trace_id') "
+                "WHERE json_extract(a.data,'$.kind')='safety_belt.tripped' "
+                "AND json_extract(a.data,'$.conversation_id')=? "
+                "AND json_extract(r.data,'$.conversation_id')=? ORDER BY a.id DESC LIMIT 1",
+                (UNREGISTERED_GROUP, group),
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def paused(self, group):
@@ -94,26 +117,33 @@ class SafetyBelt:
 
     def read_status(self):
         rows = self.ledger.db.execute(
-            "SELECT data FROM audit WHERE id IN (SELECT MAX(id) FROM audit "
-            "WHERE json_extract(data,'$.kind')='safety_belt.tripped' "
-            "GROUP BY json_extract(data,'$.conversation_id'))"
+            "SELECT a.data FROM audit a WHERE a.id IN (SELECT MAX(t.id) FROM audit t "
+            "LEFT JOIN record r ON r.id=json_extract(t.data,'$.trace_id') "
+            "WHERE json_extract(t.data,'$.kind')='safety_belt.tripped' "
+            "GROUP BY coalesce(json_extract(r.data,'$.conversation_id'), "
+            "json_extract(t.data,'$.conversation_id')))"
         )
-        today = self.agent.clock.now().astimezone(self.zone).date()
+        now = self.agent.clock.now()
+        today = now.astimezone(self.zone).date()
         missing = self._owner_target() is None
-        return {
-            trip["conversation_id"]: {
-                "count": trip["count"] if self._day(trip["at"]) == today else 0,
-                "until": trip["until"],
-                "owner_private_missing": missing,
-            }
-            for (raw,) in rows
-            for trip in (json.loads(raw),)
-        }
+        result = {}
+        for (raw,) in rows:
+            trip = json.loads(raw)
+            count = trip["count"] if self._day(trip["at"]) == today else 0
+            if not count and datetime.fromisoformat(trip["until"]) <= now:
+                continue
+            row = dict(count=count, until=trip["until"], owner_private_missing=missing)
+            group = trip["conversation_id"]
+            if group in self.agent.admission.conversations:
+                result[group] = row
+            else:
+                result.setdefault(UNREGISTERED_GROUP, []).append(row)
+        return result
 
     def _confirmed(self, intent):
         group = intent["conversation_id"]
         registered = self.agent.admission.conversations.get(group, {})
-        if intent["kind"] != "reply" or registered.get("kind") != "group":
+        if intent["kind"] != "reply":
             return None
         previous = self._latest(group)
         now = self.agent.clock.now()
@@ -121,18 +151,20 @@ class SafetyBelt:
             return None
         window = self.settings["window_minutes"]
         cutoff = (now - timedelta(minutes=window)).isoformat()
+        resume = previous["until"] if previous else ""
         threshold = self.settings["replies"]
         # 通常连发送的条数都达不到阈值。只读窗口索引，达到阈值才核对入站来源。
         enough_intents = self.ledger.db.execute(
             "SELECT 1 FROM intent WHERE json_extract(data,'$.kind')='reply' "
             "AND json_extract(data,'$.status')='sent' AND json_extract(data,'$.conversation_id')=? "
-            "AND json_extract(data,'$.error_written_at')>? LIMIT 1 OFFSET ?",
-            (group, cutoff, threshold - 1),
+            "AND json_extract(data,'$.error_written_at')>? AND json_extract(data,'$.error_written_at')>=? LIMIT 1 OFFSET ?",
+            (group, cutoff, resume, threshold - 1),
         ).fetchone()
         if not enough_intents:
             return None
         count, first = self.ledger.db.execute(
-            REPLIES_IN_WINDOW, {"group": group, "current": intent["intent_id"], "cutoff": cutoff}
+            REPLIES_IN_WINDOW,
+            {"group": group, "current": intent["intent_id"], "cutoff": cutoff, "resume": resume},
         ).fetchone()
         if count < threshold or not first:
             return None
@@ -140,12 +172,12 @@ class SafetyBelt:
         if previous and self._day(previous["at"]) == now.astimezone(self.zone).date():
             daily += previous["count"]
         trip = dict(
-            conversation_id=group,
+            conversation_id=group if registered.get("kind") == "group" else UNREGISTERED_GROUP,
             count=daily,
             window_minutes=window,
             until=(now + timedelta(minutes=self.settings["pause_minutes"])).isoformat(),
         )
-        self.ledger.audit("safety_belt.tripped", **trip)
+        self.ledger.audit("safety_belt.tripped", trace_id=intent["trace_id"], **trip)
         return trip
 
     def record_receipt(self, intent_id, n, receipt, *, retry):
@@ -161,17 +193,18 @@ class SafetyBelt:
         return fresh, trip
 
     def notify(self, trip):
-        self.agent.log.warning("safety_belt.tripped", **trip)
+        display = {**trip, "until": recovery_time(trip["until"], self.agent.clock.now(), self.zone)}
+        self.agent.log.warning("safety_belt.tripped", **display)
         notice = Notice(
             level="warn",
             title="Clytie",
-            body=notice_body(trip["conversation_id"], trip["count"], trip["until"]),
-            dedupe_key=f"safety_belt:{self.agent.cid}:{trip['conversation_id']}:{trip['until']}",
+            body=notice_body(display["conversation_id"], display["count"], display["until"]),
+            dedupe_key=f"safety_belt:{self.agent.cid}:{uuid4().hex}",
         )
         self._track(self._notify_channel(trip, notice))
         target = self._owner_target()
         if target:
-            self._track(self._notify_owner(target, trip, notice.body))
+            self._track(self._notify_owner(target, display, notice.body))
 
     def _track(self, operation):
         task = self.agent.track(operation)
@@ -203,7 +236,7 @@ class SafetyBelt:
         try:
             trace = await agent.submit(
                 target,
-                topic="告诉主人这个群触发了群聊安全带，你会先歇一会儿",
+                topic="告诉主人，你在这个群里好像和别的机器人聊得停不下来了，想先歇一会儿，也说说什么时候回来",
                 material={key: trip[key] for key in ("conversation_id", "count", "until")},
                 reason="safety_belt",
             )

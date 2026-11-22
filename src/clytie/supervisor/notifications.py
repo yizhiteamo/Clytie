@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from clytie.plugin_host.support import timed
 from clytie.sdk import CancelToken
@@ -17,6 +19,7 @@ class Notifications:
         self.clock, self.log, self.audit = clock, log, audit
         self.plugins = list(plugins)
         self.cooldown = cooldown_hours * 3600
+        self.zone = ZoneInfo("UTC")
         self.states = read(self.path, {})
         self.problems = {}
         self.silenced = False
@@ -46,13 +49,13 @@ class Notifications:
         return False
 
     async def safety_trip(self, cid, group, count, until):
-        from clytie.agent.safety_belt import notice_body
+        from clytie.agent.safety_belt import notice_body, recovery_time
 
         notice = Notice(
             level="warn",
             title="Clytie",
-            body=notice_body(group, count, until),
-            dedupe_key=f"safety_belt:{cid}:{group}:{until}",
+            body=notice_body(group, count, recovery_time(until, self.clock.now(), self.zone)),
+            dedupe_key=f"safety_belt:{cid}:{uuid4().hex}",
         )
         if not await self._send(notice):
             self.log.warning("safety_belt.notifier_unavailable", conversation_id=group)

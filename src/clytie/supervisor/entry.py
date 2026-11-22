@@ -393,6 +393,9 @@ async def daemon_main(home, detached=False, maintenance=False):
         clock,
         config={} if maintenance else instance.get("supervisor", {}),
     )
+    from zoneinfo import ZoneInfo
+
+    supervisor.notifications.zone = ZoneInfo(instance.get("timezone", "UTC"))
     supervisor.maintenance = maintenance
     supervisor.conversations = {
         key: cfg["kind"]

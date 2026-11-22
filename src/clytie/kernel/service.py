@@ -155,12 +155,19 @@ class Kernel:
             await self.observe(event)
         return event_id
 
-    async def open_record(self, *, finalization=None, **kwargs):
+    async def open_record(self, *, finalization=None, guard=None, **kwargs):
+        def open_if_allowed():
+            if guard is not None and not guard():
+                return None
+            return self.ledger.open_record(**kwargs)
+
         r = (
-            await finalization.persist(self.ledger.open_record, **kwargs)
+            await finalization.persist(open_if_allowed)
             if finalization is not None
-            else await run_sync(self.ledger, self.ledger.open_record, **kwargs)
+            else await run_sync(self.ledger, open_if_allowed)
         )
+        if r is None:
+            return None
         if finalization is not None:
             self.finalizations[r["trace_id"]] = finalization
         if r["source_event_id"]:

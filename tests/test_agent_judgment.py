@@ -177,6 +177,8 @@ async def test_scene_persona_and_visible_quote_without_duplicate_history(tmp_pat
     "turn",
     [
         {"finish": "error"},
+        {"finish": "stop", "text": "comment\n```json\n" + json.dumps(ANSWER) + "\n```"},
+        {"finish": "stop", "text": json.dumps(dict(ANSWER, calling_me=1))},
         {"finish": "stop", "text": "fictional-model-garbage"},
         {"finish": "stop", "text": json.dumps(dict(ANSWER, join="yes"))},
         {"finish": "stop", "text": json.dumps(dict(ANSWER, focus=99))},
@@ -272,5 +274,39 @@ async def test_recheck_only_new_visible_messages_and_draft_fails_open_on_excepti
             s in json.dumps(rows) for s in ("fictional draft", "new group", "exception content")
         )
         assert await judge.status() == {"test_group": {"count": 2, "tokens": 0}}
+    finally:
+        await finish(agent)
+
+
+@pytest.mark.parametrize("fenced", [False, True])
+async def test_judge_accepts_extra_calling_me_and_fenced_object(tmp_path, fenced):
+    payload = json.dumps(dict(ANSWER, join=False, calling_me=True))
+    if fenced:
+        payload = "```json\n" + payload + "\n```"
+    agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": payload})
+    try:
+        msg = group(agent, "fictional input")
+        result = await agent.judgments.decide(msg.conversation, [msg], FACTS)
+        assert result.status == "ok" and result.join is False and result.calling_me is None
+        assert len(model.requests) == 1
+    finally:
+        await finish(agent)
+
+
+async def test_unregistered_judgment_usage_combines_groups(tmp_path):
+    async def turn(req, cancel):
+        return ModelTurn(
+            finish="stop", text=json.dumps(ANSWER), usage={"input_tokens": 4, "output_tokens": 2}
+        )
+
+    agent, _, _ = await make_agent(tmp_path, turn, turn, turn)
+    try:
+        for cid in ("anon_fixture_a", "anon_fixture_b", "test_group"):
+            msg = group(agent, "fictional input", cid=cid)
+            assert (await agent.judgments.decide(msg.conversation, [msg], FACTS)).status == "ok"
+        assert await agent.judgments.status() == {
+            "未登记的群": {"count": 2, "tokens": 12},
+            "test_group": {"count": 1, "tokens": 6},
+        }
     finally:
         await finish(agent)

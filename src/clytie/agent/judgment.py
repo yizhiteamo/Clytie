@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from datetime import timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -16,6 +17,7 @@ from clytie.sdk.types import Budget, EventEnvelope, MessageRef, ModelRequest
 
 from .context import PART, LedgerSnapshot, message
 from .policy import actor_label
+from .safety_belt import UNREGISTERED_USAGE
 
 JOIN_PROMPT = (
     "你看到群里这些消息，像平常一样想想要不要接话。话题与你无关、已经聊累了，"
@@ -218,8 +220,11 @@ class AttentionJudgments:
         )
 
         def parse(text):
-            answer = JoinAnswer.model_validate_json(text)
-            if facts.name_hit != (answer.calling_me is not None):
+            fenced = re.fullmatch(r"`{3}json[ \t]*\r?\n(.*?)\r?\n`{3}", text.strip(), re.DOTALL)
+            answer = JoinAnswer.model_validate_json(fenced[1] if fenced else text)
+            if not facts.name_hit:
+                answer.calling_me = None
+            elif answer.calling_me is None:
                 raise ValueError("calling_me")
             if answer.focus is not None and not 1 <= answer.focus <= len(chat):
                 raise ValueError("focus")
@@ -399,7 +404,13 @@ class AttentionJudgments:
                  GROUP BY json_extract(data,'$.conversation_id')""",
             (today,),
         )
-        return {cid: {"count": count, "tokens": tokens} for cid, count, tokens in rows}
+        result = {}
+        for cid, count, tokens in rows:
+            label = cid if cid in self.agent.admission.conversations else UNREGISTERED_USAGE
+            totals = result.setdefault(label, {"count": 0, "tokens": 0})
+            totals["count"] += count
+            totals["tokens"] += tokens
+        return result
 
     async def status(self):
         return await run_sync(self.agent.ledger, self.read_status)

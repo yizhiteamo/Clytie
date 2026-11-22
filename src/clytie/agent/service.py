@@ -691,8 +691,18 @@ class Agent:
                 e.addressed.mention or e.addressed.reply_to_self for e in batch["events"]
             ),
         )
+
+        def paused():
+            return (
+                event.conversation.kind == "group"
+                and event.message.sender.role != "owner"
+                and self.safety_belt.paused(event.conversation.conversation_id)
+            )
+
         remaining = 120 - (self.clock.monotonic() - batch["started"])
-        if isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0):
+        defer = isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0)
+        already_paused = defer and await finalization.persist(paused)
+        if defer and not already_paused:
             deadline = self.clock.now() + timedelta(seconds=max(0, remaining))
 
             async def later():
@@ -728,14 +738,24 @@ class Agent:
             return None
         self.batches.pop(key)
         event = batch["events"][-1]
-        if isinstance(opinion, Skip):
-            await finalization.persist(
-                self._ignore_unhandled, [e.event_id for e in batch["events"]]
-            )
+
+        def should_open():
+            safety_paused = already_paused or paused()
+            if safety_paused or isinstance(opinion, Skip):
+                self._ignore_unhandled(
+                    [e.event_id for e in batch["events"]],
+                    "safety_paused" if safety_paused else None,
+                )
+                return False
+            return True
+
+        record = await self.kernel.open_record(
+            event_id=event.event_id, finalization=finalization, guard=should_open
+        )
+        if record is None:
             for responsibility in batch["finalizations"]:
                 responsibility.release()
             return None
-        record = await self.kernel.open_record(event_id=event.event_id, finalization=finalization)
         trace = record["trace_id"]
         batch["trace"] = trace
         self._bind_finalization(trace, finalization)
