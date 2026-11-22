@@ -250,3 +250,30 @@ def test_real_process_kill_at_registration_commit_has_no_dangling_success(tmp_pa
         assert (
             store.read_resolved(store.resolve(snapshot, "companion_a", asset_id)) == b"crash bytes"
         )
+
+
+async def test_asset_registry_replace_sharing_error(store, monkeypatch):
+    from pathlib import Path
+
+    registry = store.home / "shared/assets/registry.json"
+    original = Path.replace
+    calls = []
+
+    def replace(self, target):
+        if target == registry:
+            calls.append(target)
+            if len(calls) < 3:
+                error = PermissionError()
+                error.winerror = 32
+                raise error
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    bound = store.bind("companion_a")
+    if os.name == "nt":
+        ref = await bound.put(b"fictional", "text/plain", "tool")
+        assert calls == [registry] * 3 and (await bound.info(ref.asset_id)) == ref
+    else:
+        with pytest.raises(PermissionError):
+            await bound.put(b"fictional", "text/plain", "tool")
+        assert calls == [registry]
