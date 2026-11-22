@@ -58,7 +58,7 @@ async def test_batch_quiet_slides_but_stops_at_eight(module, tmp_path, kind, add
         await plugin.incoming(event)
         batch.append(event.message)
         decision = await plugin.attention((event, batch))
-        assert decision == Defer(seconds=seconds)
+        assert decision == Defer(seconds=seconds, prepare=True)
         clock.advance(2)
     if kind == "group":
         group = plugin.group("test_group", 8)
@@ -337,7 +337,7 @@ async def test_reloaded_addressed_batch_continues_without_wait(module, tmp_path)
     event = message(clock, 1, mention=True)
     batch = (event, [event.message])
     await plugin.incoming(event)
-    assert await plugin.attention(batch) == Defer(seconds=3)
+    assert await plugin.attention(batch) == Defer(seconds=3, prepare=True)
     ctx = plugin.ctx
     await plugin.stop()
     await plugin.start(ctx)

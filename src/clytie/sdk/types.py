@@ -345,6 +345,7 @@ class ModelRequest(SDKModel):
 
 
 class TokenUsage(SDKModel):
+    cached_input_tokens: int | None = Field(default=None, ge=0, strict=True)
     input_tokens: int | None = None
     output_tokens: int | None = None
 

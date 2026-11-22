@@ -194,8 +194,37 @@ class Ledger:
             )
             return True
 
+    def record_opened_since(self, conversation_id, watermark):
+        return (
+            self.db.execute(
+                """SELECT 1 FROM record WHERE rowid>? AND json_extract(data,'$.conversation_id')=? LIMIT 1""",
+                (watermark, conversation_id),
+            ).fetchone()
+            is not None
+        )
+
+    def prepare_watermark(self, conversation_id):
+        """Capture the start of a draft only while no chat or task is in flight."""
+        busy = self.db.execute(
+            """SELECT 1 FROM record WHERE json_extract(data,'$.kind') IN ('chat','task')
+               AND json_extract(data,'$.exec_status') IN ('running','pending')
+               AND json_extract(data,'$.conversation_id')=? LIMIT 1""",
+            (conversation_id,),
+        ).fetchone()
+        if busy:
+            return None
+        return self.db.execute("SELECT coalesce(max(rowid),0) FROM record").fetchone()[0]
+
     def open_record(
-        self, *, event_id=None, invocation=None, parent_trace_id=None, conversation=None
+        self,
+        *,
+        event_id=None,
+        invocation=None,
+        parent_trace_id=None,
+        conversation=None,
+        prepared_trace=None,
+        watermark=None,
+        partial_groups=(),
     ):
         with self.transaction():
             event = self.get("inbound", event_id) if event_id else None
@@ -213,7 +242,9 @@ class Ledger:
                 if event and event.get("message")
                 else (dump(invocation.actor) if invocation else None)
             )
-            trace = invocation.trace_id if invocation else uuid4().hex
+            if prepared_trace and self.record_opened_since(source["conversation_id"], watermark):
+                prepared_trace = None
+            trace = invocation.trace_id if invocation else prepared_trace or uuid4().hex
             record = dict(
                 trace_id=trace,
                 companion_id=self.companion_id,
@@ -236,6 +267,10 @@ class Ledger:
                 notified=False,
                 error=None,
             )
+            if prepared_trace:
+                record["model_calls"] = 1
+                for group in partial_groups:
+                    self.audit("partial_group_context", group_id=group)
             if self.get("record", trace):
                 raise ValueError("duplicate trace")
             self.put("record", trace, record)

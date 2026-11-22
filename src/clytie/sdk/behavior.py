@@ -49,6 +49,7 @@ class Skip(SDKModel):
 class Defer(SDKModel):
     type: Literal["defer"] = "defer"
     seconds: float = Field(ge=0)
+    prepare: bool = False
 
 
 class JudgeFacts(SDKModel):
@@ -65,6 +66,7 @@ class JudgeFacts(SDKModel):
 class Judge(SDKModel):
     type: Literal["judge"] = "judge"
     facts: JudgeFacts
+    prepare: bool = False
 
 
 class Judgment(SDKModel):
@@ -149,11 +151,12 @@ def merge_attention(
     if any(isinstance(item, Skip) for item in available):
         return Respond() if owner_private else Skip()
     delays = [item.seconds for item in available if isinstance(item, Defer)]
+    prepare = all(item.prepare for item in available if isinstance(item, (Judge, Defer)))
     if delays:
-        return Defer(seconds=min(max(delays), max_delay))
+        return Defer(seconds=min(max(delays), max_delay), prepare=prepare)
     for item in available:
         if isinstance(item, Judge):
-            return Respond() if owner_private else item
+            return Respond() if owner_private else item.model_copy(update={"prepare": prepare})
     for item in available:
         if isinstance(item, Respond):
             return item

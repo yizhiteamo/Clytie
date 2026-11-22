@@ -165,7 +165,10 @@ async def check_with_model(agent, refs):
     token = CancelToken()
 
     async def generate():
+        started = agent.clock.monotonic()
         turn = await agent.model_call("generate", request, token)
+
+        duration = round(1000 * (agent.clock.monotonic() - started))
 
         def audit_usage():
             with agent.ledger.transaction():
@@ -173,8 +176,10 @@ async def check_with_model(agent, refs):
                     "model.usage",
                     trace_id=request.trace_id,
                     purpose="appearance_check",
+                    duration_ms=duration,
                     plugin=agent.config["model"]["plugin"],
                     input_tokens=turn.usage.input_tokens,
+                    cached_input_tokens=turn.usage.cached_input_tokens,
                     output_tokens=turn.usage.output_tokens,
                     image_count=len(refs),
                     image_bytes=sum(r.asset.size for r in refs),

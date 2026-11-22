@@ -24,7 +24,11 @@ def response(*, status=200, data=None):
             data
             or {
                 "choices": [{"message": {"content": "fictional reply"}, "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": 3},
+                },
             }
         ).encode(),
     )
@@ -81,6 +85,7 @@ async def test_contract_usage_quota_and_explicit_model(setup):
     await assert_model_contract(model, request)
     turn = await model.generate(request, CancelToken())
     assert turn.usage.input_tokens == 11 and turn.usage.output_tokens == 5
+    assert turn.usage.cached_input_tokens == 3
     count = len(ctx.http.calls)
     assert await model.quota() == "unknown" and len(ctx.http.calls) == count
     args, kwargs = ctx.http.calls[0]
@@ -235,6 +240,7 @@ async def test_tool_call_roundtrip_and_unknown_usage(setup):
     result = await model.generate(req, CancelToken())
     assert result.finish == "tool_calls" and result.tool_calls[0].arguments == {"text": "fictional"}
     assert result.usage.input_tokens is None and result.usage.output_tokens is None
+    assert result.usage.cached_input_tokens is None
     from clytie.sdk.types import ChatMessage, TextPart
 
     req = req.model_copy(

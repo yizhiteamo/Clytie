@@ -312,6 +312,7 @@ class AttentionJudgments:
                 "model.usage",
                 plugin=agent.config["model"]["plugin"],
                 input_tokens=turn.usage.input_tokens,
+                cached_input_tokens=turn.usage.cached_input_tokens,
                 output_tokens=turn.usage.output_tokens,
                 finish=turn.finish,
                 timing=timing,
