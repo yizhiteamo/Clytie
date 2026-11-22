@@ -121,7 +121,7 @@
 | `text` | str? |
 | `tool_calls` | list[ToolCall] |
 | `finish` | `stop` \| `tool_calls` \| `cancelled` \| `error` \| `deadline` |
-| `usage` | `{input_tokens: int?, output_tokens: int?}` |
+| `usage` | `{input_tokens: int?, output_tokens: int?, cached_input_tokens: int?}`（`cached_input_tokens` 为 SDK 0.17 新增） |
 | `quota` | QuotaSnapshot? | 本次调用顺带得到的额度信息 |
 | `error` | `{code, message}`? |
 
@@ -287,7 +287,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 |---|---|---|
 | `message_received` | EventEnvelope | 不返回（只观察） |
 | `before_attention` | EventEnvelope + `CompanionState` | `Ignore` / `ReactOnly(emoji)` / `Mode(name, params)` / `Normal` |
-| `attention` | EventEnvelope + 待处理的消息批次；判断结束后，向发起判断的处理器追加第三项 Judgment | `Skip` / `Defer(seconds)` / `Judge(facts)` / `Respond(focus?, recheck_after?)` |
+| `attention` | EventEnvelope + 待处理的消息批次；判断结束后，向发起判断的处理器追加第三项 Judgment | `Skip` / `Defer(seconds, prepare?)` / `Judge(facts, prepare?)` / `Respond(focus?, recheck_after?)` |
 | `after_generation` | `ReplyDraft` | 修改后的 `ReplyDraft` |
 | `before_send` | list[DeliveryIntent] | 修改后的 list[DeliveryIntent] |
 | `task_completed` | 任务摘要 | 不返回 |
@@ -334,7 +334,7 @@ A1 只需要定义这些签名、数据类型和契约测试；实现由 A2、A3
 **before_attention**：取"强度"最高的指令，强度：`Ignore`(4) > `ReactOnly`(3) > `Mode`(2) > `Normal`(1)。强度相同时取排序最靠前的插件。
 **本体保护**：主人私聊的消息永远不会被完全忽略——`Ignore` 自动降级为 `ReactOnly`（表情来自配置，默认 💤）。
 
-**attention**：`Skip` > `Defer` > `Judge` > `Respond`。多个 `Defer` 取最长的秒数；本体限制最长延迟（默认 120 秒）。没有任何插件给出意见时：私聊、被 @ 和回复本伴侣已发送消息时为 `Respond`，其余为 `Skip`。主人私聊不能被 `Skip`（降级为 `Respond`）。
+**attention**：`Skip` > `Defer` > `Judge` > `Respond`。多个 `Defer` 取最长的秒数；本体限制最长延迟（默认 120 秒）。没有任何插件给出意见时：私聊、被 @ 和回复本伴侣已发送消息时为 `Respond`，其余为 `Skip`。主人私聊不能被 `Skip`（降级为 `Respond`）。合并结果为 `Defer` 或 `Judge` 时，只有每个返回 `Defer` 或 `Judge` 的处理器都带 `prepare = true`，本体才预写（SDK 0.17，chat-behavior-spec §3.5）。
 
 **after_generation / before_send**：按排序依次传递（流水线），每个插件拿到上一个的结果。约束：
 - 不能改变文字内容，只能改变形式（拆分、卡片、引用、发送时间）。本体比较处理前后去掉空白后的全部文字，不一致则丢弃该插件的修改并记录警告。
@@ -577,3 +577,10 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 行为环节收到的 `EventEnvelope.addressed` 由本体填写，记录是否被 @、是否回复本伴侣、是否命中内部或对外名字。平台提供的值在入站时覆盖。默认值为 None。
 `JudgeFacts` 只接受 chat-behavior-spec §3.2 的八个字段。只有发起判断的处理器收到带第三项 `Judgment` 的输入，其他处理器仍使用原来的两项。主人私聊遇到 Judge 直接回应。
 `ReplyDraft.focus` 是要接的话的引用，默认为空；`interleaved` 是焦点之后其他人在本会话发出的消息数，默认 0。回复形式插件可以根据这两项选择是否引用。
+
+### SDK 0.17 边等边写（补测后追加，用户 2026-11-22 确认）
+
+只新增可选字段，已有插件不用修改。
+
+`Defer.prepare` 和 `Judge.prepare` 为 `bool`，默认假。为真表示等待或判断期间允许本体预写回复：先发出正式回复的第一次模型调用，工具、出站检查和交付等最后的 `Respond` 之后才进行。插件看不到预写的内容，也不能据此改变意见。规则见 chat-behavior-spec §3.5。
+`TokenUsage.cached_input_tokens` 为 `int?`，表示 `input_tokens` 中由模型服务缓存提供的部分。服务没有给出时为 None，不写 0。模型插件按各自服务的用量字段填写。
