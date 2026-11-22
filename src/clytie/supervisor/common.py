@@ -1,5 +1,6 @@
 """状态持久化与可取消关闭结果。"""
 
+import errno
 import json
 from pathlib import Path
 from sys import platform
@@ -32,7 +33,10 @@ def read(path, default=None):
         except FileNotFoundError:
             return default
         except PermissionError as exc:
-            if platform != "win32" or getattr(exc, "winerror", None) not in (5, 32):
+            winerror = getattr(exc, "winerror", None)
+            if platform != "win32" or not (
+                winerror in (5, 32) or (winerror is None and exc.errno == errno.EACCES)
+            ):
                 raise
             now = SystemClock().monotonic()
             if deadline is None:
