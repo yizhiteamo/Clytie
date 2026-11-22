@@ -92,7 +92,9 @@
 | `POST /companions/<cid>/start` | 启动一个停止中的伴侣；对 `blocked` 和 `restart_stopped` 的伴侣，相当于 supervisor-spec §4.2 的手动重启 | | |
 | `POST /companions/<cid>/stop` | `{task_mode?}`，只安全停止这个伴侣；停止后不会被自动重启 | 是 | |
 | `POST /companions/<cid>/restart` | 安全停止后再启动 | 是 | |
+| `POST /companions/<cid>/proactive` | `{paused: bool}`，暂停或恢复这个伴侣的主动聊天（proactive-spec §5）；伴侣运行中时转交给子进程执行，状态持久保存 | | |
 
+- `GET /status` 中每个伴侣带 `proactive: {paused, since}`（B8a）。
 - 静默状态必须显眼（用户已确认 F4）：`GET /status` 的顶层带 `silence: {on, since}`；CLI 在任何命令的输出最前面，都加一行"全部静默中（自某时起）"；前端窗口每 60 秒重复显示一次这行提示。
 
 ### 4.2 任务与边界
@@ -213,6 +215,7 @@ API 拒绝文件路径参数。CLI 最多读取 20 MiB 图片。保存前显示�
 | `clytie supervisor status [--json]` | 运行中时调用 `GET /status`，没有运行时读取 `run/health.json`（A4.1 行为） |
 | `clytie supervisor silence on\|off [--yes]` | `POST /silence` |
 | `clytie companion start\|stop\|restart <cid> [--yes]` | 第 4.1 节 |
+| `clytie companion proactive <cid> pause\|resume\|status` | `POST /companions/<cid>/proactive`；`status` 读 `GET /status` 中这个伴侣的 `proactive` |
 | `clytie companion appearance show <cid>` | 第 4.2a 节的 GET |
 | `clytie companion appearance add <cid> <file> --label <标签> [--former]` | 第 4.2a 节的 add |
 | `clytie companion appearance edit <cid> <编号> [--label <标签>] [--current \| --former]` | 第 4.2a 节的 edit |
