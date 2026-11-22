@@ -18,8 +18,13 @@ from clytie.sdk.types import (
     ChannelFeatures,
     Conversation,
     EventEnvelope,
+    ImagePart,
+    MentionPart,
+    Message,
+    MessageRef,
     ModelFeatures,
     ModelTurn,
+    QuotePart,
     Receipt,
     TextPart,
 )
@@ -323,7 +328,32 @@ async def test_boundary_first_category_pause_filter_context_and_release(tmp_path
     await finish(agent)
 
 
-async def test_active_chat_reference_cancel_propagates(tmp_path):
+def test_fast_cancel_only_accepts_one_matching_quote():
+    ref = MessageRef(channel_id="fake", conversation_id="test_group", platform_message_id="a")
+    quote = QuotePart(message_ref=ref)
+    me = MentionPart(actor_id="self", is_self=True)
+    stop = TextPart(text="停")
+    message = Message(
+        ref=ref.model_copy(update={"platform_message_id": "b"}),
+        sender=Actor(actor_id="member", role="member", channel_id="fake"),
+        sent_at=MockClock().now(),
+        reply_to=ref,
+        parts=(quote, stop),
+    )
+    for parts, expected in [
+        ([quote, stop], {}),
+        ([me, quote, TextPart(text="！停 abcdef12！")], {"task_id": "abcdef12"}),
+        ([quote, TextPart(text="停车场")], None),
+        ([quote, ImagePart(), stop], None),
+        ([QuotePart(message_ref=message.ref), stop], None),
+        ([quote, quote, stop], None),
+        ([MentionPart(actor_id="other", is_self=False), quote, stop], None),
+    ]:
+        assert fast_cancel(message.model_copy(update={"parts": tuple(parts)}), ["停"]) == expected
+
+
+@pytest.mark.parametrize("with_quote", [False, True])
+async def test_active_chat_reference_cancel_propagates(tmp_path, with_quote):
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -339,7 +369,17 @@ async def test_active_chat_reference_cancel_propagates(tmp_path):
     original = event(agent)
     trace = await agent.receive(original)
     await started.wait()
-    await agent.receive(event(agent, "停", reply_to=original.message.ref))
+    control = event(agent, "停", reply_to=original.message.ref)
+    if with_quote:
+        message = control.message
+        control = control.model_copy(
+            update={
+                "message": message.model_copy(
+                    update={"parts": (QuotePart(message_ref=message.reply_to), *message.parts)}
+                )
+            }
+        )
+    await agent.receive(control)
     await agent.drain()
     assert cancelled.is_set()
     assert agent.ledger.get("record", trace)["exec_status"] == "cancelled"

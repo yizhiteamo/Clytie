@@ -10,14 +10,15 @@ from clytie.clock import SystemClock
 from clytie.plugin_host.identity import IdentityResolver
 from clytie.plugin_host.support import timed
 from clytie.sdk.testing import FakeChannel, FakeModel, FakeWebSocket, MockClock
-from clytie.sdk.types import ModelTurn
+from clytie.sdk.types import Addressed, ModelTurn, ToolCall
 from clytie.supervisor.companion import Companion
 
 from .host_helpers import SOURCE, enable, plugin
 from .test_agent import ScriptModel, finish, make_agent
 from .test_agent_acceptance import ECHO
-from .test_agent_addressed import group
+from .test_agent_addressed import group, observe
 from .test_config import write_yaml
+from .test_kernel_service import new_record, reply
 from .test_openai_api_integration import Protocol
 from .test_storage_agent_lifecycle import inbound, private_home
 
@@ -142,17 +143,7 @@ async def test_companion_group_receipts_and_task_events(tmp_path, monkeypatch):
     assert runtime.kernel.bus.closed
 
 
-@pytest.mark.parametrize("interleaved", [False, True])
-async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleaved):
-    entered, resume = asyncio.Event(), asyncio.Event()
-    paragraphs = ["虚构第一句。" * 8, "虚构第二句。" * 8]
-
-    async def generate(request, cancel):
-        entered.set()
-        await resume.wait()
-        return ModelTurn(finish="stop", text="\n\n".join(paragraphs), usage={})
-
-    agent, _, model = await make_agent(tmp_path, generate)
+async def connect_onebot(agent, tmp_path):
     host = agent.host
     protocol = Protocol()
     backends = host.backends
@@ -171,6 +162,12 @@ async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleav
         "qq-onebot",
         {
             "accounts": host.accounts,
+            "people": {
+                "member": {
+                    "role": "member",
+                    "accounts": [{"channel": "qq-onebot", "account": "1000000002"}],
+                }
+            },
             "conversations": {
                 "test_group": {
                     "channel": "qq-onebot",
@@ -191,12 +188,27 @@ async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleav
             "reply-form": {"config": {"tuning": {"interval_seconds": [0, 0]}}},
         },
     )
+    for pid in ("qq-onebot", "chat-timing", "reply-form"):
+        await enable(host, pid)
+    channel = host.runtimes[agent.cid, "qq-onebot"].plugin.create_channel()
+    agent.kernel.delivery.channels["fake"] = channel
+    await channel.connect()
+    return protocol, channel
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleaved):
+    entered, resume = asyncio.Event(), asyncio.Event()
+    paragraphs = ["虚构第一句。" * 8, "虚构第二句。" * 8]
+
+    async def generate(request, cancel):
+        entered.set()
+        await resume.wait()
+        return ModelTurn(finish="stop", text="\n\n".join(paragraphs), usage={})
+
+    agent, _, model = await make_agent(tmp_path, generate)
     try:
-        for pid in ("qq-onebot", "chat-timing", "reply-form"):
-            await enable(host, pid)
-        channel = host.runtimes[agent.cid, "qq-onebot"].plugin.create_channel()
-        agent.kernel.delivery.channels["fake"] = channel
-        await channel.connect()
+        protocol, _ = await connect_onebot(agent, tmp_path)
         called = group(agent, mention=True)
         ref = called.message.ref.model_copy(update={"platform_message_id": "-7"})
         called = called.model_copy(
@@ -225,4 +237,114 @@ async def test_addressed_split_quotes_first_onebot_send_only(tmp_path, interleav
         assert len(model.requests) == 1
     finally:
         resume.set()
+        await finish(agent)
+
+
+async def onebot_message(protocol, events, identifier, *segments):
+    protocol.messages.put_nowait(
+        json.dumps(
+            {
+                "post_type": "message",
+                "message_type": "group",
+                "self_id": "1000000001",
+                "user_id": "1000000002",
+                "group_id": "1000000003",
+                "message_id": identifier,
+                "time": 0,
+                "message": segments,
+            }
+        )
+    )
+    return await timed(anext(events), SystemClock(), 5)
+
+
+async def test_onebot_reply_to_sent_message_addresses_and_quotes_original(tmp_path, monkeypatch):
+    original = "Fictional original reply."
+    agent, _, model = await make_agent(tmp_path, {"finish": "stop", "text": original})
+    seen = []
+
+    def record_mark(phase, event):
+        if phase == "message_received":
+            seen.append(event.addressed)
+
+    observe(agent, monkeypatch, record_mark)
+    try:
+        protocol, channel = await connect_onebot(agent, tmp_path)
+        events = channel.events()
+        try:
+            text = {"type": "text", "data": {"text": "Fictional question"}}
+            called = await onebot_message(
+                protocol, events, 10, {"type": "at", "data": {"qq": "1000000001"}}, text
+            )
+            await agent.receive(called)
+            await agent.clock.advance_and_drain(3)
+            await agent.drain()
+            (receipt,) = [row["receipt"] for row in agent.ledger.rows("attempt")]
+            assert receipt["status"] == "sent"
+            reply = {"type": "reply", "data": {"id": receipt["platform_message_id"]}}
+            await agent.receive(await onebot_message(protocol, events, 11, reply, text))
+            await agent.clock.advance_and_drain(3)
+            await agent.drain()
+            assert seen[-1] == Addressed(reply_to_self=True)
+            assert len(model.requests) == 2
+            assert any(
+                "引用：" + original in part.text
+                for msg in model.requests[-1].messages
+                for part in msg.parts
+                if part.type == "text"
+            )
+            other = {"type": "reply", "data": {"id": called.message.ref.platform_message_id}}
+            await agent.receive(await onebot_message(protocol, events, 12, other, text))
+            await agent.clock.advance_and_drain(5)
+            await agent.drain()
+            assert seen[-1] == Addressed()
+            assert len(model.requests) == 2
+        finally:
+            await events.aclose()
+    finally:
+        await finish(agent)
+
+
+async def test_onebot_group_quote_cancel_selects_sent_reply_record(tmp_path):
+    agent, _, model = await make_agent(tmp_path)
+    try:
+        protocol, channel = await connect_onebot(agent, tmp_path)
+        # Keep a newer task open: falling back to the latest task would cancel the wrong one.
+        records = []
+        for name in ("first", "second"):
+            record, _, _ = await new_record(agent.kernel, role="member", name=name)
+            trace = record["trace_id"]
+            agent.ledger.claim_invocation(
+                trace,
+                "echo-tool",
+                ToolCall(call_id=name, tool="echo", arguments={}),
+                name,
+                timeout=60,
+                schema={},
+            )
+            records.append(agent.ledger.get("record", trace))
+        sent = reply(records[0])
+        agent.ledger.register_intents(sent.trace_id, [sent])
+        await agent.kernel.delivery.send_one(sent.intent_id)
+        (receipt,) = [row["receipt"] for row in agent.ledger.rows("attempt")]
+        assert receipt["status"] == "sent"
+        events = channel.events()
+        try:
+            stop = await onebot_message(
+                protocol,
+                events,
+                13,
+                {"type": "reply", "data": {"id": receipt["platform_message_id"]}},
+                {"type": "text", "data": {"text": "停"}},
+            )
+            await agent.receive(stop)
+            row = agent.ledger.get("inbound", stop.event_id)
+            assert (row["state"], row["reason"]) == ("ignored", "cancel_only")
+            assert agent.ledger.get("record", sent.trace_id)["exec_status"] == "cancelled"
+            assert agent.ledger.get("record", records[1]["trace_id"])["exec_status"] == "running"
+            assert not model.requests
+        finally:
+            await events.aclose()
+    finally:
+        await agent.clock.advance_and_drain(5)
         await finish(agent)
