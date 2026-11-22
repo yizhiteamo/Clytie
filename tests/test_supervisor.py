@@ -1,6 +1,8 @@
 """A4.1：MockClock、假启动器和无外部副作用的停止验收。"""
 
 import asyncio
+import errno
+import sys
 
 import pytest
 
@@ -508,3 +510,124 @@ async def test_explicit_restart_does_not_leak_reason_into_crash(tmp_path, reason
     await spin()
     await assert_latest_exit_reason(svc, notifier, clock, tmp_path)
     await svc.stop()
+
+
+@pytest.mark.parametrize("code", [5, 32, None])
+def test_state_read_retries_windows_sharing_until_success(tmp_path, monkeypatch, code):
+    from clytie.supervisor import common
+
+    path = tmp_path / "health.json"
+    path.write_bytes(b'{"valid":true}')
+    original = type(path).read_bytes
+    calls = []
+
+    def read_bytes(self):
+        calls.append(self)
+        if len(calls) <= 2:
+            error = PermissionError(errno.EACCES, "Permission denied")
+            if code is not None:
+                error.winerror = code
+            raise error
+        return original(self)
+
+    monkeypatch.setattr(common, "platform", "win32")
+    monkeypatch.setattr(type(path), "read_bytes", read_bytes)
+    assert read(path) == {"valid": True}
+    assert calls == [path] * 3
+
+
+@pytest.mark.parametrize(
+    "platform,code,retry",
+    [
+        ("linux", 5, False),
+        ("linux", None, False),
+        ("win32", 19, False),
+        ("win32", 32, True),
+        ("win32", None, True),
+    ],
+)
+def test_state_read_propagates_error_with_bounded_wait(
+    tmp_path, monkeypatch, platform, code, retry
+):
+    from clytie.supervisor import common
+
+    path = tmp_path / "health.json"
+    error = PermissionError(errno.EACCES, "Permission denied")
+    if code is not None:
+        error.winerror = code
+    waits = []
+    calls = []
+
+    def fail(self):
+        calls.append(self)
+        raise error
+
+    monkeypatch.setattr(common, "platform", platform)
+    monkeypatch.setattr(type(path), "read_bytes", fail)
+    monkeypatch.setattr(common.SystemClock, "monotonic", lambda self: sum(waits))
+    monkeypatch.setattr(common.Event, "wait", lambda self, delay: waits.append(delay))
+    with pytest.raises(PermissionError) as caught:
+        read(path)
+    assert caught.value is error
+    if retry:
+        assert calls == [path] * (len(waits) + 1)
+        assert sum(waits) == pytest.approx(0.2) and all(wait <= 0.01 for wait in waits)
+    else:
+        assert calls == [path] and not waits
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows file sharing semantics")
+def test_state_read_recovers_after_exclusive_handle_closes(tmp_path, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+    from threading import Event, Thread
+
+    path = tmp_path / "health.json"
+    path.write_bytes(b'{"valid":true}')
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    first_denial = Event()
+    denied = []
+    real_read = type(path).read_bytes
+
+    def observe_read(self):
+        try:
+            return real_read(self)
+        except PermissionError as exc:
+            denied.append((exc.errno, getattr(exc, "winerror", None)))
+            first_denial.set()
+            raise
+
+    monkeypatch.setattr(type(path), "read_bytes", observe_read)
+    handle = create(
+        str(path), 1 << 31, 0, None, 3, 0x80, None
+    )  # GENERIC_READ, no sharing, OPEN_EXISTING
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    def release():
+        first_denial.wait()
+        Event().wait(0.05)
+        assert close(handle)
+
+    worker = Thread(target=release)
+    worker.start()
+    try:
+        assert read(path) == {"valid": True}
+        assert denied and denied[0] == (errno.EACCES, None)
+    finally:
+        first_denial.set()
+        worker.join()
