@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
+from zoneinfo import ZoneInfo
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
 from clytie.sdk.behavior import (
@@ -214,6 +215,7 @@ class PluginHost(MigrationMixin):
         from .identity import IdentityResolver
 
         self.timezone = report.instance["timezone"]
+        self.clock.local_tz = ZoneInfo(self.timezone)
         self.credentials = thaw(report.instance.get("credentials", {}))
         self.accounts = thaw(report.instance.get("accounts", {}))
         for cid, result in report.plugin_configs.items():

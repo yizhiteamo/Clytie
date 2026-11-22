@@ -142,6 +142,7 @@ class Companion:
             self.clock,
             self.channels,
             config=config,
+            event_bus=self.host.event_bus,
             max_task_seconds=report.instance.get("limits", {}).get("max_task_seconds", 3600),
         )
         self.kernel.delivery.silenced = read(self.home / "supervisor/silence.json", {"on": False})[
@@ -381,7 +382,8 @@ class Companion:
         # Accepted management work must finish before plugin shutdown / database close.
         await asyncio.gather(*tuple(self.management_requests), return_exceptions=True)
         await asyncio.gather(*tuple(self.management_tasks), return_exceptions=True)
-        await kernel.bus.close()
+        if kernel.bus is not self.host.event_bus:
+            await kernel.bus.close()
         await self.host.event_bus.close()
         result = await self.host.close()
         for channel in self.channels.values():

@@ -164,7 +164,10 @@ def normalize_event(ctx, payload, expected_account):
 async def encode_parts(ctx, intent, media_limits):
     """完整编码后才交给发送器；无法编码的任一段会拒绝整个意图。"""
     segments = []
-    for part in intent.parts:
+    parts = intent.parts
+    if parts and intent.kind == "reply" and intent.target is not None:
+        parts = [QuotePart(message_ref=intent.target), *parts]
+    for part in parts:
         kind = part.type
         if kind == "text":
             data = {"text": part.text}
