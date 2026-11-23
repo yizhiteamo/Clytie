@@ -1237,7 +1237,10 @@ class Agent:
     ):
         token = self.kernel.tokens.setdefault(trace, CancelToken())
         self.kernel.record_tasks[trace] = asyncio.current_task()
+        spoken_names = ()
         try:
+            if not proactive and actor is not None and actor.role == "owner":
+                spoken_names = self.outbound.names_in_batch(events)
             assets, dialogue, rounds = [], [], 0
             picked = []
             selected_refs = []
@@ -1397,6 +1400,7 @@ class Agent:
                 text,
                 assets,
                 token,
+                spoken_names=spoken_names,
                 proactive=proactive,
                 respond=respond,
                 since=since,
@@ -1438,10 +1442,20 @@ class Agent:
                 )
                 if self.model_health == "auth_invalid" or self.kernel.delivery.silenced:
                     text = ""
-                if text and not await self.outbound.check(text, conversation.scene):
+                if text and not await self.outbound.check(
+                    text, conversation.scene, spoken_names=spoken_names
+                ):
                     try:
                         intents = await self.outgoing(
-                            trace, conversation, actor, events, text, [], token, fallback=True
+                            trace,
+                            conversation,
+                            actor,
+                            events,
+                            text,
+                            [],
+                            token,
+                            spoken_names=spoken_names,
+                            fallback=True,
                         )
                     except (StorageBusy, StorageCancelled, StorageFailed) as failure:
                         code, intents = failure.code, []
@@ -1632,6 +1646,7 @@ class Agent:
         assets,
         token,
         *,
+        spoken_names,
         proactive=False,
         fallback=False,
         respond=None,
@@ -1663,7 +1678,9 @@ class Agent:
             form="plain",
         )
         draft = await self.host.behavior(self.cid, "after_generation", draft)
-        hits = await self.outbound.check(text_parts(draft.parts), conversation.scene)
+        hits = await self.outbound.check(
+            text_parts(draft.parts), conversation.scene, spoken_names=spoken_names
+        )
         if hits and not fallback:
             specs, states = await self.tools(conversation, actor, proactive)
             images = ImageContext(self.config.get("vision", {}).get("max_images", 30))
@@ -1700,7 +1717,9 @@ class Agent:
                         form="plain",
                     )
                     draft = await self.host.behavior(self.cid, "after_generation", draft)
-                    hits = await self.outbound.check(text_parts(draft.parts), conversation.scene)
+                    hits = await self.outbound.check(
+                        text_parts(draft.parts), conversation.scene, spoken_names=spoken_names
+                    )
             except (StorageBusy, StorageCancelled, StorageFailed):
                 raise
             except (TimeoutError, RuntimeError):

@@ -7,6 +7,8 @@ import unicodedata
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta
+from itertools import groupby
+from operator import attrgetter
 
 from clytie.backup.coordination import run_sync
 from clytie.config import compile_input_pattern
@@ -281,19 +283,37 @@ class Outbound:
         self.config = config
         self.memory_guard = None
 
-    async def check(self, text, scene):
+    @property
+    def forbidden_names(self):
+        return self.config.get(
+            "forbidden_names", [self.config.get("names", {}).get("internal", "")]
+        )
+
+    @staticmethod
+    def _matches(words, value):
+        for word in words:
+            needle = normalized(word, compact=True)
+            if needle and needle in value:
+                yield word
+
+    def names_in_batch(self, events):
+        """只匹配每条消息中连续的文字段，链接、引用等不能拼出名字。"""
+        names = set()
+        for event in events:
+            for kind, parts in groupby(event.message.parts, key=attrgetter("type")):
+                if kind == "text":
+                    value = normalized("".join(part.text for part in parts), compact=True)
+                    names.update(self._matches(self.forbidden_names, value))
+        return names
+
+    async def check(self, text, scene, *, spoken_names=()):
         value = normalized(text, compact=True)
         names = self.config.get("names", {})
         result = {}
         if scene not in names.get("internal_scenes", ["owner_private"]):
-            words = self.config.get(
-                "forbidden_names", [names.get("internal", "")]
-            ) + self.config.get("boundary", {}).get("never_publish", [])
-            hits = [
-                w
-                for w in words
-                if normalized(w, compact=True) and normalized(w, compact=True) in value
-            ]
+            hits = [w for w in self._matches(self.forbidden_names, value) if w not in spoken_names]
+            never_publish = self.config.get("boundary", {}).get("never_publish", [])
+            hits.extend(self._matches(never_publish, value))
             if hits:
                 result["privacy"] = hits
         hits = [
