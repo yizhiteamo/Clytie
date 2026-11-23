@@ -118,7 +118,8 @@ async def test_owner_name_in_history_cannot_release_name_for_later_send(tmp_path
         await agent.receive(group(agent, NAME))
         await agent.drain()
         if proactive:
-            trace = await agent.submit("test_group", topic=NAME, reason="test")
+            submission = await agent.submit("test_group", topic=NAME, reason="test")
+            trace = submission.trace_id
         else:
             trace = await agent.receive(group(agent, "说说天气吧"))
         await agent.drain()

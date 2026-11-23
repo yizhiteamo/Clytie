@@ -78,6 +78,22 @@ def test_invalid_cross_field_configuration(module, calendar_dir, config):
         plan(module, calendar_dir, local("2026-01-02", "00:00"), **config)
 
 
+def test_morning_is_spread_across_minutes_after_waking(module, calendar_dir):
+    start = local("2026-01-01", "00:00")
+    jitter = 10
+    schedule = plan(module, calendar_dir, start, morning_jitter_minutes=jitter)
+    offsets = []
+    for index in range(220):
+        midnight = start + timedelta(days=index)
+        schedule.refresh(midnight)
+        day = midnight.date()
+        wake = schedule.at(day, schedule.period(day)["to"])
+        offsets.append((schedule.state.morning_at - wake) / 60)
+
+    assert set(offsets) == set(range(jitter + 1))
+    assert offsets.count(0) < len(offsets) / 4
+
+
 def test_morning_combines_festivals_and_waits_until_owner_is_awake(module, calendar_dir):
     day = "2026-01-01"
     p = plan(

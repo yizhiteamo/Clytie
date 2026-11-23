@@ -142,7 +142,7 @@ class Schedule:
         s.festivals_done = []
         jitter = self.config.get("morning_jitter_minutes", 20)
         wake = self.at(day, self.period(day)["to"])
-        s.morning_at = max(wake, wake + 60 * self.random.randint(-jitter, jitter))
+        s.morning_at = wake + 60 * self.random.randint(0, jitter)
         s.festival_at = self.at(day, "10:00") + self.random.randint(0, 600) * 60
         return True
 
