@@ -13,6 +13,8 @@
 | 能力插件 | 给模型调用的工具；需要平台数据时，通过服务接口取得 |
 
 - **本体代码不出现具体插件的 id 和平台名**（`sdk/testing/` 中的假插件除外）。CI 中由 `scripts/check_architecture.py` 检查：读取 `plugins/*/plugin.json` 的 id，在 `src/clytie/`（不含 `sdk/testing/`）的代码中出现即失败。
+  - 检查口径不放宽：逐行按子串查找，字符串、路由和注释都算（2026-11-24）。
+  - 为此，官方插件的 ID 至少由两个词组成，用连字符连接（plugins.md §4），这样不会和 `aiohttp.web`、`websocket` 这类通用名字撞上。检查脚本同时校验这一条，不符合时给出明确的错误。
 - 本体需要某种平台能力时，按"支持这项能力的插件"调用，例如 `ChannelFeatures` 中的 `supports_membership`，不按插件名判断。
 - 插件只 import `clytie.sdk`（AGENTS.md 3.4，现有检查不变）。
 
