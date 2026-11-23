@@ -193,7 +193,7 @@ async def test_outbound_check_uses_original_text_not_model_placeholders(tmp_path
             return value.model_copy(update={"parts": parts})
         return await original(cid, phase, value, **kwargs)
 
-    async def check(text, scene):
+    async def check(text, scene, **kwargs):
         seen.append(text)
         return []
 
