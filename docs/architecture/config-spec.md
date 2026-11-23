@@ -167,8 +167,8 @@
 | `max_messages` | 整数 1–1000（100） |
 | `max_chars` | 整数 1,000–200,000（20,000） |
 | `max_single_message_chars` | 整数 100–20,000（2000） |
-| `material_full_minutes` | 整数 0–1440（15） |
-| `material_budget_chars` | 整数 0–100,000（6,000） |
+| `material_full_minutes` | 整数 0–1440（15）：资料附全文的时长（content-spec §7） |
+| `material_budget_chars` | 整数 0–100,000（6,000）：单个工具结果和资料全文的字数上限（content-spec §7） |
 
 ## 4. 插件清单 `plugin.json`
 

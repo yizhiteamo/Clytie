@@ -95,6 +95,7 @@ plugins/<id>/
 | `peer` | 使用伴侣通道 |
 | `model.invoke` | 自行调用模型（计入额度） |
 | `network` | 访问网络 |
+| `network.public` | 只访问公网（本机和内网一律拒绝），按别人给的网址访问网页的插件用它（content-spec §6） |
 | `assets.write` | 写入资产库 |
 | `subprocess` / `gpu` | 启动子进程 / 使用 GPU |
 

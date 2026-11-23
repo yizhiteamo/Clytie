@@ -144,6 +144,7 @@
 | `assets` | list[AssetRef] | |
 | `data` | dict | 结构化结果（写入账本） |
 | `error` | `{code, message}`? | |
+| `material` | `{title, url, text, published_at?}`? | 读到的资料，之后的回复中保留（SDK 0.19，content-spec §7） |
 
 **AssetRef**：`asset_id`、`media_type`、`size: int`、`origin: str`（来源说明）。
 
@@ -228,7 +229,7 @@
 | `services` | 声明了依赖的服务时出现，只能查到已声明的服务 |
 | `peer` | `peer` |
 | `model` | `model.invoke` |
-| `http` | `network` |
+| `http` | `network`；或 `network.public`（只访问公网，content-spec §6，SDK 0.19） |
 | `proactive` | `message.proactive`：提交主动话题与材料，文字由模型生成；直接发送只允许表情和媒体（见 §7.5 与 agent-spec §15） |
 | `subprocess` | `subprocess` |
 
@@ -593,3 +594,11 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 - `ReplyDraft` 新增本体填写、插件不能修改的 `kind`（proactive-spec §6，实现时补充）。
 - 能力状态的原因代码新增 `proactive_limit`（agent-spec §5）。
 - 0.x 不兼容变更，写入 CHANGELOG。插件需要检查：使用 `submit` 返回值的地方、假设 `Invocation.actor` 有值的能力插件、假设任务事件 `actor_id` 有值的订阅者。决策记录见 ADR 0036。
+
+### SDK 0.19 搜索与读网页（用户 2026-11-23 确认方向）
+
+- 工具清单新增 `light: bool`：轻量能力不升级为任务，不能同时是 `heavy`，不能返回产物（content-spec §5）。
+- 新权限 `network.public`：宿主提供只访问公网的 HTTP 后端，不能和 `network` 同时声明（content-spec §6）。
+- `ToolResult` 新增可选的 `material`（content-spec §7）。
+- 本体工具新增 `core_recall_material`。
+- 都是新增，已有插件不用修改。决策记录见 ADR 0037。
