@@ -65,7 +65,7 @@ plugins/<id>/
 
 | 字段 | 说明 |
 |---|---|
-| `id` | 小写加连字符，全局唯一 |
+| `id` | 小写加连字符，全局唯一。官方插件的 ID 至少由两个词组成，例如 `image-gen`，不用 `web`、`sleep` 这类常见单词（platform-capabilities-spec §1，2026-11-24） |
 | `name` / `summary` / `category` | 显示名称、简介、分类（能力 / 行为 / 平台 / 模型 / 记忆 / 工具） |
 | `version` | 语义化版本 |
 | `requires.sdk` | 兼容的 SDK 版本范围 |
