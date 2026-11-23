@@ -15,7 +15,7 @@ from .delivery import Delivery, OwnedFinalization
 from .events import EventBus, background
 from .ledger import EXEC_TERMINAL, dump
 from .projection import visible
-from .query import record_timings
+from .query import record_timings, task_origin
 from .queue import ConversationQueue
 from .reactions import Reactions
 
@@ -109,7 +109,9 @@ class Kernel:
             with record_scope(trace):
                 return await operation()
 
-        future = self.queue.submit(record["conversation_id"], actor, run)
+        future = self.queue.submit(
+            record["conversation_id"], actor, run, reserved=record.get("proactive", False)
+        )
         self.queued[trace] = future
         future.add_done_callback(lambda value: self.queued.pop(trace, None))
         return future
@@ -119,7 +121,7 @@ class Kernel:
         owner_exception = (
             owner_ignore
             and record["scene"] == "owner_private"
-            and record["requester"]["role"] == "owner"
+            and (record["requester"] or {}).get("role") == "owner"
         )
         if "message.react" not in permissions and not owner_exception:
             self.log.warning("reaction.denied", trace_id=trace)
@@ -194,11 +196,9 @@ class Kernel:
         schema=None,
         timeout_s=None,
         finalization=None,
+        proactive_limit=None,
+        permission_actor=None,
     ):
-        if not self.permissions(invocation.actor, call.tool):
-            return Denial(reason_code="permission", message_for_model="Permission denied")
-        if not self.quota(invocation.actor, call.tool):
-            return Denial(reason_code="quota", message_for_model="Quota insufficient")
         finalization = finalization or self.finalizations.get(trace)
         operation = finalization or OwnedFinalization(self.delivery)
         state = {"cancelled": False, "executing": False, "task": None}
@@ -222,6 +222,8 @@ class Kernel:
                 state=state,
                 schema=schema,
                 timeout_s=timeout_s,
+                proactive_limit=proactive_limit,
+                permission_actor=permission_actor,
             ),
             cancel=cancel,
         )
@@ -238,8 +240,26 @@ class Kernel:
         state,
         schema=None,
         timeout_s=None,
+        proactive_limit=None,
+        permission_actor=None,
     ):
         r = await finalization.persist(self.ledger.get, "record", trace)
+        origin = task_origin(r)
+        invocation = invocation.model_copy(
+            update={"origin": origin, "actor": None if origin == "proactive" else r["requester"]}
+        )
+        principal = invocation.actor
+        if (
+            origin == "proactive"
+            and invocation.conversation.kind == "private"
+            and permission_actor is not None
+            and permission_actor.role == "owner"
+        ):
+            principal = permission_actor
+        if principal is None or not self.permissions(principal, call.tool):
+            return Denial(reason_code="permission", message_for_model="Permission denied")
+        if not self.quota(invocation.actor, call.tool):
+            return Denial(reason_code="quota", message_for_model="Quota insufficient")
         key = capability.idempotency_key(call, invocation)
         complete_key = [
             self.ledger.companion_id,
@@ -273,7 +293,12 @@ class Kernel:
             key,
             timeout=min(seconds, self.max_task_seconds),
             schema=schema or {},
+            proactive_limit=proactive_limit,
         )
+        if inv is None:
+            return Denial(
+                reason_code="proactive_limit", message_for_model="今天主动用这个能力的次数用完了"
+            )
 
         def store_plan():
             with self.ledger.transaction():
@@ -292,7 +317,8 @@ class Kernel:
                     task_id=r["task_id"],
                     trace_id=trace,
                     tool=r["tool"],
-                    actor_id=invocation.actor.actor_id,
+                    actor_id=invocation.actor.actor_id if invocation.actor else None,
+                    origin=origin,
                     conversation_id=r["conversation_id"],
                 ),
             )
@@ -481,7 +507,8 @@ class Kernel:
             trace_id=trace,
             tool=r["tool"],
             status="error" if r["exec_status"] == "interrupted" else r["exec_status"],
-            actor_id=r["requester"]["actor_id"],
+            actor_id=(r["requester"] or {}).get("actor_id"),
+            origin=task_origin(r),
             conversation_id=r["conversation_id"],
             scene=r["scene"],
             started_at=r["started_at"] or r["claimed_at"],

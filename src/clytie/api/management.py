@@ -5,6 +5,8 @@ import hashlib
 import re
 from datetime import datetime, timezone
 
+from clytie.agent.proactive_pause import ProactivePause
+from clytie.backup.coordination import CaptureError
 from clytie.backup.io_budget import IoBudgetError
 from clytie.config import load_home, thaw
 from clytie.kernel.query import local_task
@@ -655,11 +657,17 @@ class Management:
                 for c, generation in self.unsaved.items()
                 if self.svc.rows[c].get("restart_count", 0) == generation
             }
+            cids = tuple(self.svc.rows)
+            pauses = await asyncio.gather(
+                *(ProactivePause(self.home, c, self.clock).status() for c in cids)
+            )
             return {
                 "heavy_io": await self.svc.backup_io.recheck(),
                 "mode": "maintenance" if getattr(self.svc, "maintenance", False) else "normal",
                 "configuration": self.configuration_status(),
-                "companions": self.svc.rows,
+                "companions": {
+                    c: {**self.svc.rows[c], "proactive": p} for c, p in zip(cids, pauses)
+                },
                 "silence": read(
                     self.home / "supervisor/silence.json", {"on": False, "since": None}
                 ),
@@ -698,6 +706,22 @@ class Management:
             if not isinstance(data.get("on"), bool):
                 raise APIError("invalid_request")
             return await self.svc.silence(data["on"])
+        if route == "/companions/<cid>/proactive":
+            self.check_cid(cid)
+            if set(data) != {"paused"} or type(data["paused"]) is not bool:
+                raise APIError("invalid_request")
+            async with self.serial:
+                if self.running(cid):
+                    return await self.transfer(cid, "proactive", data)
+                if self.svc.rows[cid]["state"] not in {"stopped", "blocked", "restart_stopped"}:
+                    raise APIError("companion_busy", 409)
+                try:
+                    pause = ProactivePause(self.home, cid, self.clock)
+                    return await pause.set(data["paused"], stopped=True)
+                except OperationBusy:
+                    raise APIError("companion_busy", 409) from None
+                except CaptureError as exc:
+                    raise APIError(exc.code, 409) from None
         if route in {
             "/companions/<cid>/start",
             "/companions/<cid>/stop",

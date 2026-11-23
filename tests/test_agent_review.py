@@ -211,7 +211,10 @@ async def test_agent_model_type_rejected(tmp_path):
 
 async def test_private_proactive_model_failure_never_falls_back(tmp_path):
     agent, channel, _ = await make_agent(tmp_path, {"finish": "error"})
-    trace = await agent.submit("owner_private", topic="fictional topic", reason="fictional timer")
+    submission = await agent.submit(
+        "owner_private", topic="fictional topic", reason="fictional timer"
+    )
+    trace = submission.trace_id
     await agent.drain()
     assert agent.ledger.get("record", trace)["exec_status"] == "error"
     assert not channel.sent and not channel.reacts

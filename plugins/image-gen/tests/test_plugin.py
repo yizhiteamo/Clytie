@@ -62,12 +62,15 @@ class FakeBackend:
         return await self.generate(prompt, cancel)
 
 
-async def test_tools_contract_edit_only_same_conversation_and_history(tmp_path):
+@pytest.mark.parametrize("proactive", [False, True])
+async def test_tools_contract_edit_only_same_conversation_and_history(tmp_path, proactive):
     _, ctx, plugin = await setup(tmp_path)
     backend = FakeBackend(ctx)
     plugin.backends = [backend]
     call = sample_call().model_copy(update={"arguments": {"prompt": "fictional bird"}})
     inv = sample_invocation()
+    if proactive:
+        inv = inv.model_copy(update={"actor": None, "origin": "proactive"})
     draw, edit = plugin.create_draw(), plugin.create_edit()
     assert isinstance(await edit.prepare(call, inv), Denial)
     await assert_capability_contract(draw, call, inv)

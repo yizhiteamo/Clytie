@@ -234,12 +234,13 @@ class SafetyBelt:
     async def _notify_owner(self, target, trip, body):
         agent = self.agent
         try:
-            trace = await agent.submit(
+            submission = await agent.submit(
                 target,
                 topic="告诉主人，你在这个群里好像和别的机器人聊得停不下来了，想先歇一会儿，也说说什么时候回来",
                 material={key: trip[key] for key in ("conversation_id", "count", "until")},
                 reason="safety_belt",
             )
+            trace = submission.trace_id
             future = agent.kernel.queued.get(trace)
             if future is not None:
                 await asyncio.shield(future)

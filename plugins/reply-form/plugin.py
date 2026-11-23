@@ -53,24 +53,31 @@ class Plugin:
         self.interval = self.tuning.get("interval_seconds", [1, 2])
         if self.interval[0] > self.interval[1]:
             raise ValueError("invalid interval_seconds")
+        self.proactive_interval = self.tuning.get("interval_seconds_proactive", [2, 4])
+        if self.proactive_interval[0] > self.proactive_interval[1]:
+            raise ValueError("invalid interval_seconds_proactive")
 
     async def stop(self):
         self.ctx = None
 
     async def shape(self, draft):
         group = draft.conversation.kind == "group"
+        proactive = getattr(draft, "kind", "reply") == "proactive"
         if group and draft.focus and draft.interleaved:
             draft = draft.model_copy(update={"quote": draft.focus})
-        if draft.task_id or not all(isinstance(p, TextPart) for p in draft.parts):
+        if (draft.task_id and not proactive) or not all(
+            isinstance(p, TextPart) for p in draft.parts
+        ):
             return draft
         text = "".join(p.text for p in draft.parts)
         if len("".join(text.split())) <= self.tuning.get("min_chars", 60):
             return draft
-        limit = (
-            self.tuning.get("max_parts_group", 2)
-            if group
-            else self.tuning.get("max_parts_private", 3)
-        )
+        if proactive:
+            limit = self.tuning.get("max_parts_proactive", 6)
+        elif group:
+            limit = self.tuning.get("max_parts_group", 2)
+        else:
+            limit = self.tuning.get("max_parts_private", 3)
         chunks = split_text(text, limit)
         if len(chunks) < 2:
             return draft
@@ -82,11 +89,16 @@ class Plugin:
         previous = {}
         output = []
         for intent in intents:
-            if intent.kind == "reply" and intent.split and not intent.task_id:
+            if intent.split and (
+                intent.kind == "proactive" or (intent.kind == "reply" and not intent.task_id)
+            ):
                 group = intent.split.group_id
                 when = intent.not_before or self.ctx.clock.now()
                 if group in previous:
-                    interval = self.ctx.random.uniform(*self.interval)
+                    bounds = (
+                        self.proactive_interval if intent.kind == "proactive" else self.interval
+                    )
+                    interval = self.ctx.random.uniform(*bounds)
                     when = max(when, previous[group] + timedelta(seconds=interval))
                     intent = intent.model_copy(update={"not_before": when})
                 previous[group] = when

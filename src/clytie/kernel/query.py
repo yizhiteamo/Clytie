@@ -67,6 +67,10 @@ def elapsed(start, end):
     )
 
 
+def task_origin(record):
+    return "proactive" if record.get("proactive") else "message"
+
+
 def task_view(ledger, record, *, full=False):
     trace = record["trace_id"]
     invocations = [i for i in ledger.rows("invocation") if i["trace_id"] == trace]
@@ -104,6 +108,7 @@ def task_view(ledger, record, *, full=False):
         )
     }
     task.update(
+        origin=task_origin(record),
         model_calls=record.get("model_calls", 0),
         tool_rounds=record.get("tool_rounds", 0),
         timings=record_timings(record),

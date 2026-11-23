@@ -16,7 +16,7 @@ from clytie.kernel.ledger import EXEC_TERMINAL
 from clytie.kernel.service import record_scope
 from clytie.kernel.task_card import render_task_card
 from clytie.plugin_host.memory import bind_scene
-from clytie.sdk import CancelToken
+from clytie.sdk import CancelToken, ProactiveSubmission
 from clytie.sdk.behavior import Defer, Ignore, Judge, Judgment, Mode, ReactOnly, Respond, Skip
 from clytie.sdk.context import validate_proactive
 from clytie.sdk.types import (
@@ -42,10 +42,12 @@ from .judgment import AttentionJudgments
 from .persona import Persona
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
 from .prewrite import Prewrites
+from .proactive_pause import ProactivePause
 from .safety_belt import SafetyBelt
 from .vision import ImageFetcher
 
 REASONS = {
+    "proactive_limit": "今天主动用这个能力的次数用完了",
     "permission": "对方没有使用这个能力的权限",
     "protection_mode": "额度紧张，暂停非主人的重任务",
     "disabled": "这个能力已停用",
@@ -113,6 +115,7 @@ class Agent:
         kernel.delivery.admission = self.admission
         self.ledger, self.clock, self.cid = kernel.ledger, kernel.clock, kernel.ledger.companion_id
         self.log = kernel.log
+        self.proactive_pause = ProactivePause(host.home, self.cid, self.clock)
         self.conversation_messages = ConversationMessages(self.ledger, config.get("names", {}))
         self.judgments = AttentionJudgments(self)
         self.safety_belt = SafetyBelt(self, notifier=notifier)
@@ -170,12 +173,17 @@ class Agent:
         self.shutting_down = False
         self.prewrites = Prewrites(self)
         self.opening = {}
+        self.proactive_writing = {}
         kernel.config = config
         kernel.permissions = lambda actor, tool: (
             self.reason(actor, tool)
             not in {"permission", "disabled", "start_failed", "migrating", "model_no_tools"}
         )
-        kernel.quota = lambda actor, tool: self.reason(actor, tool) != "protection_mode"
+        kernel.quota = lambda actor, tool: (
+            not self.protection.active
+            or (actor is not None and actor.role == "owner")
+            or not self.declarations().get(tool, (None, {}))[1].get("heavy")
+        )
         kernel.conversation_scenes.update(
             {key: value["scene"] for key, value in instance.get("conversations", {}).items()}
         )
@@ -369,12 +377,26 @@ class Agent:
             )
         ]
 
-    async def tools(self, conversation, actor, proactive=False):
-        if proactive:
+    async def tools(self, conversation, actor, proactive=False, *, proactive_tools=False):
+        if proactive and not proactive_tools:
             return [], "主动开口时暂不使用能力"
+        limits = self.config.get("proactive", {}).get("tools", {})
+        counts = {}
+        if proactive:
+            actor = self.admission.private_actors.get(conversation.conversation_id)
+            if actor is None or actor.role != "owner":
+                return [], "主动能力只可用于已登记的主人私聊"
+            counts = await run_sync(self.ledger, self.ledger.proactive_counts)
         specs, lines = [], []
         for name, (_, declaration) in self.declarations().items():
+            if proactive and name not in limits:
+                continue
             reason = self.reason(actor, name, conversation)
+            if proactive and not reason:
+                if declaration.get("heavy") and self.protection.active:
+                    reason = "protection_mode"
+                elif counts.get(name, 0) >= limits[name]["daily"]:
+                    reason = "proactive_limit"
             detail = REASONS[reason] if reason else declaration["description"]
             if reason == "protection_mode" and self.protection.snapshot:
                 resets = [
@@ -399,8 +421,8 @@ class Agent:
                 )
         if not self.features.supports_tools:
             return [], "\n".join(lines)
-        specs.extend(self.memory.specifications(actor))
-        if await self.cancellable(conversation):
+        specs.extend(self.memory.specifications(None if proactive else actor))
+        if not proactive and await self.cancellable(conversation):
             specs.append(
                 ToolSpec(
                     name="core_cancel_task",
@@ -421,7 +443,7 @@ class Agent:
             for c in CATEGORIES
             if self.config.get("boundary", {}).get("categories", {}).get(c, True)
         ]
-        if actor.role not in {"owner", "peer"} and categories:
+        if not proactive and actor.role not in {"owner", "peer"} and categories:
             specs.append(
                 ToolSpec(
                     name="core_report_boundary",
@@ -500,6 +522,12 @@ class Agent:
         )
         key, new = await asyncio.shield(command)
         state["accepted"] = new
+        if new and event.message and event.message.sender.role == "owner":
+            trace = self.proactive_writing.get(event.conversation.conversation_id)
+            if trace is not None:
+                record = await finalization.persist(self.ledger.get, "record", trace)
+                if record and record.get("proactive_result") == "superseded":
+                    self.kernel.tokens.setdefault(trace, CancelToken()).cancel("superseded")
         return key, new
 
     def _ignore_unhandled(self, keys, reason=None):
@@ -776,13 +804,18 @@ class Agent:
         self.batches.pop(key)
         # Reserve the order of batches which have already reached their final opinion.
         cid = event.conversation.conversation_id
+        async with self._opening_record(cid):
+            return await self._respond(batch, opinion, paused, already_paused)
+
+    @asynccontextmanager
+    async def _opening_record(self, cid):
         predecessor = self.opening.get(cid)
         submitted = asyncio.get_running_loop().create_future()
         self.opening[cid] = submitted
         try:
             if predecessor:
                 await asyncio.shield(predecessor)
-            return await self._respond(batch, opinion, paused, already_paused)
+            yield
         finally:
             submitted.set_result(None)
             if self.opening.get(cid) is submitted:
@@ -1134,8 +1167,15 @@ class Agent:
         picked,
         selected_refs,
         use=None,
+        *,
+        proactive_tools=False,
     ):
-        specs, states = await self.tools(conversation, actor, proactive)
+        specs, states = await self.tools(
+            conversation, actor, proactive, proactive_tools=proactive_tools
+        )
+        scope_actor = (
+            self.admission.private_actors.get(conversation.conversation_id) if proactive else actor
+        )
         exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
         limit = self.config.get("vision", {}).get("max_images", 30)
         images = ImageContext(limit - len(selected_refs))
@@ -1161,9 +1201,9 @@ class Agent:
             candidates
             and images.attached
             and self.features.supports_tools
-            and not proactive
-            and self.scope_allows(actor, "core_view_image", conversation)
-            and self.scope_allows(actor, VIEW.name, conversation)
+            and (not proactive or proactive_tools)
+            and self.scope_allows(scope_actor, "core_view_image", conversation)
+            and self.scope_allows(scope_actor, VIEW.name, conversation)
         ):
             specs.append(VIEW)
         # Picks apply to the next request, which has the full image budget again.
@@ -1172,8 +1212,8 @@ class Agent:
         if (
             images.available()
             and self.features.supports_tools
-            and not proactive
-            and self.scope_allows(actor, view.name, conversation)
+            and (not proactive or proactive_tools)
+            and self.scope_allows(scope_actor, view.name, conversation)
         ):
             specs.append(view)
         if exhausted:
@@ -1190,6 +1230,7 @@ class Agent:
         mode=None,
         extra="",
         proactive=False,
+        proactive_tools=False,
         direct=None,
         respond=None,
         prepared_round=None,
@@ -1246,6 +1287,7 @@ class Agent:
                         rounds,
                         picked,
                         selected_refs,
+                        proactive_tools=proactive_tools,
                     )
                     turn = await self.generate(
                         trace, messages, [] if exhausted else specs, conversation, token
@@ -1256,7 +1298,7 @@ class Agent:
                     raise asyncio.CancelledError
                 if turn.finish in {"error", "deadline"}:
                     raise RuntimeError("model_error")
-                if turn.finish != "tool_calls" or exhausted or proactive:
+                if turn.finish != "tool_calls" or exhausted or (proactive and not proactive_tools):
                     text = turn.text or ""
                     break
                 rounds += 1
@@ -1316,7 +1358,15 @@ class Agent:
                             else "图片编号无效",
                         )
                     else:
-                        result = await self.execute(trace, conversation, actor, call, specs, token)
+                        result = await self.execute(
+                            trace,
+                            conversation,
+                            actor,
+                            call,
+                            specs,
+                            token,
+                            proactive=proactive_tools,
+                        )
                     if result.status == "ok":
                         assets.extend(result.assets)
                     content = result.content
@@ -1332,9 +1382,16 @@ class Agent:
 
                 def audit_proactive_decline():
                     with self.ledger.transaction():
+                        row = self.ledger.get("record", trace)
+                        if row.get("proactive_result") == "superseded":
+                            return
+                        row["proactive_result"] = "declined"
+                        self.ledger.put("record", trace, row)
                         self.ledger.audit("proactive_declined", trace_id=trace)
 
                 await self.kernel.persist(trace, audit_proactive_decline)
+                await self.finish(trace, "ok", [])
+                return
             intents = await self.outgoing(
                 trace,
                 conversation,
@@ -1416,10 +1473,12 @@ class Agent:
             self.memory.sessions.pop(trace, None)
             self.kernel.reactions.forget(trace)
 
-    async def execute(self, trace, conversation, actor, call, specs, token):
+    async def execute(self, trace, conversation, actor, call, specs, token, *, proactive=False):
         declaration = self.declarations().get(call.tool)
         heavy = declaration is not None and declaration[1].get("heavy", False)
-        result = await self._execute_tool(trace, conversation, actor, call, specs, token)
+        result = await self._execute_tool(
+            trace, conversation, actor, call, specs, token, proactive=proactive
+        )
         if heavy:
 
             def record_outcome():
@@ -1430,8 +1489,13 @@ class Agent:
             self.kernel.reactions.record_heavy_result(trace, result.status)
         return result
 
-    async def _execute_tool(self, trace, conversation, actor, call, specs, token):
-        if not self.scope_allows(actor, call.tool, conversation):
+    async def _execute_tool(
+        self, trace, conversation, actor, call, specs, token, *, proactive=False
+    ):
+        permission_actor = (
+            self.admission.private_actors.get(conversation.conversation_id) if proactive else actor
+        )
+        if not self.scope_allows(permission_actor, call.tool, conversation):
             return ToolResult(
                 data={},
                 call_id=call.call_id,
@@ -1442,11 +1506,16 @@ class Agent:
         spec = next((s for s in specs if s.name == call.tool), None)
         if spec is None:
             reason = (
-                self.reason(actor, call.tool, conversation)
+                self.reason(permission_actor, call.tool, conversation)
                 if call.tool in self.declarations()
                 else "unknown_tool"
             )
             reason = reason or "unknown_tool"
+            if proactive and call.tool in self.config.get("proactive", {}).get("tools", {}):
+                limit = self.config["proactive"]["tools"][call.tool]["daily"]
+                counts = await self.kernel.persist(trace, self.ledger.proactive_counts)
+                if counts.get(call.tool, 0) >= limit:
+                    reason = "proactive_limit"
             return ToolResult(
                 data={},
                 call_id=call.call_id,
@@ -1502,7 +1571,11 @@ class Agent:
             return ToolResult(data={}, call_id=call.call_id, status="ok", content=content)
         reg = next(r for r in self.host.registrations(self.cid, "tool") if r.key == call.tool)
         inv = Invocation(
-            companion_id=self.cid, actor=actor, conversation=conversation, trace_id=trace
+            companion_id=self.cid,
+            actor=actor,
+            conversation=conversation,
+            trace_id=trace,
+            origin="proactive" if proactive else "message",
         )
         result = await self.kernel.execute(
             trace,
@@ -1510,12 +1583,22 @@ class Agent:
             call,
             Capability(self.host, self.cid, reg),
             inv,
+            permission_actor=permission_actor,
             schema=spec.model_dump(mode="json")["parameters"],
             timeout_s=reg.declaration.get("timeout_s"),
+            proactive_limit=self.config["proactive"]["tools"][call.tool]["daily"]
+            if proactive
+            else None,
         )
         if isinstance(result, Denial):
             return ToolResult(
-                data={}, call_id=call.call_id, status="denied", content=result.message_for_model
+                data={},
+                call_id=call.call_id,
+                status="denied",
+                content=result.message_for_model,
+                error={"code": "proactive_limit", "message": ""}
+                if result.reason_code == "proactive_limit"
+                else None,
             )
         if isinstance(result, dict):
             if result["result"]:
@@ -1585,6 +1668,7 @@ class Agent:
                     )
                 )
         draft = ReplyDraft(
+            kind="proactive" if proactive else "reply",
             focus=focus,
             interleaved=interleaved,
             parts=[TextPart(text=text)] if text else [],
@@ -1623,6 +1707,7 @@ class Agent:
                 turn = await self.generate(trace, context, [], conversation, token, rewrite=True)
                 if turn.finish == "stop":
                     draft = ReplyDraft(
+                        kind="proactive" if proactive else "reply",
                         focus=focus,
                         interleaved=interleaved,
                         parts=[TextPart(text=turn.text or "")],
@@ -1703,7 +1788,7 @@ class Agent:
                 "asset": asset,
             }
             intents.append(self.intent(record, [part], kind=kind))
-        if record["task_id"] and intents:
+        if record["task_id"] and intents and not proactive:
             start = (
                 record.get("execution_started_at")
                 or record.get("started_at")
@@ -1733,7 +1818,17 @@ class Agent:
         await self.kernel.seal(trace, status, intents, error)
         await self.kernel.delivery.deliver(trace, finalization=self.kernel.finalizations.get(trace))
 
-    async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+    async def submit(
+        self,
+        conversation_id,
+        *,
+        topic=None,
+        material=None,
+        parts=None,
+        reason,
+        tools=False,
+        plugin_id=None,
+    ):
         finalization = OwnedFinalization(self.kernel.delivery)
         state = {"handed": False}
 
@@ -1747,6 +1842,8 @@ class Agent:
                     material=material,
                     parts=parts,
                     reason=reason,
+                    tools=tools,
+                    plugin_id=plugin_id,
                 )
             except BaseException as exc:
                 if state.get("trace") and not state["handed"]:
@@ -1763,8 +1860,26 @@ class Agent:
         return await self._intake(submit_owned(), finalization)
 
     async def _submit(
-        self, conversation_id, finalization, state, *, topic=None, material=None, parts=None, reason
+        self,
+        conversation_id,
+        finalization,
+        state,
+        *,
+        topic=None,
+        material=None,
+        parts=None,
+        reason,
+        tools=False,
+        plugin_id=None,
     ):
+        if (await self.proactive_pause.status())["paused"]:
+
+            def audit_pause():
+                with self.ledger.transaction():
+                    self.ledger.audit("proactive.paused", plugin=plugin_id, reason=reason)
+
+            await run_sync(self.ledger, audit_pause)
+            return ProactiveSubmission(status="paused")
         if (
             self.shutting_down
             or self.kernel.delivery.silenced
@@ -1777,11 +1892,15 @@ class Agent:
                     self.ledger.audit("proactive.dropped", trace_id=trace)
 
             await run_sync(self.ledger, audit_proactive_drop)
-            return trace
-        validate_proactive(topic=topic, material=material, parts=parts)
+            return ProactiveSubmission(status="paused")
+        validate_proactive(topic=topic, material=material, parts=parts, tools=tools)
         target = self.instance.get("conversations", {}).get(conversation_id)
         if target is None or target["scene"] == "stranger_private":
             raise ValueError("proactive target denied")
+        if tools:
+            recipient = self.admission.private_actors.get(conversation_id)
+            if target["kind"] != "private" or recipient is None or recipient.role != "owner":
+                raise ValueError("proactive tools require a registered owner private conversation")
         channel = next(
             (c["account"] for c in self.config["channels"] if c["plugin"] == target["channel"]),
             None,
@@ -1794,30 +1913,72 @@ class Agent:
             kind=target["kind"],
             scene=target["scene"],
         )
-        record = await self.kernel.open_record(conversation=conversation)
-        trace = record["trace_id"]
-        state["trace"] = trace
-        self._bind_finalization(trace, finalization)
 
-        def audit_proactive_submission():
-            with self.ledger.transaction():
-                self.ledger.audit("proactive.submitted", trace_id=trace, reason=reason)
+        async def busy():
+            def audit_busy():
+                with self.ledger.transaction():
+                    self.ledger.audit("proactive.busy", plugin=plugin_id, reason=reason)
 
-        await finalization.persist(audit_proactive_submission)
-        self.log.info("proactive.submitted", trace_id=trace, reason=reason)
-        extra = "这是你主动开口，不是在回复谁。话题和材料仅为内部说明：" + json.dumps(
-            {"topic": topic, "material": material}, ensure_ascii=False
-        )
-        future = await self.kernel.submit(
-            trace,
-            None,
-            lambda: self.run(
-                trace, conversation, None, [], extra=extra, proactive=True, direct=parts
-            ),
-        )
-        state["handed"] = True
-        self.track(self._settle_record(trace, finalization, future))
-        return trace
+            await finalization.persist(audit_busy)
+            return ProactiveSubmission(status="busy")
+
+        if conversation_id in self.opening or any(
+            key[0] == conversation_id for key in self.batches
+        ):
+            return await busy()
+        # No await between the check and the reservation. Respond waits until the
+        # accepted record is queued. The writer also checks active records atomically.
+        async with self._opening_record(conversation_id):
+            record = await self.kernel.open_record(
+                conversation=conversation,
+                proactive=True,
+                proactive_plugin=plugin_id,
+            )
+            if record is None:
+                return await busy()
+            trace = record["trace_id"]
+            state["trace"] = trace
+            self._bind_finalization(trace, finalization)
+
+            def audit_proactive_submission():
+                with self.ledger.transaction():
+                    self.ledger.audit(
+                        "proactive.submitted", trace_id=trace, reason=reason, plugin=plugin_id
+                    )
+
+            await finalization.persist(audit_proactive_submission)
+            self.log.info("proactive.submitted", trace_id=trace, reason=reason)
+            cid = conversation.conversation_id
+            self.proactive_writing[cid] = trace
+
+            def forget():
+                if self.proactive_writing.get(cid) == trace:
+                    self.proactive_writing.pop(cid)
+
+            finalization.on_complete(forget)
+            extra = "这是你主动开口，不是在回复谁。话题和材料仅为内部说明：" + json.dumps(
+                {"topic": topic, "material": material}, ensure_ascii=False
+            )
+            future = await self.kernel.submit(
+                trace,
+                None,
+                lambda: self.run(
+                    trace,
+                    conversation,
+                    None,
+                    [],
+                    extra=extra,
+                    proactive=True,
+                    direct=parts,
+                    proactive_tools=tools,
+                ),
+            )
+            state["handed"] = True
+            self.track(self._settle_record(trace, finalization, future))
+            return ProactiveSubmission(status="accepted", trace_id=trace)
+
+    async def proactive_result(self, plugin_id, trace_id):
+        return await run_sync(self.ledger, self.ledger.proactive_result, plugin_id, trace_id)
 
     async def drain(self):
         while self.intake_tasks:

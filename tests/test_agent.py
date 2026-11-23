@@ -393,7 +393,7 @@ async def test_proactive_topics_decline_and_no_tools(tmp_path):
     )
     first = await agent.submit("owner_private", topic="fictional topic", reason="test")
     await agent.drain()
-    assert not channel.sent and agent.ledger.get("record", first)["requester"] is None
+    assert not channel.sent and agent.ledger.get("record", first.trace_id)["requester"] is None
     await agent.submit("owner_private", topic="fictional next", reason="test")
     await agent.drain()
     assert len(channel.sent) == 1 and channel.sent[0].kind == "proactive"

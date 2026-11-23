@@ -5,7 +5,14 @@ from types import SimpleNamespace
 
 from clytie.sdk.context import ServiceUnavailable, validate_proactive
 from clytie.sdk.immutable import FrozenDict
-from clytie.sdk.types import AssetRef, HttpResponse, ModelTurn, ProcessResult
+from clytie.sdk.types import (
+    AssetRef,
+    HttpResponse,
+    ModelTurn,
+    ProactiveOutcome,
+    ProactiveSubmission,
+    ProcessResult,
+)
 
 from .memory import memory_view
 from .support import json_copy, timed
@@ -46,14 +53,22 @@ class Proactive:
     def __init__(self, backend):
         self._backend = backend
 
-    async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
-        validate_proactive(topic=topic, material=material, parts=parts)
+    async def submit(
+        self, conversation_id, *, topic=None, material=None, parts=None, reason, tools=False
+    ):
+        validate_proactive(topic=topic, material=material, parts=parts, tools=tools)
         result = await self._backend.submit(
-            conversation_id, topic=topic, material=json_copy(material), parts=parts, reason=reason
+            conversation_id,
+            topic=topic,
+            material=json_copy(material),
+            parts=parts,
+            reason=reason,
+            tools=tools,
         )
-        if not isinstance(result, str):
-            raise ValueError("proactive backend must return a trace id")
-        return result
+        return ProactiveSubmission.model_validate(result)
+
+    async def result(self, trace_id):
+        return ProactiveOutcome.model_validate(await self._backend.result(trace_id))
 
 
 class Context(SimpleNamespace):
@@ -385,7 +400,7 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "model": ("generate",),
         "asset_writer": ("put",),
         "peer": ("send", "request"),
-        "proactive": ("submit",),
+        "proactive": ("submit", "result"),
         "identity": (
             "resolve_actor",
             "resolve_conversation",

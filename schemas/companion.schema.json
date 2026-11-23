@@ -845,6 +845,24 @@
       },
       "additionalProperties": false
     },
+    "proactive": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "daily": {"type": "integer", "minimum": 1, "maximum": 200}
+            },
+            "required": ["daily"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "tool_scopes": {
       "type": "object",
       "additionalProperties": {

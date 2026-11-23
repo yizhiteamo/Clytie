@@ -170,6 +170,24 @@
       "version": "0.1.0"
     },
     {
+      "category": "behavior",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "proactive-chat",
+      "name": "主动私聊",
+      "permissions": [
+        "message.proactive"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "按作息、节日和聊天间隔，在主人的私聊里提出开口的话题。",
+      "version": "0.1.0"
+    },
+    {
       "category": "channel",
       "conflicts": [],
       "dependencies": {},

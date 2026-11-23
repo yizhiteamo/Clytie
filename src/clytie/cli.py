@@ -183,6 +183,8 @@ def display_task(arguments, result):
     elif result["ok"]:
         task = result["task"]
         print(f"任务 {task['task_id']} · 伴侣 {task['companion_id']}")
+        if task.get("origin") == "proactive":
+            print("主动发起")
         for key, label in (
             ("kind", "类型"),
             ("tool", "能力"),

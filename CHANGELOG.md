@@ -1,5 +1,12 @@
 # 变更记录
 
+## SDK 0.18.0（主动私聊）
+
+- 插件可用 `proactive.submit(..., tools=True)` 请求在主人私聊中使用显式开放的能力。提交改为返回 `ProactiveSubmission`，只有 `accepted` 带编号。插件用 `proactive.result(trace_id)` 核对自己提交的结果。
+- 能力调用和任务事件新增 `origin`。主动调用的 `Invocation.actor`、任务事件和摘要的 `actor_id` 均为空。能力插件和任务订阅者升级时需要处理空发起人。
+- `ReplyDraft.kind` 由宿主填写为 `reply` 或 `proactive`，插件可据此决定拆分形式。
+- 能力状态新增 `proactive_limit`，表示该能力在实例本地日期的主动调用次数已用完。
+
 ## SDK 0.17.0（边等边写）
 
 - 行为插件可在 Defer 和 Judge 中通过 prepare 请求预写，默认关闭。模型用量新增可选的 cached_input_tokens；未知时为空。

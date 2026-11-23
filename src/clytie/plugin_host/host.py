@@ -9,8 +9,9 @@ import json
 import sys
 from collections import deque
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
@@ -123,6 +124,7 @@ class PluginHost(MigrationMixin):
         self.asset_store = AssetStore(self.home, self.clock)
         self.credentials = {}
         self.accounts = {}
+        self.proactive_backends = {}
 
         def resolve_backends(cid, pid):
             bound = self.asset_store.bind(cid, pid)
@@ -132,6 +134,11 @@ class PluginHost(MigrationMixin):
                 **(backends(cid, pid) if backends is not None else {}),
             }
             manifest = self.manifests.get(pid)
+            if cid in self.proactive_backends and "proactive" not in result:
+                submit, outcome = self.proactive_backends[cid]
+                result["proactive"] = SimpleNamespace(
+                    submit=partial(submit, pid), result=partial(outcome, pid)
+                )
             if manifest and "network" in manifest.data["permissions"] and "http" not in result:
                 from .http import HttpBackend
 

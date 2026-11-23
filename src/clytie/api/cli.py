@@ -25,6 +25,10 @@ def add_parser(commands):
         leaf = actions.add_parser(name)
         leaf.add_argument("cid")
         companion_leaves.append(leaf)
+    proactive = actions.add_parser("proactive")
+    proactive.add_argument("cid")
+    proactive.add_argument("proactive_action", choices=("pause", "resume", "status"))
+    companion_leaves.append(proactive)
     appearance = actions.add_parser("appearance")
     subcommands = appearance.add_subparsers(dest="appearance_action", required=True)
     for name in ("show", "add", "edit", "remove"):
@@ -169,7 +173,7 @@ async def execute(args, client=None):
         client or Client(resolve_home(args.home)),
         yes=getattr(args, "yes", False) or getattr(args, "confirm", False),
     )
-    await cli.request("GET", "/status")
+    current = await cli.request("GET", "/status")
     command = args.command
     if command == "backup":
         source_binding = None
@@ -306,6 +310,21 @@ async def execute(args, client=None):
     if command == "companion":
         if args.action == "appearance":
             return await appearance_command(args, cli)
+        if args.action == "proactive":
+            if args.proactive_action == "status":
+                if not current.json.get("ok"):
+                    return current
+                row = current.json["result"]["companions"].get(args.cid)
+                if row is None:
+                    return ApiResponse(
+                        status=404, json={"ok": False, "error": {"code": "not_found"}}
+                    )
+                return ApiResponse(status=200, json={"ok": True, "result": thaw(row["proactive"])})
+            return await cli.request(
+                "POST",
+                f"/companions/{args.cid}/proactive",
+                {"paused": args.proactive_action == "pause"},
+            )
         return await cli.request("POST", f"/companions/{args.cid}/{args.action}")
     if command == "boundary":
         return await cli.request(

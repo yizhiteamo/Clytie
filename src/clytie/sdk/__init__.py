@@ -6,9 +6,9 @@ from .channel import ChannelUnavailable
 from .clock import Clock
 from .context import CredentialUnavailable, PluginContext, WebSocketClosed
 from .plugin import PluginUnavailable
-from .types import QUOTA_UNKNOWN, ChannelState
+from .types import QUOTA_UNKNOWN, ChannelState, ProactiveOutcome, ProactiveSubmission
 
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 __all__ = [
     "BackupEntry",
     "BackupProvider",
@@ -24,6 +24,8 @@ __all__ = [
     "Cancelled",
     "Clock",
     "PluginContext",
+    "ProactiveSubmission",
+    "ProactiveOutcome",
     "CredentialUnavailable",
     "WebSocketClosed",
     "__version__",

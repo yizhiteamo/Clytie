@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 from random import Random
+from uuid import uuid4
 
 from clytie.sdk.context import RevisionConflict, ServiceUnavailable
 from clytie.sdk.immutable import FrozenDict, freeze, thaw
@@ -22,6 +23,8 @@ from clytie.sdk.types import (
     MemoryDraft,
     MemoryRecord,
     ModelTurn,
+    ProactiveOutcome,
+    ProactiveSubmission,
     ProcessResult,
     TokenUsage,
 )
@@ -371,16 +374,33 @@ class FakeHttp:
 class FakeProactive:
     def __init__(self, clock, *, allowed=True):
         self.clock, self.allowed, self.intents = clock, allowed, []
+        self.paused = False
+        self.busy = False
+        self.tools_requested = []
+        self.outcomes = {}
 
-    async def submit(self, conversation_id, *, topic=None, material=None, parts=None, reason):
+    async def submit(
+        self, conversation_id, *, topic=None, material=None, parts=None, reason, tools=False
+    ):
         from clytie.sdk.context import validate_proactive
 
-        validate_proactive(topic=topic, material=material, parts=parts)
+        validate_proactive(topic=topic, material=material, parts=parts, tools=tools)
         await self.clock.sleep(0)
+        if self.paused:
+            return ProactiveSubmission(status="paused")
+        if self.busy:
+            return ProactiveSubmission(status="busy")
         if not self.allowed:
             raise PermissionError("fictional boundary denial")
         self.intents.append((conversation_id, topic, material, tuple(parts or ()), reason))
-        return f"{len(self.intents):032x}"
+        self.tools_requested.append(tools)
+        trace = uuid4().hex
+        self.outcomes[trace] = ProactiveOutcome(status="pending")
+        return ProactiveSubmission(status="accepted", trace_id=trace)
+
+    async def result(self, trace_id):
+        await self.clock.sleep(0)
+        return self.outcomes.get(trace_id, ProactiveOutcome(status="not_found"))
 
 
 class FakeSubprocess:
