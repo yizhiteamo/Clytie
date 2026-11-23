@@ -1,6 +1,7 @@
 """The enforcement checks must detect aliases, not only string spellings."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,25 @@ def test_accepts_sdk_and_injected_dependencies():
 
 def test_project_architecture():
     assert CHECKS.main() == 0
+
+
+@pytest.mark.parametrize(
+    "plugin_id,valid",
+    [
+        ("web", False),
+        ("web--tools", False),
+        ("web-", False),
+        ("web-tools", True),
+        ("fictional-test-tool", True),
+    ],
+)
+def test_official_plugin_id_needs_two_words(tmp_path, monkeypatch, capsys, plugin_id, valid):
+    path = tmp_path / "plugins" / "fixture" / "plugin.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"id": plugin_id}), encoding="utf-8")
+    monkeypatch.setattr(CHECKS, "ROOT", tmp_path)
+    assert CHECKS.main() == int(not valid)
+    assert ("plugin-id-needs-two-words" in capsys.readouterr().out) == (not valid)
 
 
 def test_architecture_uses_installed_manifest_ids_and_exact_testing_exemption(

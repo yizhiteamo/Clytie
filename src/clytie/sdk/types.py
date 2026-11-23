@@ -415,6 +415,26 @@ class Denial(SDKModel):
     message_for_model: str
 
 
+class MaterialSource(SDKModel):
+    title: str
+    url: str = Field(min_length=1)
+    published_at: str | None = None
+
+
+class Material(SDKModel):
+    title: str
+    text: str
+    url: str | None = Field(default=None, min_length=1)
+    published_at: str | None = None
+    sources: FrozenList[MaterialSource] | None = Field(default=None, min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def check_sources(self):
+        if (self.url is None) == (self.sources is None):
+            raise ValueError("material requires exactly one of url and sources")
+        return self
+
+
 class ToolResult(SDKModel):
     call_id: str
     status: Literal["ok", "error", "denied", "cancelled"]
@@ -422,6 +442,7 @@ class ToolResult(SDKModel):
     assets: FrozenList[AssetRef] = Field(default_factory=FrozenList)
     data: JsonObject
     error: ErrorInfo | None = None
+    material: Material | None = None
 
 
 class MemoryDecay(SDKModel):

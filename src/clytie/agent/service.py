@@ -39,6 +39,7 @@ from .appearance import VIEW, Appearance, load_appearance, reference_message, se
 from .context import Context, message
 from .image_context import ImageContext, view_tool
 from .judgment import AttentionJudgments
+from .materials import NOTICE, RECALL, Materials
 from .persona import Persona
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
 from .prewrite import Prewrites
@@ -58,8 +59,9 @@ REASONS = {
 
 
 class Capability:
-    def __init__(self, host, cid, reg):
+    def __init__(self, host, cid, reg, material_budget=6000):
         self.host, self.cid, self.reg = host, cid, reg
+        self.material_budget = material_budget
 
     def idempotency_key(self, call, inv):
         with bind_scene(inv.conversation.scene, inv.conversation.conversation_id):
@@ -79,7 +81,7 @@ class Capability:
         )
 
     async def execute(self, plan, inv, cancel):
-        return await self.host.invoke(
+        result = await self.host.invoke(
             self.cid,
             self.reg.plugin_id,
             "tool",
@@ -91,6 +93,17 @@ class Capability:
             scene=inv.conversation.scene,
             conversation_id=inv.conversation.conversation_id,
         )
+        material = result.material
+        if material and material.url and len(material.text) > self.material_budget:
+            marker = "[已截断]"
+            text = material.text[: max(0, self.material_budget - len(marker))] + marker
+            result = result.model_copy(
+                update={
+                    "material": material.model_copy(update={"text": text}),
+                    "content": text,
+                }
+            )
+        return result
 
 
 class Agent:
@@ -1169,6 +1182,7 @@ class Agent:
         use=None,
         *,
         proactive_tools=False,
+        materials,
     ):
         specs, states = await self.tools(
             conversation, actor, proactive, proactive_tools=proactive_tools
@@ -1190,9 +1204,17 @@ class Agent:
             proactive=proactive,
             memory_trace=trace,
             images=images,
+            materials=materials,
             **({"use": use} if use is not None else {}),
         )
         request_messages = [*context, *dialogue]
+        if (
+            materials.has_summary
+            and self.features.supports_tools
+            and (not proactive or proactive_tools)
+            and self.scope_allows(scope_actor, RECALL.name, conversation)
+        ):
+            specs.append(RECALL)
         images.apply(request_messages)
         if selected_refs:
             request_messages.append(reference_message(selected_refs))
@@ -1242,6 +1264,7 @@ class Agent:
             if not proactive and actor is not None and actor.role == "owner":
                 spoken_names = self.outbound.names_in_batch(events)
             assets, dialogue, rounds = [], [], 0
+            materials = Materials()
             picked = []
             selected_refs = []
             if prepared_round is None:
@@ -1272,7 +1295,7 @@ class Agent:
                 exhausted = rounds >= self.config.get("agent", {}).get("max_tool_rounds", 4)
                 view = view_tool(limit)
                 if prepared_round is not None:
-                    specs, candidates, images, turn = prepared_round
+                    specs, candidates, images, turn, materials = prepared_round
                     prepared_round = None
                 else:
                     specs, candidates, images, messages = await self._round_context(
@@ -1288,6 +1311,7 @@ class Agent:
                         picked,
                         selected_refs,
                         proactive_tools=proactive_tools,
+                        materials=materials,
                     )
                     turn = await self.generate(
                         trace, messages, [] if exhausted else specs, conversation, token
@@ -1319,7 +1343,11 @@ class Agent:
                 )
                 for call in turn.tool_calls:
                     token.raise_if_cancelled()
-                    if call.tool == VIEW.name and VIEW in specs:
+                    if call.tool == RECALL.name and RECALL in specs:
+                        result = await self.kernel.persist(
+                            trace, materials.recall, self.ledger, call
+                        )
+                    elif call.tool == VIEW.name and VIEW in specs:
                         valid = not call.arguments
                         content = "这个工具没有参数"
                         if valid:
@@ -1371,8 +1399,10 @@ class Agent:
                         assets.extend(result.assets)
                     content = result.content
                     budget = self.config.get("context", {}).get("material_budget_chars", 6000)
-                    if len(content) > budget:
+                    if len(content) > budget and call.tool != RECALL.name:
                         content = content[:budget] + "[已截断]"
+                    if result.material:
+                        content = NOTICE + "\n" + content
                     dialogue.append(
                         ChatMessage(
                             role="tool", tool_call_id=call.call_id, parts=[TextPart(text=content)]
@@ -1581,11 +1611,17 @@ class Agent:
             trace,
             reg.plugin_id,
             call,
-            Capability(self.host, self.cid, reg),
+            Capability(
+                self.host,
+                self.cid,
+                reg,
+                self.config.get("context", {}).get("material_budget_chars", 6000),
+            ),
             inv,
             permission_actor=permission_actor,
             schema=spec.model_dump(mode="json")["parameters"],
             timeout_s=reg.declaration.get("timeout_s"),
+            light=reg.declaration.get("light", False),
             proactive_limit=self.config["proactive"]["tools"][call.tool]["daily"]
             if proactive
             else None,

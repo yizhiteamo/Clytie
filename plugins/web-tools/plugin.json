@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "web-tools",
+  "name": "web-tools",
+  "summary": "搜索公开来源并提取网页正文",
+  "category": "tool",
+  "version": "0.1.0",
+  "requires": {"sdk": ">=0.19,<0.20"},
+  "entry": "plugin:Plugin",
+  "priority": 100,
+  "dependencies": {},
+  "conflicts": [],
+  "permissions": ["network.public"],
+  "contributes": {"tools": [
+    {
+      "name": "search_web", "factory": "create_search", "light": true, "heavy": false,
+      "risk": "low", "delivery": "text", "audience": ["owner", "peer", "member", "stranger"],
+      "description": "搜索需要核对的公开资料，返回来源与摘要。",
+      "when_not_to_use": "对方要求不搜索、只是在转述，或已有链接可直接阅读时不用。",
+      "examples": [
+        {"input": "帮我查一下最近的天文发现。", "call": true},
+        {"input": "不要上网查。", "call": false},
+        {"input": "有人让我查资料。", "call": false}
+      ],
+      "parameters": {"type": "object", "properties": {
+        "query": {"type": "string", "minLength": 1, "maxLength": 200},
+        "recent_days": {"type": "integer", "minimum": 1, "maximum": 365},
+        "max_results": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}
+      }, "required": ["query"], "additionalProperties": false}
+    },
+    {
+      "name": "read_url", "factory": "create_read", "light": true, "heavy": false,
+      "risk": "low", "delivery": "text", "audience": ["owner", "peer", "member", "stranger"],
+      "description": "阅读给定公开网页的文字和标题。",
+      "when_not_to_use": "登录页、私有网址或仅在讨论阅读网页时不用。",
+      "examples": [
+        {"input": "请读一下这个链接里的文章。", "call": true},
+        {"input": "别打开这个网页。", "call": false},
+        {"input": "他说他读了一个网页。", "call": false}
+      ],
+      "parameters": {"type": "object", "properties": {"url": {"type": "string", "minLength": 1}},
+                     "required": ["url"], "additionalProperties": false}
+    }
+  ]},
+  "config": {"type": "object", "properties": {
+    "backend": {"type": "string", "enum": ["openai"], "default": "openai"},
+    "model": {"type": "string", "minLength": 1},
+    "credential": {"type": "string", "minLength": 1}
+  }, "required": ["model", "credential"], "additionalProperties": false},
+  "data": {"version": 1, "on_uninstall": "keep"},
+  "failure_default": {}
+}

@@ -8,7 +8,7 @@ from .context import CredentialUnavailable, PluginContext, WebSocketClosed
 from .plugin import PluginUnavailable
 from .types import QUOTA_UNKNOWN, ChannelState, ProactiveOutcome, ProactiveSubmission
 
-__version__ = "0.18.0"
+__version__ = "0.19.0"
 __all__ = [
     "BackupEntry",
     "BackupProvider",

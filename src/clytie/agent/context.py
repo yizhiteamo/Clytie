@@ -12,6 +12,7 @@ from clytie.sdk.types import Actor, AssetRef, ChatMessage, ContextRequest, Messa
 
 from .appearance import RULES as APPEARANCE_RULES
 from .image_context import Slot
+from .materials import Materials
 from .policy import actor_label, text_parts
 
 PART = TypeAdapter(MessagePart)
@@ -268,6 +269,7 @@ class Context:
         proactive=False,
         memory_trace=None,
         images=None,
+        materials=None,
         use=None,
     ):
         agent = self.agent
@@ -322,8 +324,19 @@ class Context:
                     "result": (i.get("result") or {}).get("content", "")[:200],
                 }
                 for i in invocations
+                if not (i.get("result") or {}).get("material")
             ]
         result.append(message("system", "最近任务：" + json.dumps(summaries, ensure_ascii=False)))
+        reference = (materials or Materials()).render(
+            ledger,
+            conversation,
+            self,
+            agent.clock.now(),
+            agent.config.get("context", {}),
+            memory_trace,
+        )
+        if reference:
+            result.append(message("user", reference))
         groups = {}
         for row in ledger.rows("intent"):
             if row.get("split") and row["conversation_id"] == conversation.conversation_id:

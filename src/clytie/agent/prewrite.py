@@ -8,6 +8,7 @@ from uuid import uuid4
 from clytie.plugin_host.support import timed
 from clytie.sdk import CancelToken
 
+from .materials import Materials
 from .policy import fast_cancel
 
 
@@ -56,6 +57,7 @@ class Prewrites:
 
         async def first():
             async with agent._presence(trace, conversation, event.message.sender, events):
+                materials = Materials()
                 await agent._wait_for_images(events)
                 specs, candidates, images, messages = await agent._round_context(
                     trace,
@@ -70,6 +72,7 @@ class Prewrites:
                     [],
                     [],
                     use,
+                    materials=materials,
                 )
                 token.raise_if_cancelled()
                 if agent.clock.now() >= deadline:
@@ -87,7 +90,7 @@ class Prewrites:
                 )
                 if turn.finish not in {"stop", "tool_calls"}:
                     raise ValueError("prepare_failed")
-                return specs, candidates, images, turn
+                return specs, candidates, images, turn, materials
 
         async def bounded():
             token.raise_if_cancelled()

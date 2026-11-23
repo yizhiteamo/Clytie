@@ -153,6 +153,10 @@
                   ]
                 }
               },
+              "light": {
+                "type": "boolean",
+                "default": false
+              },
               "heavy": {
                 "type": "boolean"
               },
@@ -182,6 +186,10 @@
               "^x-": {}
             },
             "additionalProperties": false,
+            "not": {
+              "required": ["heavy", "light"],
+              "properties": {"heavy": {"const": true}, "light": {"const": true}}
+            },
             "required": [
               "name",
               "description",
@@ -840,12 +848,19 @@
           "peer",
           "model.invoke",
           "network",
+          "network.public",
           "assets.write",
           "subprocess",
           "gpu"
         ]
       },
-      "uniqueItems": true
+      "uniqueItems": true,
+      "not": {
+        "allOf": [
+          {"contains": {"const": "network"}},
+          {"contains": {"const": "network.public"}}
+        ]
+      }
     },
     "config": {
       "type": "object"

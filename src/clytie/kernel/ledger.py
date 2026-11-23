@@ -393,7 +393,16 @@ class Ledger:
         )
 
     def claim_invocation(
-        self, trace, plugin_id, call, plugin_key, *, timeout, schema, proactive_limit=None
+        self,
+        trace,
+        plugin_id,
+        call,
+        plugin_key,
+        *,
+        timeout,
+        schema,
+        proactive_limit=None,
+        light=False,
     ):
         with self.transaction():
             r = self.get("record", trace)
@@ -419,7 +428,7 @@ class Ledger:
                 ).fetchone()[0]
                 if used >= proactive_limit:
                     return None, False
-            first = r["kind"] == "chat"
+            first = not light and r["kind"] == "chat"
             if first:
                 ids = {x["task_id"] for x in self.rows("record")}
                 task_id = uuid4().hex[:8]
@@ -453,6 +462,13 @@ class Ledger:
             )
             if proactive_day is not None:
                 invocation["proactive_day"] = proactive_day
+            if light:
+                self.audit(
+                    "tool.light",
+                    trace_id=trace,
+                    tool=call.tool,
+                    invocation_id=invocation["invocation_id"],
+                )
             if r.get("proactive"):
                 self.audit("proactive.tool", trace_id=trace, tool=call.tool, origin="proactive")
             self.put("invocation", invocation["invocation_id"], invocation)

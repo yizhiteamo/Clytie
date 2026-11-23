@@ -335,6 +335,7 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "peer": "peer",
         "model.invoke": "model",
         "network": "http",
+        "network.public": "http",
         "message.proactive": "proactive",
         "subprocess": "subprocess",
     }

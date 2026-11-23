@@ -1,9 +1,11 @@
 """插件实例独享的生产 HTTP 会话；时间预算由 context.Http 管理。"""
 
 from contextvars import ContextVar
+from ipaddress import IPv6Address, IPv6Network, ip_address
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+from yarl import URL
 
 from clytie.sdk.types import HttpResponse
 
@@ -14,9 +16,41 @@ class ResponseTooLarge(ValueError):
     """The streamed response exceeded the requested byte budget."""
 
 
+_NAT64 = IPv6Network("64:ff9b::/96")
+
+
+def _is_public(value):
+    try:
+        address = ip_address(value)
+    except ValueError:
+        return False
+    if isinstance(address, IPv6Address):
+        if address.ipv4_mapped is not None:
+            return _is_public(address.ipv4_mapped)
+        if address in _NAT64:
+            return _is_public(int(address) & 0xFFFFFFFF)
+        if address.sixtofour is not None and not _is_public(address.sixtofour):
+            return False
+        if address.teredo is not None or address.scope_id is not None:
+            return False
+    return address.is_global and not address.is_multicast and not address.is_reserved
+
+
+class PublicConnector(aiohttp.TCPConnector):
+    async def _resolve_host(self, host, port, traces=None):
+        # Validate the actual candidates aiohttp passes to the socket connector.
+        if port not in (80, 443):
+            raise ValueError("blocked_address")
+        addresses = await super()._resolve_host(host, port, traces)
+        if not addresses or not all(_is_public(entry["host"]) for entry in addresses):
+            raise ValueError("blocked_address")
+        return addresses
+
+
 class HttpBackend:
-    def __init__(self, clock, log):
+    def __init__(self, clock, log, *, public_only=False):
         self._clock, self._log = clock, log
+        self._public_only = public_only
         self._session = None
         self._closed = False
 
@@ -45,6 +79,9 @@ class HttpBackend:
         self._url(url)
         if self._session is None:
             self._session = aiohttp.ClientSession(
+                connector=PublicConnector(use_dns_cache=False, force_close=True)
+                if self._public_only
+                else None,
                 trust_env=False,
                 timeout=aiohttp.ClientTimeout(total=None),
                 cookie_jar=aiohttp.DummyCookieJar(),
@@ -53,6 +90,10 @@ class HttpBackend:
         headers = dict(headers or {})
         for redirects in range(4):
             parsed = self._url(url)
+            if self._public_only:
+                destination = URL(url)
+                if destination.user is not None or destination.port not in (80, 443):
+                    raise ValueError("blocked_address")
             request_method = method
             started, status = self._clock.monotonic(), None
             try:
