@@ -28,7 +28,7 @@
 **原子操作**（每个都是一次事务）：
 - `claim_inbound(event)`：写入 `dedupe` 和 `inbound`（`state = received`）。键已存在时返回已有的 `event_id`，不新建任何东西。
 - `open_record(event_id, …)`：把 `inbound.state` 改为 `processing`，同时创建 `record`。经过注意力判断决定不处理的消息改为 `ignored`，不创建记录。
-- `claim_invocation(key, …)`：按第 4 节的幂等键插入，必要时把记录升级为 task。
+- `claim_invocation(key, …)`：按第 4 节的幂等键插入，必要时把记录升级为 task。清单声明 `light` 的轻量能力不升级，没有任务编号、任务状态回应和任务单（content-spec §5，B9a）。
 - `register_intents([...])`：一次登记一组待交付消息。
 - `begin_attempt(intent_id)`：在调用平台插件**之前**写入 `sending`。
 - `record_receipt(intent_id, n, receipt)`：写回收据，并更新 intent 和 record 的交付状态。

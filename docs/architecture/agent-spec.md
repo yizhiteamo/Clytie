@@ -59,7 +59,7 @@
   1. 工具名不存在，或是当前不可用的工具：不执行，返回 `ToolResult(status="error", error.code="unknown_tool")` 或 `denied`（附第 5 节的原因），交回模型。
   2. 参数不符合工具的参数 Schema：返回 `error.code = "invalid_arguments"`，不占用幂等键。
   3. 其余按 kernel-spec §4 的顺序：权限与额度 → 幂等键 → `prepare` → 领取 → 执行。查到仍在执行的已有调用（`in_progress`）时，告诉模型"这件事已经在做了"，附上编号。
-- 交给模型的工具结果是 `ToolResult.content`，超过 `context.material_budget_chars` 时截断并注明"已截断"。`data` 只写入账本，不交给模型。
+- 交给模型的工具结果是 `ToolResult.content`，超过 `context.material_budget_chars` 时截断并注明"已截断"。`data` 只写入账本，不交给模型。带 `material` 的结果在之后的回复中按 content-spec §7 保留（B9a，SDK 0.19）。
 - 轮数用完后仍要求调用工具：再调用一次模型，`tools` 为空，并附一句"工具轮数已用完，请直接回复"。这一次返回的工具调用一律忽略。
 - `finish = stop`：`text` 就是回复草稿。`text` 为空、并且本次循环没有可交付的产物时，视为她选择不回复：执行状态为 `ok`，不登记交付。`text` 为空但有产物时，按第 3.5 节照常交付产物。
 - `finish = error | deadline`：执行状态为 `error`，按第 10 节处理。
@@ -78,6 +78,7 @@
 | `core_recall` | 本次允许工具 | 回想记忆与本会话任务（memory-spec §5.3） |
 | `core_view_image` | 模型支持图片且当前上下文有未附上的可读图片 | 按上下文编号再次附图（vision-spec §5） |
 | `core_view_appearance` | 模型支持图片，上下文已附图片，有可用形象参考图，且图片上限至少为 2 | 对照当前或旧形象，至少保留一张待对比图片（appearance-spec §7） |
+| `core_recall_material` | 上下文中有资料摘要行时 | 按 `[资料N]` 取回那份资料的全文（content-spec §7，B9a） |
 | `core_report_boundary` | 说话人不是主人、也不是同部署的伴侣时 | 登记一次越界请求（第 7.2 节） |
 
 - 本体工具的调用**不算能力调用**：不领取幂等键，不把记录升级为 task，不触发任务状态回应和任务单。调用和结果写入审计。
@@ -159,7 +160,7 @@
   - 只有占位的消息也进入上下文，不再显示为空消息。
 - 预算：最近 `context.max_messages` 条，总字数不超过 `context.max_chars`；单条超过 `context.max_single_message_chars` 时只截断这一条。字数按 Unicode 字符计算。
 - **更早的内容直接舍弃，不做摘要（用户已确认）**。conversation.md 的摘要设计保留，以后单独实现，届时写明额度消耗。
-- 链接替换为 `[链接N]`、资料 15 分钟全文等规则（conversation.md §1）随 `recall-material` 插件在阶段二实现；A3.2 中链接按原文出现，工具结果只在本次循环内出现（第 3.2 节）。
+- 资料保留由本体实现，见 content-spec §7（B9a）。链接替换为 `[链接N]`（conversation.md §1）以后单独做，现在链接按原文出现。
 
 ## 5. 能力状态注入（L3）
 
@@ -404,7 +405,7 @@
 ## 13. 不在 A3.2 范围
 
 - 记忆投影和 L6 的记忆部分：A3.3。
-- 聊天摘要、`recall-material`、链接编号：以后单独实现（第 4.4 节）。
+- 聊天摘要、链接编号：以后单独实现（第 4.4 节）。资料保留见 content-spec §7（B9a）。
 - Agent 类模型（MCP）：阶段二。
 - 主动消息使用能力（例如主动画一张图发给主人）：B8a 已设计，见 proactive-spec §4 和 ADR 0036（用户 2026-11-22 确认）。
 - 具体的主动消息插件：主动私聊见 proactive-spec；唱歌等以后再讨论各自的内容和节奏。
