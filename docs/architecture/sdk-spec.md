@@ -144,7 +144,7 @@
 | `assets` | list[AssetRef] | |
 | `data` | dict | 结构化结果（写入账本） |
 | `error` | `{code, message}`? | |
-| `material` | `{title, url, text, published_at?}`? | 读到的资料，之后的回复中保留（SDK 0.19，content-spec §7） |
+| `material` | `{title, text, url?, published_at?, sources?: [{title, url, published_at?}]}`? | 读到的资料，之后的回复中保留；`url` 和 `sources` 二选一（SDK 0.19，content-spec §7） |
 
 **AssetRef**：`asset_id`、`media_type`、`size: int`、`origin: str`（来源说明）。
 
