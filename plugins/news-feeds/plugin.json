@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "news-feeds",
+  "name": "科技新闻订阅",
+  "summary": "轮询公开的科技订阅，整理近期新闻，按分档提供主动分享材料。",
+  "category": "tool",
+  "version": "0.1.0",
+  "requires": {"sdk": ">=0.19,<0.20"},
+  "entry": "plugin:Plugin",
+  "permissions": ["network.public", "model.invoke"],
+  "dependencies": {"proactive-chat": {"version": ">=0.1,<1", "optional": true}},
+  "contributes": {
+    "schedule": [{"id": "poll", "every": "PT1M", "handler": "on_tick"}],
+    "api_routes": [{
+      "method": "GET", "path": "/plugins/news-feeds/status", "handler": "status", "audit": false
+    }],
+    "tools": [{
+      "name": "recent_news", "factory": "create_recent", "light": true, "heavy": false,
+      "risk": "low", "delivery": "text", "audience": ["owner", "peer", "member", "stranger"],
+      "description": "查看最近七天收集的科技和 AI 新闻，返回来源链接、时间和摘要。",
+      "when_not_to_use": "对方不想看新闻、只是在转述，或要查订阅范围外的问题时不用。",
+      "examples": [
+        {"input": "最近有什么科技新闻？", "call": true},
+        {"input": "今天不用给我看新闻。", "call": false},
+        {"input": "他说最近新闻很多。", "call": false}
+      ],
+      "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
+    }]
+  },
+  "config": {
+    "type": "object", "additionalProperties": false,
+    "properties": {
+      "sources": {"type": "array", "items": {
+        "type": "object", "required": ["id", "type", "url"], "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64},
+          "type": {"enum": ["rss", "hackernews", "hf_papers", "github_rising", "arxiv"]},
+          "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+          "major": {"type": "boolean", "default": false}
+        }
+      }},
+      "interests": {"type": "array", "items": {"type": "string", "minLength": 1}},
+      "exclude": {"type": "array", "items": {"type": "string", "minLength": 1}},
+      "github_credential": {"type": "string", "minLength": 1}
+    }
+  },
+  "data": {"version": 1, "on_uninstall": "keep"}
+}

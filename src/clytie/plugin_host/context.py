@@ -1,5 +1,6 @@
 """仅暴露声明且授权的方法；外部能力由本体注入。"""
 
+import re
 from random import Random
 from types import SimpleNamespace
 
@@ -264,6 +265,12 @@ class Model:
 
     async def generate(self, req, cancel, *, purpose):
         cancel.raise_if_cancelled()
+        if not isinstance(purpose, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9._-]{0,31}", purpose
+        ):
+            return ModelTurn(
+                finish="error", usage={}, error={"code": "invalid_request", "message": ""}
+            )
         self._log.info("model.invoke", purpose=purpose)
         return ModelTurn.model_validate(await self._backend.generate(req, cancel, purpose=purpose))
 

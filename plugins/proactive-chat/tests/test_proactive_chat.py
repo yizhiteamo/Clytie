@@ -24,12 +24,14 @@ def local(day, hm):
 class Submit:
     def __init__(self):
         self.calls = []
+        self.materials = []
         self.admission = "accepted"
         self.outcomes = {}
         self.queries = []
 
-    async def submit(self, cid, *, topic, reason, tools):
+    async def submit(self, cid, *, topic, reason, tools, material=None):
         self.calls.append((cid, topic, reason, tools))
+        self.materials.append(material)
         if cid != TARGET:
             raise ValueError("proactive target denied")
         if self.admission != "accepted":
@@ -139,6 +141,9 @@ def test_declares_only_schedule_observation_status_and_submit_permission():
     assert manifest["contributes"]["api_routes"][0]["path"] == "/plugins/proactive-chat/status"
     assert manifest["contributes"]["schedule"][0]["every"] == "PT1M"
     assert set(manifest["contributes"]["events"]["subscribe"]) == {"message.received", "reply.sent"}
+    assert manifest["contributes"]["services"] == [
+        {"name": "proactive.news", "version": "1.0", "methods": ["offer"], "handler": "service"}
+    ]
 
 
 async def test_unsettled_opening_cannot_overlap_a_new_topic_or_be_replayed_after_restart(tmp_path):
@@ -235,6 +240,7 @@ async def test_only_interaction_with_owner_resets_silence(tmp_path, kind, marks,
     clock = ctx.clock
     clock.advance(90 * 60)
     await p.incoming(incoming(clock, actor=actor, kind=kind, **marks))
+    assert (p.schedule.state.owner_seen_at == clock.now().timestamp()) == (actor == "owner")
     clock.advance(30 * 60)
     await tick(p, clock)
     assert len(ctx.proactive.calls) == (0 if chat else 1)
@@ -589,3 +595,331 @@ async def test_three_day_timeline(tmp_path):
     assert any("unanswered_240" in row[3] for row in rows)
     for row in rows:
         print(" | ".join(row))
+
+
+async def offer(plugin, key, tier, *, at=None, source_count=1):
+    return (
+        await plugin.service(
+            "offer",
+            {
+                "key": key,
+                "tier": tier,
+                "title": "演示新闻 " + key,
+                "summary": "虚构的公开摘要",
+                "sources": [
+                    {"name": f"Site {i}", "url": f"https://site{i}.example/story/{key}"}
+                    for i in range(source_count)
+                ],
+                "time": (at or plugin.ctx.clock.now()).isoformat(),
+            },
+        )
+    )["status"]
+
+
+def finish(ctx, outcome):
+    trace = f"{len(ctx.proactive.calls):032x}"
+    ctx.proactive.outcomes[trace] = ProactiveOutcome(
+        status=outcome, sent_at=ctx.clock.now() if outcome == "sent" else None
+    )
+
+
+@pytest.mark.parametrize("outcome", ["sent", "unknown"])
+async def test_queued_upgrade_and_breaking_receipt_are_deduplicated_after_restart(
+    tmp_path, outcome
+):
+    p, ctx = await setup(tmp_path, topics=[], max_openings_per_day=1, max_attempts_per_day=1)
+    assert await offer(p, "first", "brief") == "accepted"
+    assert await offer(p, "first", "brief") == "duplicate"
+    assert await offer(p, "first", "breaking") == "accepted"
+    assert await offer(p, "second", "breaking") == "accepted"
+    ctx.proactive.admission = "busy"
+    await tick(p, ctx.clock)
+    assert (await status(p))["attempts_today"] == 0
+    ctx.proactive.admission = "accepted"
+    ctx.clock.advance(60)
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.materials[-1]["events"]) == 2
+    assert "可能提过" not in ctx.proactive.calls[-1][1]
+    assert ctx.proactive.calls[-1][2:] == ("news_breaking", True)
+    finish(ctx, outcome)
+    await tick(p, ctx.clock)
+    assert (await status(p))["breaking_today"] == (await status(p))["unanswered"] == 1
+    await tick(p, ctx.clock)  # 归档完成的事件
+    p = load_plugin()
+    await p.start(ctx)
+    assert await offer(p, "first", "brief") == await offer(p, "first", "breaking") == "duplicate"
+    assert await offer(p, "third", "breaking") == "accepted"
+    await p.incoming(incoming(ctx.clock))
+    await tick(p, ctx.clock)
+    assert ctx.proactive.calls[-1][2] == "news_breaking"
+    assert len(ctx.proactive.calls) == 3
+
+
+@pytest.mark.parametrize("when", ["pending", "after"])
+@pytest.mark.parametrize(
+    "outcome", ["sent", "unknown", "declined", "failed", "interrupted", "superseded", "not_found"]
+)
+async def test_brief_candidate_upgrade_uses_its_actual_outcome(tmp_path, when, outcome):
+    p, ctx = await setup(tmp_path, topics=[])
+    assert await offer(p, "story", "brief") == "accepted"
+    ctx.clock.set(local("2026-06-15", "11:00"))
+    await tick(p, ctx.clock)
+    assert ctx.proactive.calls[-1][2] == "news_brief"
+    if when == "pending":
+        assert await offer(p, "story", "breaking") == "accepted"
+        await tick(p, ctx.clock)
+        assert len(ctx.proactive.calls) == 1
+        p = load_plugin()
+        await p.start(ctx)
+    finish(ctx, outcome)
+    if when == "after":
+        await tick(p, ctx.clock)
+        await tick(p, ctx.clock)
+        assert await offer(p, "story", "breaking") == "accepted"
+    await tick(p, ctx.clock)
+    mentioned = outcome in {"sent", "unknown"}
+    assert ("可能提过" in ctx.proactive.calls[-1][1]) == mentioned
+    assert ctx.proactive.materials[-1]["events"][0].get("possibly_mentioned", False) == mentioned
+    assert ctx.proactive.calls[-1][2] == "news_breaking"
+    assert (await status(p))["brief_sent_today"] == mentioned
+    assert (await status(p))["openings_today"] == int(mentioned)
+    assert await offer(p, "story", "breaking") == "duplicate"
+    assert await offer(p, "story", "brief") == "duplicate"
+
+
+@pytest.mark.parametrize("kind", ["private", "group"])
+async def test_breaking_waits_for_visible_owner_speech_even_during_companion_rest(tmp_path, kind):
+    p, ctx = await setup(tmp_path, start=local("2026-06-15", "02:00"), topics=[])
+    await offer(p, "night", "breaking")
+    await p.incoming(incoming(ctx.clock, actor="member", kind="group"))
+    await tick(p, ctx.clock)
+    assert (await status(p))["waiting_for_daylight"] == 1 and not ctx.proactive.calls
+    ctx.clock.advance(60)
+    await p.incoming(incoming(ctx.clock, kind=kind))
+    await tick(p, ctx.clock)
+    assert (await status(p))["waiting_for_daylight"] == 0
+    assert ctx.proactive.calls[-1][2] == "news_breaking"
+
+
+async def test_breaking_always_at_night_bypasses_backoff_gap_and_daily_limits(tmp_path):
+    p, ctx = await setup(
+        tmp_path,
+        start=local("2026-06-15", "02:00"),
+        topics=[],
+        breaking_at_night="always",
+        max_attempts_per_day=1,
+        max_openings_per_day=1,
+    )
+    for key in ("alpha", "beta"):
+        assert await offer(p, key, "breaking") == "accepted"
+        await tick(p, ctx.clock)
+        finish(ctx, "sent")
+        await tick(p, ctx.clock)
+        ctx.clock.advance(60)
+    row = await status(p)
+    assert row["unanswered"] == row["breaking_today"] == row["openings_today"] == 2
+
+
+async def test_daily_brief_waits_for_chat_and_unanswered_backoff_limits_material_and_expires(
+    tmp_path,
+):
+    p, ctx = await setup(tmp_path, topics=[], backoff_minutes=[120])
+    for index in range(7):
+        assert await offer(p, f"brief-{index}", "brief") == "accepted"
+    await offer(p, "early", "breaking")
+    await tick(p, ctx.clock)
+    finish(ctx, "sent")
+    await tick(p, ctx.clock)
+    ctx.clock.set(local("2026-06-15", "11:00"))
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.calls) == 1
+    ctx.clock.set(local("2026-06-15", "12:00"))
+    await p.incoming(incoming(ctx.clock))
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.calls) == 1
+    ctx.clock.advance(600)
+    ctx.proactive.admission = "paused"
+    await tick(p, ctx.clock)
+    assert (await status(p))["attempts_today"] == 1
+    ctx.proactive.admission = "accepted"
+    ctx.clock.advance(60)
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.materials[-1]["events"]) == 5
+    assert all(
+        word in ctx.proactive.calls[-1][1] for word in ("一到两件", "不说", "亲身", "来源", "原文")
+    )
+    finish(ctx, "declined")
+    ctx.clock.advance(60)
+    await tick(p, ctx.clock)
+    assert not (await status(p))["brief_sent_today"]
+    ctx.clock.set(local("2026-06-15", "14:00"))
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.calls) == 3
+
+
+async def test_news_three_day_timeline(tmp_path):
+    p, ctx = await setup(
+        tmp_path,
+        start=local("2026-06-15", "00:00"),
+        topics=["good_morning"],
+        morning_jitter_minutes=0,
+    )
+    model, channel = TimelineModel(ctx), TimelineChannel(ctx)
+    offers = {
+        (15, "08:30"): ("paper", "brief"),
+        (15, "11:55"): ("release", "breaking"),
+        (16, "02:10"): ("awake", "breaking"),
+        (17, "02:10"): ("asleep", "breaking"),
+        (17, "03:00"): ("asleep-second", "breaking"),
+    }
+    waits = {}
+    timeline = []
+    for minute in range(3 * 24 * 60):
+        now = ctx.clock.now().astimezone(TZ)
+        slot = (now.day, now.strftime("%H:%M"))
+        if slot == (15, "08:30"):
+            assert (
+                await offer(p, "old", "brief", at=now - timedelta(days=2), source_count=6)
+                == "accepted"
+            )
+        if slot == (16, "02:00"):
+            await p.incoming(incoming(ctx.clock, kind="group"))
+        if slot in offers:
+            key, tier = offers[slot]
+            assert await offer(p, key, tier) == "accepted"
+            if tier == "brief":
+                waits[key] = "等待早安后的随机简报时间"
+            elif not p.schedule.breaking_ready(now):
+                waits[key] = "主人休息且最近30分钟未发言，等休息结束"
+            else:
+                waits[key] = "主人刚在群里发言" if slot[0] == 16 else "白天直接说"
+        count = len(ctx.proactive.calls)
+        await tick(p, ctx.clock)
+        if count != len(ctx.proactive.calls):
+            _, topic, reason, tools = ctx.proactive.calls[-1]
+            trace = f"{count + 1:032x}"
+            material = ctx.proactive.materials[-1]
+            request = topic + "\n" + json.dumps(material, ensure_ascii=False)
+            ctx.proactive.outcomes[trace] = await model_outcome(
+                ctx.clock, model, channel, trace, request, "sent"
+            )
+            assert tools and ctx.proactive.outcomes[trace].status == "sent"
+            if material:
+                for row in material["events"]:
+                    key = row["title"].split()[-1]
+                    timeline.append((key, reason, now.strftime("%m-%d %H:%M"), waits[key]))
+        ctx.clock.advance(60)
+    assert {r[0] for r in timeline} == {v[0] for v in offers.values()}
+    assert [r[2] for r in timeline[1:]] == [
+        "06-15 11:55",
+        "06-16 02:10",
+        "06-17 08:00",
+        "06-17 08:00",
+    ]
+    assert "06-15 10:00" <= timeline[0][2] <= "06-15 11:00"
+    assert len(channel.sent) == len(model.requests) == len(ctx.proactive.calls)
+    for row in timeline:
+        print(" | ".join(row))
+
+
+async def test_daily_brief_ranks_fresh_events_and_retires_old_candidates(tmp_path):
+    now = local("2026-06-15", "12:00")
+    p, ctx = await setup(tmp_path, topics=[], start=now)
+    # Put the least popular and the expired item first in persistent order.
+    candidates = [
+        ("last", 1, 0),
+        ("old", 8, 24 * 60 + 1),
+        ("older", 2, 90),
+        ("edge", 4, 24 * 60),
+        ("newer", 2, 80),
+        ("popular", 5, 100),
+        ("third", 3, 20),
+    ]
+    for key, count, minutes in candidates:
+        assert (
+            await offer(p, key, "brief", at=now - timedelta(minutes=minutes), source_count=count)
+            == "accepted"
+        )
+    # Restart from a schedule written before ranking metadata was stored in it.
+    saved = await ctx.storage.get("schedule")
+    for item in saved["news"].values():
+        item.pop("event_at", None)
+        item.pop("source_count", None)
+    await ctx.storage.set("schedule", saved)
+    p = load_plugin()
+    await p.start(ctx)
+    await tick(p, ctx.clock)
+    assert [e["title"].split()[-1] for e in ctx.proactive.materials[-1]["events"]] == [
+        "popular",
+        "edge",
+        "third",
+        "newer",
+        "older",
+    ]
+    assert len(p.schedule.state.news) == 6
+    assert await offer(p, "old", "brief") == "duplicate"
+
+
+@pytest.mark.parametrize("outcome,wait", [("failed", 30), ("interrupted", 30), ("declined", 60)])
+async def test_breaking_retry_is_per_event_and_other_news_can_go_first(tmp_path, outcome, wait):
+    p, ctx = await setup(tmp_path, topics=[], retry_after_decline_hours=[1, 1])
+    await offer(p, "held", "breaking")
+    await tick(p, ctx.clock)
+    finish(ctx, outcome)
+    await tick(p, ctx.clock)
+    await offer(p, "other", "breaking")
+    await tick(p, ctx.clock)
+    assert [r["title"] for r in ctx.proactive.materials[-1]["events"]] == ["演示新闻 other"]
+    finish(ctx, "sent")
+    ctx.clock.advance(wait * 60 - 1)
+    await tick(p, ctx.clock)
+    assert len(ctx.proactive.calls) == 2
+    ctx.clock.advance(1)
+    await tick(p, ctx.clock)
+    assert [r["title"] for r in ctx.proactive.materials[-1]["events"]] == ["演示新闻 held"]
+
+
+async def test_uncertain_submit_without_trace_never_replays_its_brief(tmp_path):
+    p, ctx = await setup(tmp_path, topics=[])
+    await offer(p, "story", "brief")
+    ctx.clock.set(local("2026-06-15", "11:00"))
+    opening = p.schedule.next_topic(ctx.clock.now())
+    p.schedule.reserve(opening, ctx.clock.now())
+    await p.save()
+    p = load_plugin()
+    await p.start(ctx)
+    await offer(p, "other", "brief")
+    await tick(p, ctx.clock)
+    assert not ctx.proactive.calls and not (await status(p))["brief_sent_today"]
+    assert await offer(p, "story", "breaking") == "accepted"
+    await tick(p, ctx.clock)
+    assert "可能提过" in ctx.proactive.calls[-1][1]
+
+
+async def test_news_material_expires_and_old_schedule_still_accepts_offers(tmp_path):
+    p, ctx = await setup(tmp_path, topics=[])
+    # 老版本的状态里只有节奏和普通话题，不含新闻字段。
+    saved = await ctx.storage.get("schedule")
+    for field in (
+        "news",
+        "owner_seen_at",
+        "greeting_sent_at",
+        "brief_delay_minutes",
+        "breaking_today",
+        "brief_sent_today",
+        "brief_unconfirmed_today",
+    ):
+        del saved[field]
+    await ctx.storage.set("schedule", saved)
+    p = load_plugin()
+    await p.start(ctx)
+    assert (await p.service("offer", {}))["status"] == "unavailable"
+    await offer(p, "aged", "brief")
+    ctx.clock.advance(7 * 24 * 3600)
+    await tick(p, ctx.clock)
+    assert not ctx.proactive.calls and not p.schedule.state.news
+    assert not any(key.endswith(".brief") for key in await ctx.storage.keys("news."))
+    assert await offer(p, "aged", "brief") == "duplicate"
+    assert await offer(p, "aged", "breaking") == "accepted"
+    await tick(p, ctx.clock)
+    assert "可能提过" not in ctx.proactive.calls[-1][1]

@@ -297,6 +297,10 @@ class Companion:
             return dict(state="stopped", stopped=[], not_stopped={}, reason=None)
         agent, kernel = self.agent, self.kernel
         agent.shutting_down = True
+        self.host.plugin_models.pop(self.cid, None)
+        for (cid, _), runtime in self.host.runtimes.items():
+            if cid == self.cid:
+                runtime.model_lifetime.cancel("shutdown")
         await agent.prewrites.stop()
         if orphan:
             kernel.delivery.session_ending = True
@@ -506,6 +510,7 @@ class Companion:
         counts = self.kernel.ledger.health_counts()
         counts["safety_belt"] = self.agent.safety_belt.read_status()
         counts["attention"] = self.agent.judgments.read_status()
+        counts["plugin_model_usage"] = self.agent.plugin_models.read_status()
         notices = set()
         if self.report:
             from clytie.memory.status import notices as memory_notices

@@ -37,6 +37,9 @@ HEALTH_SQL = (
     "CREATE INDEX IF NOT EXISTS proactive_calls_by_day ON invocation("
     "json_extract(data,'$.proactive_day'),json_extract(data,'$.tool')) "
     "WHERE json_extract(data,'$.proactive_day') IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS plugin_usage_by_day ON audit("
+    "json_extract(data,'$.day'), json_extract(data,'$.plugin')) "
+    "WHERE json_extract(data,'$.kind')='model.usage' AND json_extract(data,'$.purpose')='plugin'",
     "CREATE INDEX IF NOT EXISTS health_tasks ON record("
     "json_extract(data,'$.kind'),json_extract(data,'$.exec_status'))",
     "CREATE INDEX IF NOT EXISTS health_sending ON intent(json_extract(data,'$.status'))",

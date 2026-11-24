@@ -15,6 +15,7 @@ from types import ModuleType, SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from clytie.config import _default_config, _Reader, deep_merge, thaw
+from clytie.sdk import CancelToken
 from clytie.sdk.behavior import (
     Judge,
     ReactOnly,
@@ -39,7 +40,7 @@ from .dependencies import DependencyError, resolve, stop_order
 from .journal import Journals
 from .locking import MetadataLockTimeout, OperationBusy, Operations, file_lock, process_identity
 from .manifests import discover
-from .memory import bind_scene
+from .memory import bind_scene, current_consolidator, current_scene
 from .migration import MigrationMixin
 from .registry import assemble, validate_result
 from .snapshots import UpgradeSnapshots, atomic_write, canonical, contained, identifier
@@ -109,6 +110,7 @@ class Runtime:
     stop_errors: list = field(default_factory=list)
     unit_role: str | None = None
     account_ref: str | None = None
+    model_lifetime: CancelToken = field(default_factory=CancelToken)
     owned_http: object = None
     owned_websocket: object = None
 
@@ -174,6 +176,7 @@ class PluginHost(MigrationMixin):
         self.settings, self.private_scenes, self.states = {}, {}, {}
         self.unit_configs, self.identities = {}, {}
         self.recollection_models = {}
+        self.plugin_models = {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
         self.operations = Operations(self.home, self.log, self.clock)
@@ -659,8 +662,10 @@ class PluginHost(MigrationMixin):
                     unit.owned_websocket = backends["websocket"]
                 if isinstance(backends.get("http"), HttpBackend):
                     unit.owned_http = backends["http"]
-                if key in self.recollection_models:
-                    backends["model"] = self.recollection_models[key]
+                if "model.invoke" in manifest.data["permissions"] and "model" not in backends:
+                    backends["model"] = SimpleNamespace(
+                        generate=partial(self._plugin_generate, runtime)
+                    )
                 if "memory" not in backends and (
                     key[0] in self.memory_config or key[0] in self.memory_resources
                 ):
@@ -709,6 +714,8 @@ class PluginHost(MigrationMixin):
 
             runtime.failure_code = exc.code if isinstance(exc, PluginUnavailable) else None
             metadata_timeout = isinstance(exc, MetadataLockTimeout)
+
+            runtime.model_lifetime.cancel("start_failed")
 
             async def cleanup_start():
                 for unit in reversed(runtime.units or [runtime]):
@@ -796,6 +803,7 @@ class PluginHost(MigrationMixin):
 
     async def _stop_runtime(self, runtime, reason):
         companion_id, plugin_id = runtime.companion_id, runtime.manifest.id
+        runtime.model_lifetime.cancel("plugin_disabled")
         if companion_id in self.schedulers:
             await self.schedulers[companion_id].remove(plugin_id)
         runtime.stop_errors.clear()
@@ -842,6 +850,19 @@ class PluginHost(MigrationMixin):
                 if unit.owned_websocket is not None:
                     await unit.owned_websocket.close()
             runtime.status, runtime.registrations = "disabled", ()
+
+    async def _plugin_generate(self, runtime, req, cancel, *, purpose):
+        from clytie.agent.plugin_models import error_turn
+
+        runtime.model_lifetime.raise_if_cancelled()
+        cid, pid = runtime.companion_id, runtime.manifest.id
+        memory_model = self.recollection_models.get((cid, pid))
+        if memory_model is not None and current_consolidator() == (cid, pid):
+            return await memory_model.generate(req, cancel, purpose=purpose, scene=current_scene())
+        models = self.plugin_models.get(cid)
+        if models is None:
+            return error_turn("model_unavailable")
+        return await models.generate(pid, runtime.model_lifetime, req, cancel, purpose=purpose)
 
     def registrations(self, companion_id, point=None):
         return tuple(
@@ -930,7 +951,12 @@ class PluginHost(MigrationMixin):
             scene = "public_group"
             conversation_id = None
         try:
-            with bind_scene(scene, conversation_id):
+            consolidator = (
+                (runtime.companion_id, runtime.manifest.id)
+                if point == "memory.consolidator" and method == "run"
+                else None
+            )
+            with bind_scene(scene, conversation_id, consolidator=consolidator):
                 function = (
                     getattr(registration.implementation, method)
                     if method

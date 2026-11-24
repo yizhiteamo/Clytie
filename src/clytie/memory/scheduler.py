@@ -32,7 +32,7 @@ class RecollectionModel:
     def __init__(self, agent):
         self.agent = agent
 
-    async def generate(self, request, cancel, *, purpose):
+    async def generate(self, request, cancel, *, purpose, scene="public_group"):
         agent = self.agent
         if getattr(agent, "model_health", "unknown") == "auth_invalid":
             from clytie.sdk.types import ModelTurn
@@ -47,11 +47,7 @@ class RecollectionModel:
                 "messages": [
                     ChatMessage(
                         role="system",
-                        parts=[
-                            TextPart(
-                                text=agent.persona.render(getattr(self, "scene", "public_group"))
-                            )
-                        ],
+                        parts=[TextPart(text=agent.persona.render(scene))],
                     ),
                     *request.messages,
                 ]
@@ -403,7 +399,6 @@ class Recollector:
                     )
                     if reg is None:
                         raise ValueError("consolidator unavailable")
-                    self.model.scene = conversation.scene
                     items = await self.agent.host.invoke(
                         self.agent.cid,
                         reg.plugin_id,

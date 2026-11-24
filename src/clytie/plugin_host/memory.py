@@ -13,6 +13,7 @@ from .surface import surface
 class _Scope:
     scene: str
     conversation_id: str | None = None
+    consolidator: tuple[str, str] | None = None
     active: bool = True
 
 
@@ -20,8 +21,8 @@ _current: ContextVar[_Scope | None] = ContextVar("plugin_call_scene", default=No
 
 
 @contextmanager
-def bind_scene(scene="public_group", conversation_id=None):
-    scope = _Scope(scene, conversation_id)
+def bind_scene(scene="public_group", conversation_id=None, *, consolidator=None):
+    scope = _Scope(scene, conversation_id, consolidator)
     token = _current.set(scope)
     try:
         yield
@@ -33,6 +34,11 @@ def bind_scene(scene="public_group", conversation_id=None):
 def current_scene():
     scope = _current.get()
     return scope.scene if scope is not None and scope.active else "public_group"
+
+
+def current_consolidator():
+    scope = _current.get()
+    return scope.consolidator if scope is not None and scope.active else None
 
 
 def current_conversation():

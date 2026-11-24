@@ -153,6 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         print("  主人私聊未登记，已跳过私聊提醒")
             for key, usage in companion.get("attention", {}).items():
                 print(f"  轻量判断：{key} 当天 {usage['count']} 次，共 {usage['tokens']} token")
+            for pid, usage in companion.get("plugin_model_usage", {}).items():
+                print(f"  插件模型调用：{pid} 当天 {usage['count']} 次，共 {usage['tokens']} token")
         for error in report.errors:
             actual = json.dumps(error.to_dict()["actual"], ensure_ascii=False)
             print(f"{error.file}#{error.pointer}：期望 {error.expected}；实际 {actual}")

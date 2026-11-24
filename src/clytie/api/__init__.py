@@ -42,7 +42,12 @@ def local_status(home: str | Path | None = None, *, repo_root: Path | None = Non
                 ),
                 **{
                     key: runtime[key]
-                    for key in ("safety_belt", "attention", "storage_observed_at")
+                    for key in (
+                        "safety_belt",
+                        "attention",
+                        "plugin_model_usage",
+                        "storage_observed_at",
+                    )
                     if key in runtime
                 },
             }
