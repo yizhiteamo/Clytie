@@ -352,7 +352,7 @@
 
 对话主干每拿到一个模型结果，就写一条 `model.usage` 审计。复用现有 audit，不迁移账本，不新增查询接口；用量的读取和提醒放到「额度感知」里程碑。
 
-普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。轻量判断和发送前复核以 `purpose=attention` 记录 token、耗时与结构化结果，状态按会话汇总当天调用数和 token。未按时拿到结果的判断记为 `attention.failed`，计入次数，不含 token。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。总用量 = `model.usage` + `memory.recollect_model`。
+普通回复、工具循环的每一轮和出站改写都在 `_generate` 中记用量。轻量判断和发送前复核以 `purpose=attention` 记录 token、耗时与结构化结果，状态按会话汇总当天调用数和 token。未按时拿到结果的判断记为 `attention.failed`，计入次数，不含 token。后台形象自检另写 `purpose=appearance_check` 的同类审计，只记用量和调用元数据。回想模型和记忆整理插件的 `ctx.model` 走 `RecollectionModel`，已经写 `memory.recollect_model`（含 usage），这里不再重复记录。其他插件的 `ctx.model` 按 runtime-services-spec §6 记 `model.usage`（`purpose = plugin`，B9b）。总用量 = `model.usage` + `memory.recollect_model`。
 
 **字段**：`trace_id`、`purpose`（`reply`、`rewrite`、`attention` 或 `appearance_check`）、`plugin`（模型插件 id）、`input_tokens`、`output_tokens`、`finish`、`timing`（`on_time` 或 `late`）。不记录消息、回复、工具参数和凭据。
 
