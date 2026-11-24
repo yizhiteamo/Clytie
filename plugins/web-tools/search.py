@@ -3,7 +3,7 @@
 import asyncio
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 
 from clytie.sdk import CredentialUnavailable
 from clytie.sdk.types import Material, MaterialSource
@@ -62,7 +62,8 @@ class OpenAISearch:
         self.ctx = ctx
 
     async def search(self, query, recent_days, max_results):
-        today = self.ctx.clock.now().date()
+        local_tz = self.ctx.clock.local_tz
+        today = self.ctx.clock.now().astimezone(local_tz).date()
         since = today - timedelta(days=recent_days - 1) if recent_days else None
         prompt = (
             f"Search for {query!r}. Return a short summary with an inline citation for each source."
@@ -114,11 +115,14 @@ class OpenAISearch:
                     hit.published_at = await fetch(self.ctx, hit.url, metadata=True)
                 except (WebError, OSError, ValueError):
                     pass
-            if since and (
-                not hit.published_at
-                or not since <= date.fromisoformat(hit.published_at[:10]) <= today
-            ):
-                return None
+            if since:
+                if not hit.published_at:
+                    return None
+                published = datetime.fromisoformat(hit.published_at)
+                if published.tzinfo is not None:
+                    published = published.astimezone(local_tz)
+                if not since <= published.date() <= today:
+                    return None
             return hit
 
         checked = [h for h in await asyncio.gather(*(verify(h) for h in hits)) if h][:max_results]

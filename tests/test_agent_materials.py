@@ -170,3 +170,25 @@ async def test_invalid_material_number_and_24_hour_limit(tmp_path):
         assert not any(t.name == "core_recall_material" for t in model.requests[-1].tools)
     finally:
         await finish(agent)
+
+
+@pytest.mark.parametrize("number,status", [(1, "ok"), (2, "error"), ("fictional-text", "error")])
+async def test_recall_material_audits_only_number_and_status(tmp_path, number, status):
+    agent, _, model = await make_agent(tmp_path, tool_round("echo", {"text": "fictional"}))
+    try:
+        await stored(agent, ARTICLE)
+        agent.clock.advance(16 * 60)
+        model.turns.append(tool_round("core_recall_material", {"number": number}))
+        trace = await agent.receive(event(agent))
+        await agent.drain()
+        (audit,) = [
+            row
+            for row in agent.ledger.rows("audit")
+            if row["kind"] == "core.tool" and row["trace_id"] == trace
+        ]
+        assert set(audit) == {"kind", "trace_id", "at", "tool", "number", "status"}
+        assert audit["tool"] == "core_recall_material"
+        assert audit["number"] == (number if isinstance(number, int) else None)
+        assert audit["status"] == status
+    finally:
+        await finish(agent)

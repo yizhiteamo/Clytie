@@ -214,8 +214,10 @@ async def fetch(ctx, url, *, metadata=False):
     except ValueError as exc:
         if "max_bytes" in str(exc):
             raise WebError("too_large") from exc
-        if str(exc) == "blocked_address" or "redirect" in str(exc):
+        if str(exc) == "blocked_address":
             raise WebError("blocked_address") from exc
+        if str(exc) in {"HTTP redirect limit exceeded", "HTTP redirect scheme downgrade forbidden"}:
+            raise WebError("redirect_failed") from exc
         raise WebError("fetch_failed") from exc
     except OSError as exc:
         raise WebError("fetch_failed") from exc

@@ -1345,7 +1345,7 @@ class Agent:
                     token.raise_if_cancelled()
                     if call.tool == RECALL.name and RECALL in specs:
                         result = await self.kernel.persist(
-                            trace, materials.recall, self.ledger, call
+                            trace, self._recall_material, trace, materials, call
                         )
                     elif call.tool == VIEW.name and VIEW in specs:
                         valid = not call.arguments
@@ -1646,6 +1646,19 @@ class Agent:
                 call_id=call.call_id,
                 status="ok",
                 content="这件事已经在做了 " + str(result["task_id"]),
+            )
+        return result
+
+    def _recall_material(self, trace, materials, call):
+        with self.ledger.transaction():
+            result = materials.recall(self.ledger, call)
+            number = call.arguments.get("number")
+            self.ledger.audit(
+                "core.tool",
+                trace_id=trace,
+                tool=call.tool,
+                number=number if type(number) is int else None,
+                status=result.status,
             )
         return result
 

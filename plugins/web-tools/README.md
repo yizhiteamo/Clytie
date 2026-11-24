@@ -15,3 +15,5 @@ plugins:
 `model` 填支持联网搜索的模型，`credential` 填实例中已授权给此插件的凭据引用。查询通过 Responses API 的 `web_search` 工具发送。指定 `recent_days` 后，只保留能核实发布时间的结果。搜索结果页的元数据核实也受公网限制。
 
 `read_url` 支持 HTML、XHTML 和纯文本。读取仅允许公网 HTTP 或 HTTPS 的 80、443 端口，最多跟随三次重定向。下载、内容类型、登录和正文提取错误会返回给模型。同一会话可在最近 24 小时内再次参考已读资料。
+
+超过三次重定向或从 HTTPS 降级到 HTTP 时返回 `redirect_failed`。目标地址被公网检查拒绝时返回 `blocked_address`，包括重定向到非公网地址的情况。

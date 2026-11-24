@@ -1,7 +1,7 @@
 import importlib.util
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,7 +40,7 @@ class HTTP:
         return item
 
 
-async def run(name, args, *replies):
+async def run(name, args, *replies, local_tz=timezone.utc):
     plugin = load_plugin()
     http = HTTP(replies)
 
@@ -52,7 +52,9 @@ async def run(name, args, *replies):
         config={"backend": "openai", "model": "fictional", "credential": "search_key"},
         http=http,
         credentials=SimpleNamespace(read=credential),
-        clock=SimpleNamespace(now=lambda: datetime(2026, 1, 4, 15, tzinfo=timezone.utc)),
+        clock=SimpleNamespace(
+            now=lambda: datetime(2026, 1, 4, 16, tzinfo=timezone.utc), local_tz=local_tz
+        ),
     )
     await plugin.start(ctx)
     tool = plugin.create_read() if name == "read_url" else plugin.create_search()
@@ -66,8 +68,8 @@ async def run(name, args, *replies):
     "reply,expected",
     [
         (ValueError("blocked_address"), "blocked_address"),
-        (ValueError("HTTP redirect limit exceeded"), "blocked_address"),
-        (ValueError("HTTP redirect scheme downgrade forbidden"), "blocked_address"),
+        (ValueError("HTTP redirect limit exceeded"), "redirect_failed"),
+        (ValueError("HTTP redirect scheme downgrade forbidden"), "redirect_failed"),
         (TimeoutError(), "timeout"),
         (ValueError("HTTP response exceeds max_bytes"), "too_large"),
         (response(content_type="image/png"), "not_text"),
@@ -179,6 +181,20 @@ async def test_search_all_dates_excluded():
     )
     assert result.material is None
     assert result.content == "没有找到能确认在这段时间内发布的结果"
+
+
+async def test_recent_days_uses_instance_midnight_for_request_and_results():
+    result, calls = await run(
+        "search_web",
+        {"query": "fictional", "recent_days": 1},
+        citations(),
+        response(b'<time datetime="2026-01-04T16:00:00Z"></time>'),
+        response(b'<time datetime="2026-01-04"></time>'),
+        local_tz=timezone(timedelta(hours=8)),
+    )
+    assert "from 2026-01-05 through 2026-01-05" in json.loads(calls[0][2]["body"])["input"]
+    assert result.status == "ok"
+    assert [source.url for source in result.material.sources] == ["https://one.example/a"]
 
 
 @pytest.mark.parametrize(
