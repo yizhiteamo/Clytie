@@ -55,6 +55,37 @@ async def test_optional_service_recent_tool_and_status_survive_restart(tmp_path)
     assert (await restored.status(None))["json"]["events_today"] == 0
 
 
+async def test_old_major_on_first_poll_and_undated_major_after_restart(tmp_path):
+    source = dict(id="publisher", type="rss", url="https://lab.example/rss", major=True)
+    dated = rss().replace(b"</item>", b"<pubDate>Sun, 01 Mar 2026 08:00:00 GMT</pubDate></item>")
+    undated = rss("Fictional robot release", "https://lab.example/robot")
+    offer = AsyncMock(return_value={"status": "unavailable"})
+    ctx = context(
+        tmp_path,
+        [source],
+        HTTP(response(dated), response(undated), response(undated)),
+        offers=offer,
+    )
+    feed = plugin.Plugin()
+    await feed.start(ctx)
+    await feed.on_tick(None)
+    ctx.model.generate.assert_not_awaited()
+    assert all(call.args[1]["tier"] != "breaking" for call in offer.await_args_list)
+    ctx.clock.advance(600)
+    await feed.on_tick(None)
+    assert offer.await_args.args[1]["tier"] == "breaking"
+    await feed.stop()
+
+    ctx.clock.advance(2 * 24 * 3600)
+    offer.reset_mock()
+    restored = plugin.Plugin()
+    await restored.start(ctx)
+    await restored.on_tick(None)
+    ctx.model.generate.assert_awaited_once()
+    assert all(call.args[1]["tier"] != "breaking" for call in offer.await_args_list)
+    assert len((await restored.material()).sources) == 2
+
+
 async def test_event_offers_upgrade_with_public_fields_and_restart_dedup(tmp_path):
     sources = [
         dict(id="configured-alias", type="hackernews", url="https://stories.example/v0/front.json"),

@@ -597,7 +597,7 @@ async def test_three_day_timeline(tmp_path):
         print(" | ".join(row))
 
 
-async def offer(plugin, key, tier):
+async def offer(plugin, key, tier, *, at=None, source_count=1):
     return (
         await plugin.service(
             "offer",
@@ -606,8 +606,11 @@ async def offer(plugin, key, tier):
                 "tier": tier,
                 "title": "演示新闻 " + key,
                 "summary": "虚构的公开摘要",
-                "sources": [{"name": "Example", "url": "https://example.org/story/" + key}],
-                "time": plugin.ctx.clock.now().isoformat(),
+                "sources": [
+                    {"name": f"Site {i}", "url": f"https://site{i}.example/story/{key}"}
+                    for i in range(source_count)
+                ],
+                "time": (at or plugin.ctx.clock.now()).isoformat(),
             },
         )
     )["status"]
@@ -774,6 +777,11 @@ async def test_news_three_day_timeline(tmp_path):
     for minute in range(3 * 24 * 60):
         now = ctx.clock.now().astimezone(TZ)
         slot = (now.day, now.strftime("%H:%M"))
+        if slot == (15, "08:30"):
+            assert (
+                await offer(p, "old", "brief", at=now - timedelta(days=2), source_count=6)
+                == "accepted"
+            )
         if slot == (16, "02:00"):
             await p.incoming(incoming(ctx.clock, kind="group"))
         if slot in offers:
@@ -812,6 +820,44 @@ async def test_news_three_day_timeline(tmp_path):
     assert len(channel.sent) == len(model.requests) == len(ctx.proactive.calls)
     for row in timeline:
         print(" | ".join(row))
+
+
+async def test_daily_brief_ranks_fresh_events_and_retires_old_candidates(tmp_path):
+    now = local("2026-06-15", "12:00")
+    p, ctx = await setup(tmp_path, topics=[], start=now)
+    # Put the least popular and the expired item first in persistent order.
+    candidates = [
+        ("last", 1, 0),
+        ("old", 8, 24 * 60 + 1),
+        ("older", 2, 90),
+        ("edge", 4, 24 * 60),
+        ("newer", 2, 80),
+        ("popular", 5, 100),
+        ("third", 3, 20),
+    ]
+    for key, count, minutes in candidates:
+        assert (
+            await offer(p, key, "brief", at=now - timedelta(minutes=minutes), source_count=count)
+            == "accepted"
+        )
+    # Restart from a schedule written before ranking metadata was stored in it.
+    saved = await ctx.storage.get("schedule")
+    for item in saved["news"].values():
+        item.pop("event_at", None)
+        item.pop("source_count", None)
+    await ctx.storage.set("schedule", saved)
+    p = load_plugin()
+    await p.start(ctx)
+    await tick(p, ctx.clock)
+    assert [e["title"].split()[-1] for e in ctx.proactive.materials[-1]["events"]] == [
+        "popular",
+        "edge",
+        "third",
+        "newer",
+        "older",
+    ]
+    assert len(p.schedule.state.news) == 6
+    assert await offer(p, "old", "brief") == "duplicate"
 
 
 @pytest.mark.parametrize("outcome,wait", [("failed", 30), ("interrupted", 30), ("declined", 60)])

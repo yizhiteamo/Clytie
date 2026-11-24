@@ -5,7 +5,9 @@ import json
 from datetime import datetime
 from urllib.parse import urlsplit
 
-WEEK = 7 * 24 * 3600
+from .schedule import DAY
+
+WEEK = 7 * DAY
 STORAGE_LIMIT = 1024 * 1024
 
 
@@ -57,6 +59,7 @@ class News:
             "mentioned": prior.get("mentioned", False),
         }
         if tier == "brief":
+            candidate.update(event_at=stamp, source_count=len(public["sources"]))
             self.schedule.brief_time(now)
         snapshot = self.schedule.dump()
         snapshot["news"][key] = candidate
@@ -76,9 +79,20 @@ class News:
             await self.storage.delete("news." + key + ".brief")
         return "accepted"
 
-    async def clean_orphans(self):
-        # 只清理在两次写入之间退出所留下的材料。收据不含供阅读的内容。
+    async def restore(self):
         active = self.schedule.state.news
+        for key, item in list(active.items()):
+            if item["tier"] == "brief" and "event_at" not in item:
+                public = await self.storage.get("news." + key + ".brief")
+                if public is None and await self.storage.get("news." + key):
+                    # 上次已清理材料并留下收据，调度状态还没来得及保存。
+                    del active[key]
+                    continue
+                item.update(
+                    event_at=datetime.fromisoformat(public["time"]).timestamp(),
+                    source_count=len(public["sources"]),
+                )
+        # 清理两次写入之间退出所留下的材料，保留去重收据。
         for stored in await self.storage.keys("news."):
             parts = stored.split(".")
             if len(parts) == 3 and (parts[1] not in active or active[parts[1]]["tier"] != parts[2]):
@@ -93,7 +107,10 @@ class News:
             in_flight.update(state.submitting.get("news_keys", []))
         changed = False
         for key, item in list(state.news.items()):
-            if key in in_flight or (not item.get("closed") and item["expires"] > now.timestamp()):
+            stale_brief = item["tier"] == "brief" and now.timestamp() - item["event_at"] > DAY
+            if key in in_flight or (
+                not item.get("closed") and not stale_brief and item["expires"] > now.timestamp()
+            ):
                 continue
             await self.storage.set(
                 "news." + key, {"tier": item["tier"], "mentioned": item["mentioned"]}

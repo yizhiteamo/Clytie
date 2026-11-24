@@ -54,6 +54,20 @@ async def test_three_sites_and_fast_hn_top_three_are_candidates():
     assert judge.await_count == 2
 
 
+@pytest.mark.parametrize("signal", ["major", "sites", "hackernews"])
+def test_urgent_uses_two_hour_window_for_each_signal(signal):
+    stamp = NOW.timestamp()
+    row = dict(
+        at=stamp - 7200, publisher="first", major=signal == "major", kind=signal, rank=2, rate=70
+    )
+    entries = [row]
+    if signal == "sites":
+        entries += [dict(row, publisher=site, at=stamp) for site in ("second", "third")]
+    assert ranking.urgent(entries, stamp)
+    row["at"] -= 1
+    assert not ranking.urgent(entries, stamp)
+
+
 async def test_daily_candidates_and_passive_entries():
     book = events.EventBook({})
     hf = add(

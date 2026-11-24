@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
 
+DAY = 24 * 3600
 TOPICS = ("good_morning", "long_silence", "festival")
 OWNER_REST = {"from": "00:00", "to": "08:00", "active_minutes": 30}
 REST = {
@@ -306,13 +307,20 @@ class Schedule:
         return None
 
     def news_keys(self, tier, stamp):
-        return [
+        keys = [
             key
             for key, item in self.state.news.items()
             if item["tier"] == tier
             and not item.get("closed")
             and item["due"] <= stamp < item["expires"]
         ]
+        if tier == "brief":
+            news = self.state.news
+            keys = [key for key in keys if stamp - DAY <= news[key]["event_at"] <= stamp]
+            keys.sort(
+                key=lambda key: (news[key]["source_count"], news[key]["event_at"]), reverse=True
+            )
+        return keys
 
     def waiting_for_daylight(self, now):
         if self.breaking_ready(now):

@@ -7,11 +7,12 @@ from clytie.sdk.types import Material, MaterialSource
 
 
 def urgent(entries, stamp):
-    sites = {row["publisher"] for row in entries if stamp - 7200 <= row["at"] <= stamp}
+    recent = [row for row in entries if stamp - 7200 <= row["at"] <= stamp]
+    sites = {row["publisher"] for row in recent}
     return len(sites) >= 3 or any(
         row["major"]
         or (row["kind"] == "hackernews" and 1 <= row["rank"] <= 3 and row["rate"] >= 60)
-        for row in entries
+        for row in recent
     )
 
 
@@ -43,7 +44,8 @@ async def assign(events, now, decide):
     for key, event in events.items():
         before = (event["tier"], event.get("judged_evidence"))
         rows = event["entries"]
-        if decide is not None and not event.get("judgment") and urgent(rows, now.timestamp()):
+        eligible = urgent(rows, now.timestamp())
+        if eligible and decide is not None and not event.get("judgment"):
             public = [
                 dict(title=r["title"], source=r["publisher"], summary=r["summary"])
                 for r in sorted(rows, key=lambda row: (row["at"], row["publisher"]), reverse=True)[
@@ -57,7 +59,7 @@ async def assign(events, now, decide):
                     event["judgment"] = await decide(public) is True
                 except Exception:
                     event["judgment"] = False
-        if event.get("judgment"):
+        if eligible and event.get("judgment"):
             event["tier"] = "breaking"
         elif (
             "judgment" in event

@@ -40,7 +40,7 @@ class Plugin:
         self.news = News(self.schedule, ctx.storage)
         saved = await ctx.storage.get("schedule")
         self.schedule.start(ctx.clock.now(), saved)
-        await self.news.clean_orphans()
+        await self.news.restore()
         await self.reconcile(ctx.clock.now())
         await self.save()
 
