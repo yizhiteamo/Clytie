@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,11 +85,13 @@ def inspect_source(
 
 
 def main() -> int:
-    plugin_ids = tuple(
-        json.loads(path.read_text(encoding="utf-8"))["id"]
-        for path in sorted((ROOT / "plugins").glob("*/plugin.json"))
-    )
+    manifests = sorted((ROOT / "plugins").glob("*/plugin.json"))
+    plugin_ids = tuple(json.loads(path.read_text(encoding="utf-8"))["id"] for path in manifests)
     failures = 0
+    for path, pid in zip(manifests, plugin_ids):
+        if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+", pid):
+            print(f"{path.relative_to(ROOT).as_posix()}: plugin-id-needs-two-words: {pid}")
+            failures += 1
     count = 0
     for folder in (ROOT / "src", ROOT / "plugins"):
         for path in sorted(folder.rglob("*.py")):

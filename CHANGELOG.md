@@ -1,5 +1,11 @@
 # 变更记录
 
+## SDK 0.19.0（搜索与网页资料）
+
+- 能力工具可声明 `light`，在原回复记录内执行，沿用幂等和取消机制。
+- `network.public` 提供限制到公网的 HTTP 客户端，与 `network` 互斥。
+- `ToolResult.material` 可携带单篇网页或多来源搜索资料，供同会话后续回复使用。
+
 ## SDK 0.18.0（主动私聊）
 
 - 插件可用 `proactive.submit(..., tools=True)` 请求在主人私聊中使用显式开放的能力。提交改为返回 `ProactiveSubmission`，只有 `accepted` 带编号。插件用 `proactive.result(trace_id)` 核对自己提交的结果。

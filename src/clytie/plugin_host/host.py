@@ -139,10 +139,13 @@ class PluginHost(MigrationMixin):
                 result["proactive"] = SimpleNamespace(
                     submit=partial(submit, pid), result=partial(outcome, pid)
                 )
-            if manifest and "network" in manifest.data["permissions"] and "http" not in result:
+            permissions = set(manifest.data["permissions"]) if manifest else set()
+            if permissions & {"network", "network.public"} and "http" not in result:
                 from .http import HttpBackend
 
-                result["http"] = HttpBackend(self.clock, self.log)
+                result["http"] = HttpBackend(
+                    self.clock, self.log, public_only="network.public" in permissions
+                )
             if manifest and "network" in manifest.data["permissions"] and "websocket" not in result:
                 from .websocket import WebSocketBackend
 
@@ -970,6 +973,13 @@ class PluginHost(MigrationMixin):
                     else:
                         result = await result
                 result = validate_result(point, method, result)
+                if (
+                    point == "tool"
+                    and method == "execute"
+                    and registration.declaration.get("light")
+                    and result.assets
+                ):
+                    raise ValueError("light tools cannot return assets")
                 if isinstance(
                     result, ReactOnly
                 ) and "message.react" not in runtime.manifest.data.get("permissions", ()):

@@ -4,7 +4,7 @@ import asyncio
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from clytie.backup.coordination import run_sync
 from clytie.plugin_host.support import HostLog
@@ -195,6 +195,7 @@ class Kernel:
         *,
         schema=None,
         timeout_s=None,
+        light=False,
         finalization=None,
         proactive_limit=None,
         permission_actor=None,
@@ -222,6 +223,7 @@ class Kernel:
                 state=state,
                 schema=schema,
                 timeout_s=timeout_s,
+                light=light,
                 proactive_limit=proactive_limit,
                 permission_actor=permission_actor,
             ),
@@ -240,6 +242,7 @@ class Kernel:
         state,
         schema=None,
         timeout_s=None,
+        light=False,
         proactive_limit=None,
         permission_actor=None,
     ):
@@ -294,6 +297,7 @@ class Kernel:
             timeout=min(seconds, self.max_task_seconds),
             schema=schema or {},
             proactive_limit=proactive_limit,
+            light=light,
         )
         if inv is None:
             return Denial(
@@ -325,8 +329,7 @@ class Kernel:
             await self.reactions.request(trace, "accepted", finalization=finalization)
         token = self.tokens.setdefault(trace, CancelToken())
         invocation = Invocation.model_validate({**dump(invocation), "task_id": r["task_id"]})
-        invocations = await finalization.persist(self.ledger.rows, "invocation")
-        if len([i for i in invocations if i["trace_id"] == trace]) == 1:
+        if first:
             await self.reactions.request(trace, "running", finalization=finalization)
         if state["cancelled"]:
             result = ToolResult(
@@ -340,12 +343,29 @@ class Kernel:
             return result
         state["task"] = asyncio.current_task()
         state["executing"] = True
+
+        async def execute_capability():
+            result = await capability.execute(plan, invocation, token.child())
+            if light and result.assets:
+                return ToolResult(
+                    call_id=call.call_id,
+                    status="error",
+                    content="",
+                    data={},
+                    error={"code": "invalid_light_result", "message": ""},
+                )
+            return result
+
         with record_scope(trace):
-            task = asyncio.create_task(capability.execute(plan, invocation, token.child()))
+            task = asyncio.create_task(execute_capability())
         self.tasks[trace] = task
-        deadline = asyncio.create_task(
-            self.clock.sleep_until(datetime.fromisoformat(r["deadline"]))
+        deadline_at = (
+            datetime.fromisoformat(r["deadline"])
+            if r["deadline"]
+            else datetime.fromisoformat(inv["claimed_at"])
+            + timedelta(seconds=min(seconds, self.max_task_seconds))
         )
+        deadline = asyncio.create_task(self.clock.sleep_until(deadline_at))
         cancelled = asyncio.create_task(token.wait())
         settled = False
         task_cancelled = False

@@ -83,8 +83,15 @@ def samples():
     )
     plan = t.Plan(summary="fictional plan", heavy=False, data={"nested": [{"ready": True}]})
     denial = t.Denial(reason_code="fake-denial", message_for_model="fictional denial")
+    source = t.MaterialSource(title="Fictional article", url="https://fictional.example/article")
+    material = t.Material(title="Fictional search", text="Fictional text", sources=[source])
     result = t.ToolResult(
-        call_id=call.call_id, status="ok", content="fictional", assets=[asset], data={}
+        call_id=call.call_id,
+        status="ok",
+        content="fictional",
+        assets=[asset],
+        data={},
+        material=material,
     )
     decay = t.MemoryDecay(weight=1, frozen=False)
     record = t.MemoryRecord(
@@ -217,6 +224,8 @@ def samples():
             handler="on_service", name="fake.state", version="1.0", methods=["get"]
         ),
         t.ScheduleDeclaration(handler="on_tick", id="fake-tick", every="PT1M"),
+        source,
+        material,
     ]
 
 
@@ -234,6 +243,19 @@ def test_roundtrip_registry_covers_all_concrete_types():
         if isinstance(cls, type) and issubclass(cls, t.SDKModel) and cls is not t.SDKModel
     }
     assert {type(model) for model in samples()} == declared
+
+
+def test_material_requires_exactly_one_source_representation():
+    src = {"title": "Fictional", "url": "https://fictional.example/"}
+    assert t.Material(**src, text="sample").url == src["url"]
+    for fields in (
+        {},
+        {"sources": []},
+        {"sources": [src], "url": src["url"]},
+        {"sources": [src] * 11},
+    ):
+        with pytest.raises(ValidationError):
+            t.Material(text="sample", title="Fictional", **fields)
 
 
 def test_nested_containers_are_immutable_and_detached():

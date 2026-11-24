@@ -5,7 +5,7 @@
   "summary": "通过兼容 Chat Completions 的接口调用普通模型",
   "category": "model",
   "version": "0.1.0",
-  "requires": {"sdk": ">=0.17,<0.19"},
+  "requires": {"sdk": ">=0.17,<0.20"},
   "entry": "plugin:Plugin",
   "priority": 100,
   "dependencies": {},

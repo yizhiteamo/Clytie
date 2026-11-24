@@ -220,6 +220,24 @@
       },
       "summary": "按聊天语境分段、引用与间隔发送。",
       "version": "0.1.0"
+    },
+    {
+      "category": "tool",
+      "conflicts": [],
+      "dependencies": {},
+      "id": "web-tools",
+      "name": "web-tools",
+      "permissions": [
+        "network.public"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "搜索公开来源并提取网页正文",
+      "version": "0.1.0"
     }
   ],
   "schema_version": 1

@@ -518,10 +518,11 @@ class FakeContext:
             self.peer = FakePeer(self.clock)
         if "model.invoke" in permissions:
             self.model = FakeModelInvoker(self)
+        if "network" in permissions or "network.public" in permissions:
+            self.http = FakeHttp(self.clock)
         if "network" in permissions:
             from .websocket import FakeWebSocket
 
-            self.http = FakeHttp(self.clock)
             self.websocket = FakeWebSocket()
         if "message.proactive" in permissions:
             self.proactive = FakeProactive(self.clock)
