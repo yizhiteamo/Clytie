@@ -68,6 +68,12 @@ async def run(name, args, *replies, local_tz=timezone.utc):
     "reply,expected",
     [
         (ValueError("blocked_address"), "blocked_address"),
+        (OSError("dns_failed"), "dns_failed"),
+        (OSError("tls_failed"), "tls_failed"),
+        (OSError("connection_refused"), "connection_refused"),
+        (OSError("connection_reset"), "connection_reset"),
+        (OSError("invalid_payload"), "invalid_payload"),
+        (OSError("fictional unknown transport failure"), "fetch_failed"),
         (ValueError("HTTP redirect limit exceeded"), "redirect_failed"),
         (ValueError("HTTP redirect scheme downgrade forbidden"), "redirect_failed"),
         (TimeoutError(), "timeout"),

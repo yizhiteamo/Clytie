@@ -2,12 +2,14 @@
 
 import asyncio
 import ipaddress
+import socket
 import ssl
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import pytest
+import truststore
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from cryptography import x509
@@ -91,6 +93,58 @@ async def test_http_stream_aborts_before_complete_body(backend):
                 await backend.request("GET", str(instance.make_url("/")), max_bytes=64)
         finally:
             release.set()
+
+
+@pytest.mark.parametrize("public_only", [False, True])
+async def test_http_connectors_use_system_trust(public_only):
+    backend = HttpBackend(MockClock(), HostLog(), public_only=public_only)
+
+    async def handler(request):
+        return web.Response()
+
+    try:
+        async with server(handler) as local:
+            if public_only:
+                with pytest.raises(ValueError, match="blocked_address"):
+                    await backend.request("GET", "http://127.0.0.1/")
+            else:
+                await backend.request("GET", str(local.make_url("/")))
+        ctx = backend._session.connector._ssl
+        assert isinstance(ctx, truststore.SSLContext)
+        assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+    finally:
+        await backend.close()
+
+
+async def test_http_dns_failure(backend, monkeypatch):
+    async def missing(self, host, port, family):
+        raise socket.gaierror(socket.EAI_NONAME, "fictional lookup")
+
+    monkeypatch.setattr(aiohttp.resolver.DefaultResolver, "resolve", missing)
+    with pytest.raises(OSError, match="^dns_failed$"):
+        await backend.request("GET", "http://fictional.invalid/")
+    assert backend._log.entries == [("info", "http.request", {"reason": "dns_failed"})]
+
+
+async def test_http_connection_refused(backend):
+    with socket.socket() as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        with pytest.raises(OSError, match="^connection_refused$"):
+            await backend.request("GET", f"http://127.0.0.1:{reserved.getsockname()[1]}/")
+    assert backend._log.entries == [("info", "http.request", {"reason": "connection_refused"})]
+
+
+@pytest.mark.parametrize("reason", ["connection_reset", "invalid_payload"])
+async def test_http_interrupted_connection_and_invalid_encoding(backend, reason):
+    async def handler(request):
+        if reason == "connection_reset":
+            request.transport.close()
+        return web.Response(body=b"fictional non-gzip bytes", headers={"Content-Encoding": "gzip"})
+
+    async with server(handler) as local:
+        with pytest.raises(OSError, match=f"^{reason}$"):
+            await backend.request("GET", str(local.make_url("/")))
+    assert backend._log.entries == [("info", "http.request", {"reason": reason})]
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -221,6 +275,7 @@ def tls_contexts(tmp_path):
         .issuer_name(name)
         .public_key(key.public_key())
         .serial_number(1)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .not_valid_before(datetime(2020, 1, 1, tzinfo=timezone.utc))
         .not_valid_after(datetime(2020, 1, 1, tzinfo=timezone.utc) + timedelta(days=365 * 100))
         .add_extension(
@@ -244,12 +299,11 @@ def tls_contexts(tmp_path):
     )
     serving = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     serving.load_cert_chain(cert_path, key_path)
-    trusted = ssl.create_default_context(cafile=str(cert_path))
-    return serving, trusted
+    return serving, ssl.create_default_context(cafile=str(cert_path))
 
 
-async def test_http_tls_verification_and_downgrade(backend, tmp_path, monkeypatch):
-    serving, trusted = tls_contexts(tmp_path)
+async def test_http_tls_verification_and_downgrade(backend, tmp_path):
+    serving, _ = tls_contexts(tmp_path)
     seen = []
 
     async def handler(request):
@@ -258,17 +312,18 @@ async def test_http_tls_verification_and_downgrade(backend, tmp_path, monkeypatc
 
     async with server(handler, ssl=serving) as instance:
         url = str(instance.make_url("/"))
-        with pytest.raises(aiohttp.ClientConnectorCertificateError):
+        with pytest.raises(OSError, match="^tls_failed$"):
             await backend.request("GET", url)
         assert seen == []
-        monkeypatch.setattr(aiohttp.connector, "_SSL_CONTEXT_VERIFIED", trusted)
+        assert backend._log.entries == [("info", "http.request", {"reason": "tls_failed"})]
+        backend._ssl_context.load_verify_locations(cafile=str(tmp_path / "cert.pem"))
         with pytest.raises(ValueError, match="downgrade"):
             await backend.request("GET", url)
         assert seen == ["https"]
 
 
 async def test_inbound_media_uses_allowlisted_tls_without_credentials_or_redirect(
-    backend, tmp_path, monkeypatch
+    backend, tmp_path
 ):
     from types import SimpleNamespace
 
@@ -289,8 +344,8 @@ async def test_inbound_media_uses_allowlisted_tls_without_credentials_or_redirec
     manifest = discover(ROOT / "plugins", tmp_path / "plugins", repo_root=ROOT)["qq-onebot"]
     plugin_type, _ = registry._load_class(manifest)
     channel_type = __import__(plugin_type.__module__, fromlist=["OneBotChannel"]).OneBotChannel
-    serving, trusted = tls_contexts(tmp_path)
-    monkeypatch.setattr(aiohttp.connector, "_SSL_CONTEXT_VERIFIED", trusted)
+    serving, _ = tls_contexts(tmp_path)
+    backend._ssl_context.load_verify_locations(cafile=str(tmp_path / "cert.pem"))
     hits, targets = [], []
 
     async def dest(req):
