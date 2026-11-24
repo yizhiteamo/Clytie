@@ -93,7 +93,7 @@ plugins/<id>/
 | `message.proactive` | 主动发起消息 |
 | `message.react` | 表情回应 |
 | `peer` | 使用伴侣通道 |
-| `model.invoke` | 自行调用模型（计入额度） |
+| `model.invoke` | 自行调用模型（计入额度）。用伴侣当前的模型，不附加人设、记忆和聊天记录（runtime-services-spec §6；记忆整理插件例外） |
 | `network` | 访问网络 |
 | `network.public` | 只访问公网（本机和内网一律拒绝），按别人给的网址访问网页的插件用它（content-spec §6） |
 | `assets.write` | 写入资产库 |
