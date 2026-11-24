@@ -15,6 +15,7 @@
       "before_send": {"handler": "before_send"}
     },
     "events": {"subscribe": ["message.received", "reply.sent"], "handler": "on_event"},
+    "services": [{"name": "proactive.news", "version": "1.0", "methods": ["offer"], "handler": "service"}],
     "schedule": [{"id": "tick", "every": "PT1M", "handler": "on_tick"}],
     "api_routes": [{
       "method": "GET", "path": "/plugins/proactive-chat/status", "handler": "status", "audit": false
@@ -26,6 +27,7 @@
     "required": ["conversation"],
     "properties": {
       "conversation": {"type": "string", "minLength": 1},
+      "breaking_at_night": {"type": "string", "enum": ["off", "always"], "default": "off"},
       "silence_hours": {
         "type": "array", "minItems": 2, "maxItems": 2, "default": [2, 3],
         "items": {"type": "number", "minimum": 1, "maximum": 24}

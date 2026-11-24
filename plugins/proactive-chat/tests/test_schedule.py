@@ -47,6 +47,35 @@ def plan(module, calendar_dir, now, **config):
     return p
 
 
+def test_breaking_at_night_owner_activity_is_separate_from_chat(module, calendar_dir):
+    now = local("2026-02-02", "02:10")
+    schedule = plan(module, calendar_dir, now)
+    assert not schedule.breaking_ready(now)
+    schedule.owner_seen(now - timedelta(minutes=30))
+    assert schedule.breaking_ready(now)
+    assert schedule.state.last_chat is None
+    assert not schedule.breaking_ready(now + timedelta(seconds=1))
+    assert schedule.breaking_ready(local("2026-02-02", "08:00"))
+    always = plan(module, calendar_dir, now, breaking_at_night="always")
+    assert always.breaking_ready(now)
+
+
+def test_news_brief_anchor_uses_delivered_greeting_or_configured_wake(module, calendar_dir):
+    now = local("2026-02-02", "09:30")
+    schedule = plan(module, calendar_dir, now)
+    wake = schedule.at(now.date(), schedule.period(now.date())["to"])
+    due = schedule.brief_time(now)
+    assert 1800 <= due - wake <= 5400
+    greeting = module.Opening("good_morning")
+    schedule.attempt(greeting, "fixture", now)
+    delivered = now + timedelta(minutes=12)
+    assert schedule.sent("fixture", delivered)
+    assert schedule.brief_time(delivered) - delivered.timestamp() == due - wake
+    again = plan(module, calendar_dir, delivered)
+    again.start(delivered, schedule.dump())
+    assert again.brief_time(delivered) == schedule.brief_time(delivered)
+
+
 @pytest.mark.parametrize(
     "day,workday,complete,names",
     [

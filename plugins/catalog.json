@@ -152,6 +152,30 @@
       "version": "0.2.0"
     },
     {
+      "category": "tool",
+      "conflicts": [],
+      "dependencies": {
+        "proactive-chat": {
+          "optional": true,
+          "version": ">=0.1,<1"
+        }
+      },
+      "id": "news-feeds",
+      "name": "科技新闻订阅",
+      "permissions": [
+        "network.public",
+        "model.invoke"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "轮询公开的科技订阅，整理近期新闻，按分档提供主动分享材料。",
+      "version": "0.1.0"
+    },
+    {
       "category": "model",
       "conflicts": [],
       "dependencies": {},

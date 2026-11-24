@@ -11,3 +11,5 @@
 ## 资料能力
 
 [web-tools](web-tools/README.md) 提供公开来源搜索和网页正文阅读，两项工具都按轻量能力执行。
+
+[news-feeds](news-feeds/README.md) 从公开订阅源整理近七天的科技新闻。`recent_news` 在当前对话中返回带来源的资料；启用主动私聊插件后，重要新闻还可进入突发提醒或早间简报。

@@ -41,6 +41,7 @@ from .image_context import ImageContext, view_tool
 from .judgment import AttentionJudgments
 from .materials import NOTICE, RECALL, Materials
 from .persona import Persona
+from .plugin_models import PluginModels
 from .policy import CATEGORIES, Boundary, Outbound, Protection, fast_cancel, text_parts
 from .prewrite import Prewrites
 from .proactive_pause import ProactivePause
@@ -187,6 +188,7 @@ class Agent:
         self.prewrites = Prewrites(self)
         self.opening = {}
         self.proactive_writing = {}
+        self.plugin_models = PluginModels(self)
         kernel.config = config
         kernel.permissions = lambda actor, tool: (
             self.reason(actor, tool)
@@ -201,7 +203,9 @@ class Agent:
             {key: value["scene"] for key, value in instance.get("conversations", {}).items()}
         )
 
-    async def model_call(self, method, *args, scene="public_group", conversation_id=None):
+    async def model_call(
+        self, method, *args, scene="public_group", conversation_id=None, update_health=True
+    ):
         from clytie.sdk.types import ModelTurn
 
         if method == "generate" and self.model_health == "auth_invalid":
@@ -240,13 +244,16 @@ class Agent:
                     scene=scene,
                     conversation_id=conversation_id,
                 )
-        if method == "generate":
-            self.model_error_code = result.error.code if result.error else None
-            if self.model_error_code == "auth_invalid":
-                self.model_health = "auth_invalid"
-            elif self.model_health != "auth_invalid":
-                self.model_health = "ok"
+        if method == "generate" and update_health:
+            self.observe_model_health(result)
         return result
+
+    def observe_model_health(self, turn):
+        self.model_error_code = turn.error.code if turn.error else None
+        if self.model_error_code == "auth_invalid":
+            self.model_health = "auth_invalid"
+        elif self.model_health != "auth_invalid":
+            self.model_health = "ok"
 
     def rebuild_memory(self):
         if getattr(self, "shutting_down", False):
@@ -273,6 +280,7 @@ class Agent:
         self.appearance, self.appearance_warnings = await asyncio.to_thread(load_appearance, files)
         await self.boundary.initialize()
         self.protection.update(await self.model_call("quota"))
+        self.host.plugin_models[self.cid] = self.plugin_models
         await self.kernel.start()
         from clytie.memory.retrieval import HostExtension
 

@@ -265,6 +265,18 @@ class Supervisor:
                         row["warnings"] = list(msg.get("warnings", []))
                         for field in ("safety_belt", "attention"):
                             row[field] = self._conversation_status(msg.get(field), field)
+                        usage = msg.get("plugin_model_usage")
+                        row["plugin_model_usage"] = {
+                            pid: dict(count=value["count"], tokens=value["tokens"])
+                            for pid, value in (usage.items() if isinstance(usage, dict) else ())
+                            if isinstance(pid, str)
+                            and re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", pid)
+                            and isinstance(value, dict)
+                            and all(
+                                type(value.get(k)) is int and value[k] >= 0
+                                for k in ("count", "tokens")
+                            )
+                        }
                         belt_config = msg.get("safety_belt_config")
                         fields = ("replies", "window_minutes", "pause_minutes")
                         if isinstance(belt_config, dict) and all(
