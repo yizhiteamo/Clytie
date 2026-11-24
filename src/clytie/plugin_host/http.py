@@ -1,10 +1,14 @@
 """插件实例独享的生产 HTTP 会话；时间预算由 context.Http 管理。"""
 
+import errno
+import socket
+import ssl
 from contextvars import ContextVar
 from ipaddress import IPv6Address, IPv6Network, ip_address
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+import truststore
 from yarl import URL
 
 from clytie.sdk.types import HttpResponse
@@ -14,6 +18,26 @@ media_download_limit = ContextVar("media_download_limit", default=None)
 
 class ResponseTooLarge(ValueError):
     """The streamed response exceeded the requested byte budget."""
+
+
+def _transport_reason(error):
+    if isinstance(error, (aiohttp.ClientSSLError, ssl.SSLError)):
+        return "tls_failed"
+    if isinstance(error, (aiohttp.ClientConnectorDNSError, socket.gaierror)):
+        return "dns_failed"
+    if isinstance(error, aiohttp.ClientPayloadError):
+        return "invalid_payload"
+    if isinstance(error, aiohttp.ServerDisconnectedError):
+        return "connection_reset"
+    cause = error.os_error if isinstance(error, aiohttp.ClientConnectorError) else error
+    number = getattr(cause, "errno", None)
+    if isinstance(cause, ConnectionRefusedError) or number == errno.ECONNREFUSED:
+        return "connection_refused"
+    if isinstance(cause, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)) or (
+        number in {errno.ECONNRESET, errno.EPIPE, errno.ECONNABORTED}
+    ):
+        return "connection_reset"
+    return "fetch_failed"
 
 
 _NAT64 = IPv6Network("64:ff9b::/96")
@@ -51,6 +75,7 @@ class HttpBackend:
     def __init__(self, clock, log, *, public_only=False):
         self._clock, self._log = clock, log
         self._public_only = public_only
+        self._ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self._session = None
         self._closed = False
 
@@ -79,9 +104,11 @@ class HttpBackend:
         self._url(url)
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                connector=PublicConnector(use_dns_cache=False, force_close=True)
+                connector=PublicConnector(
+                    ssl=self._ssl_context, use_dns_cache=False, force_close=True
+                )
                 if self._public_only
-                else None,
+                else aiohttp.TCPConnector(ssl=self._ssl_context),
                 trust_env=False,
                 timeout=aiohttp.ClientTimeout(total=None),
                 cookie_jar=aiohttp.DummyCookieJar(),
@@ -96,6 +123,7 @@ class HttpBackend:
                     raise ValueError("blocked_address")
             request_method = method
             started, status = self._clock.monotonic(), None
+            reason = None
             try:
                 async with self._session.request(
                     method,
@@ -149,14 +177,23 @@ class HttpBackend:
                         headers=dict(response.headers),
                         body=bytes(content),
                     )
+            except TimeoutError:
+                reason = "timeout"
+                raise
+            except (aiohttp.ClientError, OSError) as exc:
+                reason = _transport_reason(exc)
+                raise OSError(reason) from None
             finally:
-                self._log.info(
-                    "http.request",
-                    method=request_method,
-                    hostname=parsed.hostname,
-                    status=status,
-                    duration_s=self._clock.monotonic() - started,
-                )
+                if reason:
+                    self._log.info("http.request", reason=reason)
+                else:
+                    self._log.info(
+                        "http.request",
+                        method=request_method,
+                        hostname=parsed.hostname,
+                        status=status,
+                        duration_s=self._clock.monotonic() - started,
+                    )
 
     @staticmethod
     def _origin(parsed):

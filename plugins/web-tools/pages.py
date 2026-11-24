@@ -220,7 +220,16 @@ async def fetch(ctx, url, *, metadata=False):
             raise WebError("redirect_failed") from exc
         raise WebError("fetch_failed") from exc
     except OSError as exc:
-        raise WebError("fetch_failed") from exc
+        code = str(exc)
+        if code not in {
+            "dns_failed",
+            "tls_failed",
+            "connection_refused",
+            "connection_reset",
+            "invalid_payload",
+        }:
+            code = "fetch_failed"
+        raise WebError(code) from exc
     if response.status in {401, 403}:
         raise WebError("needs_login")
     if not 200 <= response.status < 300:
