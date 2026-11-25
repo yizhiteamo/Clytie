@@ -14,6 +14,7 @@ from clytie.api.operations import companion_operation
 from clytie.api.server import Server
 from clytie.plugin_host.uploads import CHUNK_BYTES, Uploads
 from clytie.sdk.testing import MockClock
+from clytie.sdk.testing.context_contracts import assert_uploads_contract
 from clytie.sdk.types import ApiResponse
 from clytie.supervisor.common import Audit
 from clytie.supervisor.processes import Lines, frame
@@ -148,7 +149,7 @@ async def test_upload_http_cli_and_protected_plugin_route(tmp_path):
             uploaded = await upload_command_file(cli, cid, pid, str(file), len(raw))
             assert uploaded.status == 200
             upload_id = uploaded.json["result"]["upload_id"]
-            assert await receiver.ctx.uploads.read(upload_id) == raw
+            await assert_uploads_contract(receiver.ctx.uploads, upload_id, raw)
             assert (
                 await cli.client.request(
                     "POST", f"{endpoint}/{key}/complete", json={"file": "fake"}

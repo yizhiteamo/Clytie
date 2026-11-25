@@ -80,6 +80,18 @@ async def assert_state_contract(state, snapshot, emitted, plugin_id):
     await assert_task_cancellation(lambda: state.set({}))
 
 
+async def assert_appearance_reader_contract(reader, expected):
+    profile = await reader.current()
+    assert profile == expected
+    assert_roundtrip(profile)
+
+
+async def assert_uploads_contract(uploads, upload_id, content):
+    assert await uploads.read(upload_id) == content
+    await uploads.release(upload_id)
+    await rejects_async(KeyError, lambda: uploads.read(upload_id))
+
+
 async def assert_assets_contract(assets, asset, content):
     assert isinstance(asset, AssetRef)
     assert await assets.info(asset.asset_id) == asset
