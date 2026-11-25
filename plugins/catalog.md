@@ -8,6 +8,10 @@
 
 完整官方清单见 [catalog.json](catalog.json)，其他规划见[预设的官方插件](../docs/plugins/catalog.md)。
 
+## 漫画能力
+
+[comic-maker](comic-maker/README.md) 按分镜生成多页漫画，可使用伴侣当前形象和会话允许的角色，并通过 `image-gen` 的 `image.render` 服务逐页绘图。
+
 ## 资料能力
 
 [web-tools](web-tools/README.md) 提供公开来源搜索和网页正文阅读，两项工具都按轻量能力执行。

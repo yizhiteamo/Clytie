@@ -5,6 +5,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import JsonValue
 
 from .cancellation import CancelToken
+from .context import ServiceCall
 from .types import (
     ApiResponse,
     BusEvent,
@@ -41,6 +42,12 @@ class ScheduledHandler(Protocol):
 @runtime_checkable
 class Service(Protocol):
     async def call(self, method: str, args: dict[str, JsonValue]) -> dict[str, JsonValue]: ...
+
+
+class ContextService(Protocol):
+    async def call(
+        self, method: str, args: dict[str, JsonValue], call: ServiceCall
+    ) -> dict[str, JsonValue]: ...
 
 
 @runtime_checkable

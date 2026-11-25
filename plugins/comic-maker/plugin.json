@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "id": "comic-maker",
+  "name": "漫画工具",
+  "summary": "用角色参考图和逐页分镜画漫画，可在页眉页脚排字。",
+  "category": "tool",
+  "version": "0.1.0",
+  "requires": {
+    "sdk": ">=0.20,<0.21"
+  },
+  "entry": "plugin:Plugin",
+  "permissions": [
+    "appearance.read",
+    "assets.write"
+  ],
+  "dependencies": {
+    "image-gen": {
+      "version": ">=0.1,<1"
+    }
+  },
+  "uploads": {
+    "max_bytes": 3145.728e4
+  },
+  "contributes": {
+    "tools": [
+      {
+        "name": "draw_comic",
+        "factory": "create_draw",
+        "description": "按分镜绘制多页漫画。台词要短，数字、产品名和来源写在配文里。只用角色表的 ID 和 self。不画真人长相，用文字或不露脸的剪影代替。",
+        "when_not_to_use": "讨论漫画、转述画漫画的要求、明确拒绝画漫画时不用。",
+        "examples": [
+          {
+            "input": "画一页花店的小漫画",
+            "call": true
+          },
+          {
+            "input": "不用画漫画",
+            "call": false
+          },
+          {
+            "input": "他说他想画漫画",
+            "call": false
+          },
+          {
+            "input": "我们来聊聊漫画分镜",
+            "call": false
+          }
+        ],
+        "parameters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "panels": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "scene": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "characters": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "dialogue": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "speaker": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "text": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required": [
+                              "speaker",
+                              "text"
+                            ]
+                          }
+                        },
+                        "sfx": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "required": [
+                        "scene",
+                        "characters",
+                        "dialogue"
+                      ]
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "panels"
+                ]
+              },
+              "minItems": 1
+            },
+            "style": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "title",
+            "pages"
+          ]
+        },
+        "audience": [
+          "owner",
+          "peer",
+          "member",
+          "stranger"
+        ],
+        "heavy": true,
+        "risk": "low",
+        "delivery": "image"
+      }
+    ],
+    "context_section": {
+      "handler": "contribute",
+      "budget_chars": 300,
+      "when_tool": "draw_comic"
+    },
+    "cli_commands": [
+      {
+        "name": "character-import",
+        "handler": "character_import",
+        "help": "导入角色参考图",
+        "args": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "companion_id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]+$"
+            },
+            "file": {
+              "type": "string",
+              "minLength": 1
+            },
+            "character_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "keywords": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "attribution": {
+              "type": "string",
+              "minLength": 1
+            },
+            "conversations": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "companion_id",
+            "file",
+            "character_id"
+          ]
+        }
+      },
+      {
+        "name": "character-set",
+        "handler": "character_set",
+        "help": "登记或修改角色资料",
+        "args": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "companion_id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]+$"
+            },
+            "character_id": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": {
+              "type": "string",
+              "minLength": 1
+            },
+            "keywords": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "attribution": {
+              "type": "string",
+              "minLength": 1
+            },
+            "conversations": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "companion_id",
+            "character_id"
+          ]
+        }
+      },
+      {
+        "name": "font-import",
+        "handler": "font_import",
+        "help": "导入排版字体",
+        "args": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "companion_id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_-]+$"
+            },
+            "file": {
+              "type": "string",
+              "minLength": 1
+            },
+            "purpose": {
+              "enum": [
+                "title",
+                "caption",
+                "sfx"
+              ]
+            }
+          },
+          "required": [
+            "companion_id",
+            "file",
+            "purpose"
+          ]
+        }
+      }
+    ],
+    "api_routes": [
+      {
+        "method": "GET",
+        "path": "/plugins/comic-maker/import/preview",
+        "handler": "import_preview",
+        "audit": false
+      },
+      {
+        "method": "POST",
+        "path": "/plugins/comic-maker/import/commit",
+        "handler": "import_commit",
+        "audit": true,
+        "confirm": true,
+        "admin_password": true
+      }
+    ]
+  },
+  "config": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "style": {
+        "type": "string",
+        "minLength": 1,
+        "default": "Q 版二次元，浅色、干净线稿、平涂，搭配表情符号和效果线。"
+      },
+      "max_pages": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 10
+      },
+      "max_panels": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 10
+      },
+      "max_dialogue_chars": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 30
+      },
+      "header_footer": {
+        "type": "boolean",
+        "default": true
+      },
+      "footer_text": {
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "data": {
+    "version": 1,
+    "on_uninstall": "keep"
+  }
+}

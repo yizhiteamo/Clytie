@@ -3,9 +3,9 @@
 import asyncio
 import hashlib
 
-from clytie.sdk.types import Denial, ErrorInfo, Plan, ToolResult
+from clytie.sdk.types import AssetRef, Denial, ErrorInfo, Plan, ToolResult
 
-from .backend import BackendError, OpenAIBackend
+from .backend import RENDER_SIZES, BackendError, OpenAIBackend
 
 
 class ImageTool:
@@ -115,6 +115,54 @@ class Plugin:
 
     def create_edit(self):
         return ImageTool(self, edit=True)
+
+    async def render_service(self, method, args, call):
+        cancel = call.cancel
+        cancel.raise_if_cancelled()
+        references = args.get("references", ())
+        size = args.get("size")
+        prompt = args.get("prompt")
+        if (
+            method != "render"
+            or not isinstance(size, str)
+            or size not in RENDER_SIZES
+            or not isinstance(prompt, str)
+            or not prompt.strip()
+            or len(prompt) > 32_000
+            or not isinstance(references, (list, tuple))
+            or len(references) > 8
+        ):
+            return {"error": "invalid_request"}
+        async with self.lock:
+            cancel.raise_if_cancelled()
+            images = []
+            try:
+                for value in references:
+                    supplied = AssetRef.model_validate(value)
+                    ref = await self.ctx.assets.info(supplied.asset_id)
+                    images.append((await self.ctx.assets.read(ref.asset_id), ref.media_type))
+                    cancel.raise_if_cancelled()
+            except (ValueError, KeyError, OSError):
+                return {"error": "invalid_request"}
+            for index, backend in enumerate(self.backends):
+                try:
+                    data, media, usage = await backend.render(prompt, images, size, cancel)
+                except BackendError as exc:
+                    if (
+                        exc.code == "content_refused"
+                        and self.fallback
+                        and index + 1 < len(self.backends)
+                    ):
+                        cancel.raise_if_cancelled()
+                        continue
+                    return {"error": exc.code}
+                cancel.raise_if_cancelled()
+                asset = await self.ctx.asset_writer.put(data, media, "image-gen")
+                result = {"asset": asset.model_dump(mode="json")}
+                if usage:
+                    result["usage"] = usage
+                return result
+        return {"error": "invalid_request"}
 
     async def stop(self):
         await self.ctx.clock.sleep(0)

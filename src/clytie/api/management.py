@@ -15,7 +15,7 @@ from clytie.plugin_host.snapshots import identifier
 from clytie.plugin_host.support import finish_cleanup, timed
 from clytie.supervisor.common import read, write
 
-from . import appearance
+from . import appearance, uploads
 from .auth import APIError, RequestNotDelivered
 from .config_write import ConfigWriter
 from .management_workers import Workers
@@ -230,6 +230,15 @@ class Management:
         cid = params.get("cid")
         if cid:
             self.check_cid(cid)
+        if "<subpath>" in route:
+            if not self.running(cid):
+                raise APIError("plugin_unavailable", 404)
+            policy = await self.transfer(cid, "plugin_route_policy", params)
+            return (
+                policy["confirm"],
+                policy["admin_password"],
+                f"将在伴侣 {cid} 执行插件 {params['pid']} 的 {params['subpath']} 操作。",
+            )
         if route in appearance.FIELDS:
             appearance.validate_fields(route, data)
             if route == appearance.ROOT:
@@ -345,6 +354,13 @@ class Management:
                 description += (
                     "；" + ", ".join(plan["stopped_companions"]) + " 下次启动时这个插件不会加载"
                 )
+            if plan.get("appearance_readers"):
+                confirm = True
+                description += (
+                    "；"
+                    + "、".join(plan["appearance_readers"])
+                    + " 申请 appearance.read 权限。参考图会随画图请求发给画图服务商。"
+                )
         if route == CONFIG_APPLY:
             confirm = True
             description = "保存插件提议的配置并保留历史，重启伴侣后生效。"
@@ -438,6 +454,14 @@ class Management:
         return hashlib.sha256(b"\0".join(p.read_bytes() for p in paths)).hexdigest()
 
     async def call(self, route, params, data, query, method):
+        if route in uploads.OPERATIONS:
+            if not self.running(params["cid"]):
+                raise APIError("plugin_unavailable", 404)
+            return await self.transfer(
+                params["cid"],
+                uploads.OPERATIONS[route],
+                {**{k: v for k, v in params.items() if k != "cid"}, **data},
+            )
         if route in appearance.FIELDS:
             return await asyncio.to_thread(
                 appearance.execute, self.home, params["cid"], self.clock, route, data

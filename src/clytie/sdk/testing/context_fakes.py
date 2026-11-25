@@ -18,6 +18,7 @@ from clytie.sdk.types import (
     BusEvent,
     CompanionState,
     Conversation,
+    CurrentAppearance,
     HttpResponse,
     MemoryDecay,
     MemoryDraft,
@@ -468,6 +469,14 @@ class FakeIdentity:
         )
 
 
+class FakeAppearanceReader:
+    def __init__(self, profile):
+        self.profile = profile
+
+    async def current(self):
+        return self.profile
+
+
 class FakeContext:
     def __init__(
         self,
@@ -484,6 +493,7 @@ class FakeContext:
         records=(),
         scene="public_group",
         identity=None,
+        appearance=None,
     ):
         if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", plugin_id):
             raise ValueError("invalid plugin id")
@@ -498,6 +508,12 @@ class FakeContext:
         self.storage = FakeStorage(root / "plugin-data" / plugin_id, self.clock)
         self.events, self.state = FakeEvents(plugin_id, self.clock), FakeState(self)
         self.assets = FakeAssets(root / "assets", self.clock)
+        if "appearance.read" in permissions:
+            self.appearance = FakeAppearanceReader(
+                CurrentAppearance.model_validate(
+                    appearance or {"description": "", "references": []}
+                )
+            )
         if "assets.write" in permissions:
             self.asset_writer = FakeAssetWriter(self.assets)
         if any(p.startswith("memory.") for p in permissions):

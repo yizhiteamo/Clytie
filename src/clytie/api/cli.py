@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 import getpass
+import hashlib
 import json
 import posixpath
 import sys
@@ -519,6 +520,38 @@ class PluginCommandClient:
         return await self._cli.request(method, path[len("/api/v1") :], json, query, plugin=True)
 
 
+async def upload_command_file(cli, cid, pid, path, maximum):
+    from clytie.plugin_host.snapshots import identifier
+    from clytie.plugin_host.uploads import CHUNK_BYTES
+
+    endpoint = f"/companions/{identifier(cid)}/uploads"
+    try:
+        with Path(path).open("rb") as file:
+            raw = file.read(maximum + 1)
+    except (OSError, ValueError):
+        return ApiResponse(status=400, json={"ok": False, "error": {"code": "file_unreadable"}})
+    if len(raw) > maximum:
+        return ApiResponse(status=413, json={"ok": False, "error": {"code": "upload_too_large"}})
+    started = await cli.request(
+        "POST",
+        endpoint,
+        {"plugin": pid, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+    )
+    if not started.json.get("ok"):
+        return started
+    upload_id = started.json["result"]["upload_id"]
+    for number, offset in enumerate(range(0, len(raw), CHUNK_BYTES)):
+        chunk = base64.b64encode(raw[offset : offset + CHUNK_BYTES])
+        response = await cli.client.request(
+            "PUT",
+            f"/api/v1{endpoint}/{upload_id}/{number}",
+            body=chunk,
+        )
+        if not response.json.get("ok"):
+            return response
+    return await cli.request("POST", f"{endpoint}/{upload_id}/complete")
+
+
 async def plugin_command(args, cli):
     from jsonschema import ValidationError, validate
 
@@ -556,6 +589,21 @@ async def plugin_command(args, cli):
         validate(values, thaw(declaration["args"]))
     except ValidationError:
         raise ValueError("插件命令参数错误") from None
+    if (
+        "uploads" in manifest.data
+        and "file" in declaration["args"].get("properties", {})
+        and "file" in values
+    ):
+        response = await upload_command_file(
+            cli,
+            values["companion_id"],
+            pid,
+            values.pop("file"),
+            manifest.data["uploads"]["max_bytes"],
+        )
+        if not response.json.get("ok"):
+            return response
+        values["upload_id"] = response.json["result"]["upload_id"]
     from clytie.clock import SystemClock
     from clytie.plugin_host import PluginHost
 

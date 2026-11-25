@@ -10,6 +10,7 @@ from clytie.sdk import CredentialUnavailable
 
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+RENDER_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
 TIMEOUT_S = 120
 ERROR_CODES = frozenset(
     {
@@ -94,23 +95,44 @@ class OpenAIBackend:
 
     async def generate(self, prompt, cancel):
         cancel.raise_if_cancelled()
-        body = json.dumps(self._fields(prompt), ensure_ascii=False).encode("utf-8")
+        data, media, _ = await self._generate(self._fields(prompt), cancel)
+        return data, media
+
+    async def _generate(self, fields, cancel):
+        body = json.dumps(fields, ensure_ascii=False).encode("utf-8")
         return await self._request("generations", body, "application/json", cancel)
 
     async def edit(self, prompt, image_bytes, media_type, cancel):
         cancel.raise_if_cancelled()
-        fields = self._fields(prompt)
-        extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
-        if (
-            not isinstance(image_bytes, bytes)
-            or not image_bytes
-            or len(image_bytes) > MAX_IMAGE_BYTES
-            or media_type not in extensions
-        ):
+        data, media, _ = await self._edit(
+            self._fields(prompt), [(image_bytes, media_type)], MAX_IMAGE_BYTES, cancel
+        )
+        return data, media
+
+    async def render(self, prompt, images, size, cancel):
+        cancel.raise_if_cancelled()
+        if size not in RENDER_SIZES or len(images) > 8:
             raise self._error("invalid_request")
+        fields = {**self._fields(prompt), "size": size}
+        if not images:
+            return await self._generate(fields, cancel)
+        return await self._edit(fields, images, 20 * 1024 * 1024, cancel)
+
+    async def _edit(self, fields, images, max_bytes, cancel):
+        extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+        for image_bytes, media_type in images:
+            if (
+                not isinstance(image_bytes, bytes)
+                or not image_bytes
+                or len(image_bytes) > max_bytes
+                or media_type not in extensions
+            ):
+                raise self._error("invalid_request")
         values = [(key, str(value).encode("utf-8")) for key, value in fields.items()]
         boundary = b"clytie-image-boundary"
-        while any(boundary in value for _, value in values) or boundary in image_bytes:
+        while any(boundary in value for _, value in values) or any(
+            boundary in data for data, _ in images
+        ):
             boundary += b"_"
         parts = []
         for key, value in values:
@@ -123,18 +145,17 @@ class OpenAIBackend:
                 + value
                 + b"\r\n"
             )
-        parts.append(
-            b"--"
-            + boundary
-            + b'\r\nContent-Disposition: form-data; name="image[]"; '
-            + b'filename="image.'
-            + extensions[media_type].encode()
-            + b'"\r\nContent-Type: '
-            + media_type.encode()
-            + b"\r\n\r\n"
-            + image_bytes
-            + b"\r\n"
-        )
+        for index, (image_bytes, media_type) in enumerate(images):
+            filename = f"image-{index}.{extensions[media_type]}"
+            parts.extend(
+                [
+                    b"--" + boundary,
+                    f'\r\nContent-Disposition: form-data; name="image[]"; filename="{filename}"\r\n'
+                    f"Content-Type: {media_type}\r\n\r\n".encode(),
+                    image_bytes,
+                    b"\r\n",
+                ]
+            )
         parts.append(b"--" + boundary + b"--\r\n")
         return await self._request(
             "edits",
@@ -220,4 +241,10 @@ class OpenAIBackend:
                 raise ValueError
         except (KeyError, IndexError, TypeError, ValueError, binascii.Error):
             raise BackendError("invalid_request") from None
-        return image, "image/png"
+        counters = data.get("usage")
+        usage = {
+            key: counters[key]
+            for key in ("input_tokens", "output_tokens", "total_tokens")
+            if isinstance(counters, dict) and type(counters.get(key)) is int and counters[key] >= 0
+        }
+        return image, "image/png", usage

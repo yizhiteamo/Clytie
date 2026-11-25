@@ -130,6 +130,7 @@ def assert_plugin_context_contract(context: Any, *, granted: Sequence[str] = ())
         "credentials",
         "memory",
         "asset_writer",
+        "appearance",
         "services",
         "peer",
         "model",

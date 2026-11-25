@@ -17,7 +17,7 @@ class Client:
     def __init__(self, home):
         self.home = Path(home)
 
-    async def request(self, method, path, *, json=None, query=None):
+    async def request(self, method, path, *, json=None, query=None, body=None):
         if not path.startswith("/api/v1/") or ".." in path or "?" in path or "#" in path:
             raise ValueError("invalid API path")
         if not status(self.home)["running"]:
@@ -52,6 +52,7 @@ class Client:
                     method,
                     url,
                     json=json,
+                    data=body,
                     params=query,
                     headers=headers,
                     allow_redirects=False,

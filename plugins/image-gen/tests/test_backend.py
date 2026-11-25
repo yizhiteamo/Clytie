@@ -105,6 +105,75 @@ async def test_edit_multipart(module):
     assert "quality" not in fields and "size" not in fields
 
 
+@pytest.mark.parametrize("size", ["1024x1024", "1024x1536", "1536x1024"])
+@pytest.mark.parametrize("count", [0, 1, 8])
+async def test_render_uses_ordered_reference_images_size_and_configured_quality(
+    module, size, count
+):
+    ctx, _ = setup(module)
+    backend = module.OpenAIBackend(
+        ctx,
+        {"model": "fictional-model", "api_key_ref": "fictional", "quality": "high", "size": "auto"},
+    )
+    images = [(PNG + bytes([index]), "image/png") for index in range(count)]
+    assert await backend.render("fictional scene", images, size, CancelToken()) == (
+        PNG,
+        "image/png",
+        {},
+    )
+    ((_, url, args),) = ctx.http.calls
+    if images:
+        assert url.endswith("/images/edits")
+        message = BytesParser(policy=policy.default).parsebytes(
+            b"Content-Type: "
+            + args["headers"]["Content-Type"].encode()
+            + b"\r\n\r\n"
+            + args["body"]
+        )
+        parts = list(message.iter_parts())
+        assert [
+            p.get_payload(decode=True)
+            for p in parts
+            if p.get_param("name", header="Content-Disposition") == "image[]"
+        ] == [data for data, _ in images]
+        fields = {
+            p.get_param("name", header="Content-Disposition"): p.get_payload(decode=True).decode()
+            for p in parts
+            if not p.get_filename()
+        }
+    else:
+        assert url.endswith("/images/generations")
+        fields = json.loads(args["body"])
+    assert fields["size"] == size and fields["quality"] == "high"
+
+
+async def test_render_only_returns_reported_numeric_usage(module):
+    _, backend = setup(
+        module,
+        response(
+            {
+                "data": [{"b64_json": base64.b64encode(PNG).decode()}],
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 5,
+                    "total_tokens": True,
+                    "extra": "ignored",
+                },
+            }
+        ),
+    )
+    _, _, usage = await backend.render("fictional", [], "1024x1024", CancelToken())
+    assert usage == {"input_tokens": 0, "output_tokens": 5}
+
+
+@pytest.mark.parametrize("count,size", [(9, "1024x1536"), (1, "auto")])
+async def test_render_rejects_unsupported_request_before_http(module, count, size):
+    ctx, backend = setup(module)
+    with pytest.raises(module.BackendError) as exc:
+        await backend.render("fictional scene", [(PNG, "image/png")] * count, size, CancelToken())
+    assert exc.value.code == "invalid_request" and not ctx.http.calls
+
+
 @pytest.mark.parametrize(
     "options", [{}, {"quality": "high"}, {"size": "1234x567"}, {"quality": "auto", "size": "auto"}]
 )

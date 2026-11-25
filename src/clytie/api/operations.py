@@ -84,6 +84,16 @@ def owned_task(ledger, task_id, *, full=False):
 
 async def companion_operation(runtime, op, args):
     home, clock, cid, host = runtime.home, runtime.clock, runtime.cid, runtime.host
+    if op == "upload/start":
+        pid = args["plugin"]
+        if not host.is_active(cid, pid) or "uploads" not in host.runtimes[cid, pid].manifest.data:
+            raise APIError("plugin_unavailable", 404)
+        maximum = host.runtimes[cid, pid].manifest.data["uploads"]["max_bytes"]
+        return await host.uploads(cid).start(pid, args["size"], args["sha256"], maximum)
+    if op == "upload/chunk":
+        return await host.uploads(cid).chunk(args["upload_id"], args["sequence"], args["content"])
+    if op == "upload/complete":
+        return await host.uploads(cid).complete(args["upload_id"])
     if op == "proactive":
         from clytie.backup.coordination import CaptureError
 
@@ -206,12 +216,15 @@ async def companion_operation(runtime, op, args):
         if not changes or changes.keys() - writable:
             raise APIError("config_not_writable")
         return {"pid": pid, "account": account, "changes": changes}
+    if op == "plugin_route_policy":
+        declaration = registered_route(host, cid, args).declaration
+        return {key: declaration.get(key, False) for key in ("confirm", "admin_password")}
     if op == "plugin_route":
         return await plugin_route(host, cid, clock, args)
     raise APIError("not_found", 404)
 
 
-async def plugin_route(host, cid, clock, args):
+def registered_route(host, cid, args):
     pid = args["pid"]
     key = "/plugins/" + pid + "/" + args["subpath"]
     reg = next(
@@ -226,6 +239,16 @@ async def plugin_route(host, cid, clock, args):
     )
     if reg is None or (args["method"] != "GET" and not reg.declaration.get("audit")):
         raise APIError("plugin_unavailable", 404)
+    return reg
+
+
+async def plugin_route(host, cid, clock, args):
+    reg = registered_route(host, cid, args)
+    # A reload between policy lookup and dispatch must not weaken the new route.
+    if reg.declaration.get("confirm") and not args.get("confirmed"):
+        raise APIError("confirmation_required", 428)
+    if reg.declaration.get("admin_password") and not args.get("password_checked"):
+        raise APIError("reauth_required", 401)
     try:
         value = await timed(
             reg.implementation({k: args[k] for k in ("method", "subpath", "query", "json")}),

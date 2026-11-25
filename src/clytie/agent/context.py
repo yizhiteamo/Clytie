@@ -271,6 +271,7 @@ class Context:
         images=None,
         materials=None,
         use=None,
+        available_tools=(),
     ):
         agent = self.agent
         tables, pending = await run_sync(
@@ -372,8 +373,11 @@ class Context:
                 actor=actor,
                 budget_chars=budget,
                 conversation=conversation,
+                has_appearance=bool(agent.appearance.description)
+                or any(ref.state == "current" for ref in agent.appearance.references),
             ),
             conversation_id=conversation.conversation_id,
+            available_tools=available_tools,
         )
         if mode:
             result.append(message("system", "当前模式：" + mode.name))

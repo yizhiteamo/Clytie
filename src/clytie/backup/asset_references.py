@@ -37,12 +37,12 @@ def ledger_references(table, value, *, details=None):
                 parts(message.get("parts"))
         elif table == "intent":
             parts(value.get("parts"))
-        elif table == "invocation":
+        elif table == "invocation" or (table == "audit" and value.get("kind") == "service.call"):
             for asset_id in value.get("asset_ids", ()):
                 if not isinstance(asset_id, str) or not re.fullmatch(r"[0-9a-f]{64}", asset_id):
                     raise ValueError
                 found.add(asset_id)
-            result = value.get("result")
+            result = value.get("result") if table == "invocation" else None
             if result is not None:
                 for row in result.get("assets", ()):
                     ref(row)
