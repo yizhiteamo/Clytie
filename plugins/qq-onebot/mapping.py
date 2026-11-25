@@ -167,9 +167,10 @@ def normalize_event(ctx, payload, expected_account):
     ), count
 
 
-async def encode_parts(ctx, intent, media_limits):
+async def encode_parts(ctx, intent, media_limits, max_images_per_message=1):
     """完整编码后才交给发送器；无法编码的任一段会拒绝整个意图。"""
     segments = []
+    image_count = image_bytes = 0
     parts = intent.parts
     if parts and intent.kind == "reply" and intent.target is not None:
         parts = [QuotePart(message_ref=intent.target), *parts]
@@ -216,6 +217,11 @@ async def encode_parts(ctx, intent, media_limits):
                 or info.media_type not in limit["formats"]
             ):
                 raise ValueError("media_limit")
+            if kind == "image":
+                image_count += 1
+                image_bytes += info.size
+                if image_count > max_images_per_message or image_bytes > limit["max_bytes"]:
+                    raise ValueError("media_limit")
             try:
                 content = await ctx.assets.read(info.asset_id)
             except (KeyError, PermissionError, OSError):

@@ -4,9 +4,9 @@
   "name": "QQ OneBot 平台",
   "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
   "category": "channel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "requires": {
-    "sdk": ">=0.15,<0.21"
+    "sdk": ">=0.21,<0.22"
   },
   "dependencies": {},
   "conflicts": [],
@@ -130,6 +130,12 @@
         "type": "integer",
         "minimum": 1,
         "default": 4000
+      },
+      "max_images_per_message": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9,
+        "default": 4
       },
       "emoji_ids": {
         "type": "object",

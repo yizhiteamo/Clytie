@@ -170,11 +170,12 @@ class Delivery:
         return split and (row["trace_id"], split["group_id"]) in self.groups
 
     def asset_valid(self, intent, channel):
-        limits = channel.features().media_limits
+        features = channel.features()
+        image_count = image_bytes = 0
         for part in intent.parts:
             if part.type not in {"image", "audio", "video", "file"}:
                 continue
-            limit = limits.get(part.type)
+            limit = features.media_limits.get(part.type)
             if not limit or part.asset is None:
                 return False
             if (
@@ -182,6 +183,14 @@ class Delivery:
                 or part.asset.media_type not in limit["formats"]
             ):
                 return False
+            if part.type == "image":
+                image_count += 1
+                image_bytes += part.asset.size
+                if (
+                    image_count > features.max_images_per_message
+                    or image_bytes > limit["max_bytes"]
+                ):
+                    return False
         return True
 
     async def _call(self, intent, channel, token, cutoff, n, finalization, receipt_recorded):

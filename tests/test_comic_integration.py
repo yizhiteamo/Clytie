@@ -40,6 +40,8 @@ async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, f
         {"finish": "stop", "text": ""},
         changes={"appearance": {"self_check": False}},
     )
+    features = channel.features().model_copy(update={"max_images_per_message": 4})
+    channel.features = lambda: features
     pages = [encoded_image("PNG", color=c) for c in ("green", "yellow", "purple", "blue")]
     calls = []
     responded = []
@@ -118,12 +120,13 @@ async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, f
         assert succeeded == ([1, 3] if failure else [1, 2, 3, 4])
         if failure:
             assert any(row["status"] == "error" for row in service)
-        delivered = [
-            p.asset.asset_id for msg in channel.sent for p in msg.parts if p.type == "image"
-        ]
-        assert delivered == ([] if failure else [hashlib.sha256(p).hexdigest() for p in pages])
+        image_intents = [msg for msg in channel.sent if any(p.type == "image" for p in msg.parts)]
+        expected_pages = [hashlib.sha256(p).hexdigest() for p in pages]
+        assert [[p.asset.asset_id for p in msg.parts] for msg in image_intents] == (
+            [] if failure else [expected_pages]
+        )
         (invocation,) = agent.ledger.rows("invocation")
-        assert invocation["asset_ids"] == delivered
+        assert invocation["asset_ids"] == ([] if failure else expected_pages)
     finally:
         second_started.set()
         release_second.set()

@@ -4,8 +4,8 @@
   "name": "主动私聊",
   "summary": "按作息、节日和聊天间隔，在主人的私聊里提出开口的话题。",
   "category": "behavior",
-  "version": "0.1.0",
-  "requires": {"sdk": ">=0.18,<0.21"},
+  "version": "0.2.0",
+  "requires": {"sdk": ">=0.18,<0.22"},
   "entry": "plugin:Plugin",
   "permissions": ["message.proactive"],
   "contributes": {

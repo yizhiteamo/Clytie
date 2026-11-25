@@ -37,7 +37,7 @@
         "url": null
       },
       "summary": "用角色参考图和逐页分镜画漫画，可在页眉页脚排字。",
-      "version": "0.1.1"
+      "version": "0.1.2"
     },
     {
       "category": "memory",
@@ -232,7 +232,7 @@
         "url": null
       },
       "summary": "按作息、节日和聊天间隔，在主人的私聊里提出开口的话题。",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "category": "channel",
@@ -250,7 +250,7 @@
         "url": null
       },
       "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "category": "behavior",

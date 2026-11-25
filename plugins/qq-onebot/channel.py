@@ -59,6 +59,7 @@ class OneBotChannel:
     def features(self):
         return ChannelFeatures(
             max_text_chars=self._config.get("max_text_chars", 4000),
+            max_images_per_message=self._config.get("max_images_per_message", 4),
             supports_react=self._reaction_enabled,
             supports_react_remove=self._reaction_enabled and self._remove_enabled,
             supports_quote=True,
@@ -369,7 +370,10 @@ class OneBotChannel:
         if kind is None:
             return self._receipt(intent, "failed", "invalid_request")
         try:
-            parts = await encode_parts(self.ctx, intent, self.features().media_limits)
+            features = self.features()
+            parts = await encode_parts(
+                self.ctx, intent, features.media_limits, features.max_images_per_message
+            )
         except ValueError as error:
             code = (
                 str(error)

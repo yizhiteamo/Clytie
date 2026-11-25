@@ -16,4 +16,6 @@ topics: [good_morning, long_silence, festival]
 
 每日一报在早安后 30–90 分钟安排。没有早安时从伴侣的休息结束算起。她从至多五个候选中挑一两件，也可以都不说。到 14:00 结束当天的简报窗口。状态中的 `breaking_today` 按开口次数计，`brief_sent_today` 表示当日简报已经送达或发送结果未知，`waiting_for_daylight` 是当前因主人休息而等待的新闻件数。
 
+要让她可以画每日一报，先设置本伴侣的形象资料，启用 `comic-maker`，并在伴侣配置中设置 `proactive.tools.draw_comic.daily`。当天还有额度时，她可以用自己的形象播报，让新闻中提到的已登记角色出场。漫画通常每页讲一条新闻，准确的事实和来源链接放在配文里。缺少形象资料、工具不可用或画图失败时，她仍可以发文字简报。需要马上说的大新闻只发文字。
+
 在仓库根目录运行 `python -m pytest tests/test_proactive_timeline.py -q -s`，可以查看虚构的三天时间线，包括每次尝试的时刻、话题、结果和等待原因。配置范围与节奏规则见[主动私聊规格](../../docs/architecture/proactive-spec.md)。

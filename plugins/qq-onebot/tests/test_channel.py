@@ -5,9 +5,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from clytie.sdk import CancelToken, ChannelUnavailable, CredentialUnavailable
 from clytie.sdk.testing import (
+    FakeAssetWriter,
     FakeContext,
     FakeIdentity,
     FakeWebSocket,
@@ -15,7 +17,7 @@ from clytie.sdk.testing import (
     assert_channel_contract,
 )
 from clytie.sdk.testing.samples import sample_intent
-from clytie.sdk.types import Conversation
+from clytie.sdk.types import Conversation, ImagePart
 
 
 def load_channel():
@@ -118,6 +120,62 @@ def test_features_preserve_configured_media_limits(tmp_path):
         tmp_path, media_limits={"image": {"max_bytes": 1024, "formats": ["image/png"]}}
     )
     assert channel.features().media_limits["image"]["max_bytes"] == 1024
+    assert channel.features().max_images_per_message == 4
+
+
+def test_image_count_config_range(tmp_path):
+    manifest = json.loads((Path(__file__).parents[1] / "plugin.json").read_text(encoding="utf-8"))
+    validator = Draft202012Validator(manifest["config"])
+    config = {"url": "ws://127.0.0.1:1"}
+    assert validator.is_valid(config)
+    assert manifest["config"]["properties"]["max_images_per_message"]["default"] == 4
+    for limit in (1, 9):
+        assert validator.is_valid({**config, "max_images_per_message": limit})
+        _, channel, _ = make(tmp_path, max_images_per_message=limit)
+        assert channel.features().max_images_per_message == limit
+    for invalid in (0, 10, 1.5, True):
+        assert not validator.is_valid({**config, "max_images_per_message": invalid})
+
+
+@pytest.mark.parametrize(
+    "image_limit,byte_limit,expected_status,reply",
+    [
+        (3, 3, "sent", None),
+        (3, 3, "unknown", {"status": "async"}),
+        (2, 3, "failed", None),
+        (3, 2, "failed", None),
+    ],
+)
+async def test_multi_image_send_is_one_ordered_request_or_none(
+    tmp_path, image_limit, byte_limit, expected_status, reply
+):
+    ctx, channel, protocol = make(
+        tmp_path,
+        Protocol(reply=reply),
+        max_images_per_message=image_limit,
+        media_limits={"image": {"max_bytes": byte_limit, "formats": ["image/png"]}},
+    )
+    writer = FakeAssetWriter(ctx.assets)
+    parts = [
+        ImagePart(asset=await writer.put(page, "image/png", "test")) for page in (b"a", b"b", b"c")
+    ]
+    message = intent().model_copy(update={"parts": parts, "target": None})
+    await channel.connect()
+    try:
+        receipt = await channel.send(message, CancelToken())
+        assert receipt.intent_id == message.intent_id and receipt.status == expected_status
+        calls = protocol.actions[1:]
+        if expected_status == "failed":
+            assert receipt.error.code == "media_limit"
+            assert not calls
+        else:
+            assert [call["action"] for call in calls] == ["send_group_msg"]
+            assert calls[0]["params"]["message"] == [
+                {"type": "image", "data": {"file": "base64://" + data}}
+                for data in ("YQ==", "Yg==", "Yw==")
+            ]
+    finally:
+        await channel.close()
 
 
 async def test_bound_channel_reference_differs_from_plugin_id(tmp_path):

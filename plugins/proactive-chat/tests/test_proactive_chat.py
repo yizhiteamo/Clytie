@@ -640,6 +640,8 @@ async def test_queued_upgrade_and_breaking_receipt_are_deduplicated_after_restar
     await tick(p, ctx.clock)
     assert len(ctx.proactive.materials[-1]["events"]) == 2
     assert "可能提过" not in ctx.proactive.calls[-1][1]
+    assert "只发文字" in ctx.proactive.calls[-1][1]
+    assert not any(word in ctx.proactive.calls[-1][1] for word in ("漫画", "draw_comic"))
     assert ctx.proactive.calls[-1][2:] == ("news_breaking", True)
     finish(ctx, outcome)
     await tick(p, ctx.clock)
@@ -745,6 +747,23 @@ async def test_daily_brief_waits_for_chat_and_unanswered_backoff_limits_material
     ctx.clock.advance(60)
     await tick(p, ctx.clock)
     assert len(ctx.proactive.materials[-1]["events"]) == 5
+    _, instruction, reason, tools = ctx.proactive.calls[-1]
+    assert (reason, tools) == ("news_brief", True)
+    assert all(
+        phrase in instruction
+        for phrase in (
+            "如果能用 draw_comic",
+            "“漫画角色表”里写着 self 可用",
+            "否则照常只发文字",
+            "主角",
+            "出场",
+            "简短台词",
+            "事实和链接",
+            "不画真人长相",
+            "每页讲一条新闻",
+            "continues",
+        )
+    )
     assert all(
         word in ctx.proactive.calls[-1][1] for word in ("一到两件", "不说", "亲身", "来源", "原文")
     )
