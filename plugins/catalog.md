@@ -10,7 +10,7 @@
 
 ## 漫画能力
 
-[comic-maker](comic-maker/README.md) 按分镜生成多页漫画，可使用伴侣当前形象和会话允许的角色，并通过 `image-gen` 的 `image.render` 服务逐页绘图。
+[comic-maker](comic-maker/README.md) 按分镜生成多页漫画，可使用伴侣当前形象和会话允许的角色。独立场景可并行绘制，连续场景参考上一页，整本按页码交付。
 
 ## 资料能力
 

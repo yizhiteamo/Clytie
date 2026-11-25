@@ -11,7 +11,8 @@ from clytie.sdk import CredentialUnavailable
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 RENDER_SIZES = {"1024x1024", "1024x1536", "1536x1024"}
-TIMEOUT_S = 120
+TOOL_TIMEOUT_S = 120
+RENDER_TIMEOUT_S = 300
 ERROR_CODES = frozenset(
     {
         "content_refused",
@@ -27,6 +28,20 @@ class BackendError(Exception):
     def __init__(self, code):
         self.code = code if code in ERROR_CODES else "invalid_request"
         super().__init__(self.code)
+
+
+async def run_cancellable(operation, cancel):
+    task = asyncio.create_task(operation)
+    cancelled = asyncio.create_task(cancel.wait())
+    try:
+        await asyncio.wait((task, cancelled), return_when=asyncio.FIRST_COMPLETED)
+        cancel.raise_if_cancelled()
+        return await task
+    finally:
+        for pending in (task, cancelled):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, cancelled, return_exceptions=True)
 
 
 class OpenAIBackend:
@@ -95,17 +110,21 @@ class OpenAIBackend:
 
     async def generate(self, prompt, cancel):
         cancel.raise_if_cancelled()
-        data, media, _ = await self._generate(self._fields(prompt), cancel)
+        data, media, _ = await self._generate(self._fields(prompt), cancel, TOOL_TIMEOUT_S)
         return data, media
 
-    async def _generate(self, fields, cancel):
+    async def _generate(self, fields, cancel, timeout_s):
         body = json.dumps(fields, ensure_ascii=False).encode("utf-8")
-        return await self._request("generations", body, "application/json", cancel)
+        return await self._request("generations", body, "application/json", cancel, timeout_s)
 
     async def edit(self, prompt, image_bytes, media_type, cancel):
         cancel.raise_if_cancelled()
         data, media, _ = await self._edit(
-            self._fields(prompt), [(image_bytes, media_type)], MAX_IMAGE_BYTES, cancel
+            self._fields(prompt),
+            [(image_bytes, media_type)],
+            MAX_IMAGE_BYTES,
+            cancel,
+            TOOL_TIMEOUT_S,
         )
         return data, media
 
@@ -115,10 +134,10 @@ class OpenAIBackend:
             raise self._error("invalid_request")
         fields = {**self._fields(prompt), "size": size}
         if not images:
-            return await self._generate(fields, cancel)
-        return await self._edit(fields, images, 20 * 1024 * 1024, cancel)
+            return await self._generate(fields, cancel, RENDER_TIMEOUT_S)
+        return await self._edit(fields, images, 20 * 1024 * 1024, cancel, RENDER_TIMEOUT_S)
 
-    async def _edit(self, fields, images, max_bytes, cancel):
+    async def _edit(self, fields, images, max_bytes, cancel, timeout_s):
         extensions = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
         for image_bytes, media_type in images:
             if (
@@ -162,9 +181,10 @@ class OpenAIBackend:
             b"".join(parts),
             "multipart/form-data; boundary=" + boundary.decode(),
             cancel,
+            timeout_s,
         )
 
-    async def _request(self, endpoint, body, content_type, cancel):
+    async def _request(self, endpoint, body, content_type, cancel, timeout_s):
         http_status = None
 
         async def operation():
@@ -176,19 +196,15 @@ class OpenAIBackend:
                 self.base_url + "/images/" + endpoint,
                 headers=dict([("Authorization", "Bearer " + key), ("Content-Type", content_type)]),
                 body=body,
-                timeout_s=TIMEOUT_S,
+                timeout_s=timeout_s,
                 max_bytes=MAX_RESPONSE_BYTES,
             )
             http_status = response.status
             cancel.raise_if_cancelled()
             return self._decode(response)
 
-        task = asyncio.create_task(operation())
-        cancelled = asyncio.create_task(cancel.wait())
         try:
-            await asyncio.wait((task, cancelled), return_when=asyncio.FIRST_COMPLETED)
-            cancel.raise_if_cancelled()
-            return await task
+            return await run_cancellable(operation(), cancel)
         except BackendError as error:
             raise self._error(error.code, http_status=http_status) from None
         except CredentialUnavailable as error:
@@ -198,11 +214,6 @@ class OpenAIBackend:
         except Exception:
             # 网络异常可能包含完整 URL 或响应，不能传出原异常文本。
             raise self._error("transient", http_status=http_status) from None
-        finally:
-            for pending in (task, cancelled):
-                if not pending.done():
-                    pending.cancel()
-            await asyncio.gather(task, cancelled, return_exceptions=True)
 
     @staticmethod
     def _decode(response):

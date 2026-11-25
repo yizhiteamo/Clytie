@@ -85,6 +85,7 @@ async def test_generate_json_and_rereads_credentials(module):
         "output_format": "png",
     }
     assert args["max_bytes"] == module.MAX_RESPONSE_BYTES
+    assert args["timeout_s"] == 120
 
 
 async def test_edit_multipart(module):
@@ -92,6 +93,7 @@ async def test_edit_multipart(module):
     assert await backend.edit("add clouds", PNG, "image/png", CancelToken()) == (PNG, "image/png")
     _, url, args = ctx.http.calls[0]
     assert url.endswith("/images/edits")
+    assert args["timeout_s"] == 120
     message = BytesParser(policy=policy.default).parsebytes(
         b"Content-Type: " + args["headers"]["Content-Type"].encode() + b"\r\n\r\n" + args["body"],
     )
@@ -122,6 +124,7 @@ async def test_render_uses_ordered_reference_images_size_and_configured_quality(
         {},
     )
     ((_, url, args),) = ctx.http.calls
+    assert args["timeout_s"] == 300
     if images:
         assert url.endswith("/images/edits")
         message = BytesParser(policy=policy.default).parsebytes(

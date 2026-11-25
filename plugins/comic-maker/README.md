@@ -40,9 +40,12 @@ clytie plugin comic-maker font-import '{"companion_id":"companion_a","purpose":"
 
 每页的 `panels` 至少有一格。每格写 `scene`、`characters`（角色 ID 列表）和 `dialogue`（由 `speaker`、`text` 组成的列表），可加文字 `sfx`。没有对白时传空列表。台词要短，准确的数字、产品名和来源放在配文中。真人用文字提到或画不露脸的剪影。可在工具参数中传 `style` 覆盖插件的默认画风。
 
+先画第 1 页。后续页若延续上一页的场景，写 `"continues": true`，插件会等上一页画好并用它作参考。换场景、换话题的页可省略这个字段，它们以第 1 页为画风参考，可以同时画。第一页会忽略这个字段。从第 2 页起，每页的提示词都会带上上一页最后一格的场景和台词，用于衔接。
+
 | 插件配置 | 默认值 | 用途 |
 | --- | --- | --- |
 | `max_pages` | 10 | 单次最大页数 |
+| `max_parallel_pages` | 2 | 同时画 1–4 页；设为 1 时按页码逐页画 |
 | `max_panels` | 10 | 每页最多格数 |
 | `max_dialogue_chars` | 30 | 每句最多字数 |
 | `style` | 浅色 Q 版二次元 | 整页画风 |
@@ -50,3 +53,5 @@ clytie plugin comic-maker font-import '{"companion_id":"companion_a","purpose":"
 | `footer_text` | 空 | 日期旁的说明文字 |
 
 默认由主人调用。向群友开放时，`permissions` 和 `tool_scopes` 需同时允许在当前会话使用 `draw_comic` 与 `draw_image`。保障模式下只有主人能用这项重任务能力。允许主动开口时画漫画，可以配置 `proactive.tools.draw_comic.daily: 2`。每次成功执行的漫画页数由分镜决定，调用画图服务会产生费用。
+
+每次漫画任务最长 3600 秒，实例的 `limits.max_task_seconds` 可以进一步缩短这个时间。任一页失败时，插件取消其他正在画的页，整本漫画不交付。已发出的请求可能产生费用，失败或限流都不会自动重试。账号每分钟出图额度较低时，可以把 `max_parallel_pages` 设为 1。

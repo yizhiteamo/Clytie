@@ -20,7 +20,7 @@ plugins:
 
 每个后端可选配置 `quality`（`low`、`medium`、`high`、`auto`）和 `size`（1–64 个字符的字符串，例如 `auto`、`1024x1024`、`1536x1024`）。生成和修改请求均原样发送已配置值；省略时不发送该字段，由平台使用默认值。插件不维护尺寸列表，所选模型是否支持具体值由服务端判断。
 
-后端调用 OpenAI GPT 图像接口，默认地址为 `https://api.openai.com/v1`，可通过 `base_url` 指定兼容接口。生成使用 JSON，修改使用 multipart；每次一张 PNG，只接受 base64 图片，不下载响应中的 URL。使用宿主 HTTP 的两分钟期限，响应上限二十 MiB，输入及解码后的图片上限十 MiB。未进行真实 API 验证；测试全部使用假后端，模型支持范围由配置所选服务决定。
+后端调用 OpenAI GPT 图像接口，默认地址为 `https://api.openai.com/v1`，可通过 `base_url` 指定兼容接口。生成使用 JSON，修改使用 multipart；每次一张 PNG，只接受 base64 图片，不下载响应中的 URL。`draw_image` 和 `edit_image` 串行运行，每次 HTTP 请求最多等待 120 秒。响应上限二十 MiB，工具输入及解码后的图片上限十 MiB。测试使用假后端，模型支持范围由配置所选服务决定。
 
 后端返回 `content_refused`、`rate_limited`、`transient`、`quota_exceeded` 或 `invalid_request`；只将安全错误码交给模型，不传服务错误正文。`fallback_on_refusal` 默认关闭，开启后仅内容拒绝尝试配置中的下一个后端，其他错误不自动重试或切换。本体不做次数限制；服务额度用尽如实返回 `quota_exceeded`。
 
@@ -31,3 +31,5 @@ plugins:
 ## 供能力插件调用的绘图服务
 
 `image.render` 的 `render` 方法接收 `prompt`、有序的 `references` 和 `size`，按 `draw_image` 的权限运行。尺寸可选 `1024x1024`、`1024x1536`、`1536x1024`。无参考图时走生成接口；有参考图时最多八张，按顺序作为重复的 `image[]` 文件字段上传到编辑接口。画质取后端配置。成功返回一张图片资产，普通画图工具用于“修改上一张”的历史独立保存。[OpenAI 图像生成指南](https://developers.openai.com/api/docs/guides/image-generation)
+
+每个伴侣同时最多处理 4 个 `image.render` 调用。普通画图和改图工具可与它们同时运行。每次渲染请求最多等待 300 秒，超时返回 `transient`，不会自动重试。

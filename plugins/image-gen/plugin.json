@@ -4,7 +4,7 @@
   "name": "image-gen",
   "summary": "通过配置的图像模型生成和修改图片",
   "category": "tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "requires": {
     "sdk": ">=0.20,<0.21"
   },
