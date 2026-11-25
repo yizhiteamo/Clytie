@@ -227,6 +227,7 @@
 | `memory` | `memory.read.public` / `memory.read.private` / `memory.write` |
 | `assets` | `assets.write`（读取仅限当前调用方获授权的资产，不另要求写权限） |
 | `services` | 声明了依赖的服务时出现，只能查到已声明的服务 |
+| `appearance` | `appearance.read`：`current() -> {description, references: list[AssetRef]}`，只读本伴侣当前的形象资料，参考图只在本次调用中有效（comic-spec §8.1，SDK 0.20） |
 | `peer` | `peer` |
 | `model` | `model.invoke` |
 | `http` | `network`；或 `network.public`（只访问公网，content-spec §6，SDK 0.19） |
@@ -438,7 +439,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 |---|---|---|
 | `asset_writer` | `assets.write` | `async put(data: bytes, media_type, origin) -> AssetRef` |
 | `memory` | 任一 `memory.*` | 有 `memory.read.public` 或 `memory.read.private` 时：`async search(text, *, limit=10) -> list[MemoryRecord]`、`async get(record_id) -> MemoryRecord \| None`。有 `memory.write` 时：`async write(draft: MemoryDraft) -> MemoryRecord`；同时具有写权限和读权限时另有 `async revise(record_id, expected_revision, changes: JsonObject) -> MemoryRecord`、`async retract(record_id, expected_revision, reason)`。没有的方法在对象上不存在 |
-| `services` | 声明了服务依赖 | `get(name) -> ServiceProxy \| None`（可选依赖不可用时为 `None`）；`ServiceProxy.call(method, args) -> JsonObject`，不可用时抛 `ServiceUnavailable` |
+| `services` | 声明了服务依赖 | `get(name) -> ServiceProxy \| None`（可选依赖不可用时为 `None`）；`ServiceProxy.call(method, args) -> JsonObject`，不可用时抛 `ServiceUnavailable`。SDK 0.20：服务清单可以声明 `context: true`（处理函数多收一个 `call`：记录、说话人、会话、取消令牌）和 `scope_as`（按调用方的说话人检查本插件某个工具的权限和使用范围），参数中的资产只在本次调用中交给被调用方（comic-spec §8.2） |
 | `peer` | `peer` | `async send(companion_id, kind, payload) -> str`、`async request(companion_id, kind, payload, timeout_s) -> JsonObject` |
 | `model` | `model.invoke` | `async generate(req: ModelRequest, cancel, *, purpose: str) -> ModelTurn`（`purpose` 写入日志） |
 | `http` | `network` | `async request(method, url, *, headers=None, body=None, timeout_s=30, max_bytes=20 MB) -> HttpResponse`（`status`、`headers`、`body: bytes`） |
