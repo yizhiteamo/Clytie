@@ -199,7 +199,8 @@ API 拒绝文件路径参数。CLI 最多读取 20 MiB 图片。保存前显示�
 
 - 清单中的 `api_routes` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/` 之下：清单里写的 `/plugins/<pid>/<子路径>` 对应 `.../plugins/<pid>/<子路径>`。sdk-spec 中"路径固定在 `/plugins/<id>/` 下"的含义保持不变，只是对外再加上伴侣前缀。
 - 请求转交给该伴侣的子进程，由宿主调用插件的 `handler`。处理函数的签名是 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主为它加 10 秒超时，响应大小上限 1 MB。
-- 登录、防伪、确认的规则与本体路由相同。非 GET 路由必须在清单中声明 `audit: true`，宿主写审计；插件没有声明确认或口令的方式，因此非 GET 路由一律不能作为"确认"或"口令"级操作使用。
+- 登录、防伪、确认的规则与本体路由相同。非 GET 路由必须在清单中声明 `audit: true`，宿主写审计。SDK 0.20 起，路由可以在清单中声明 `confirm: true` 和可选的 `admin_password: true`，宿主按第 2.3 节执行；没有声明的路由仍然不能作为"确认"或"口令"级操作使用（comic-spec §8.4）。
+- 插件导入大文件走本体的临时上传区：`POST /companions/<cid>/uploads`、`PUT .../uploads/<id>/<序号>`、`POST .../uploads/<id>/complete`，每块最多 768 KiB 原始字节，上传编号 10 分钟有效，只交给声明了 `uploads` 的指定插件（comic-spec §8.4）。
 - 伴侣没有运行，或者插件没有启用时，返回 404，错误码 `plugin_unavailable`。
 - `webui_panels` 的 `data_route` 必须是同一个插件的 GET 路由（现有校验）。A4.2 提供 `GET /companions/<cid>/panels`，返回声明了的面板列表；页面的渲染在阶段三实现。
 - **插件的 CLI 命令**：`cli_commands` 挂在 `clytie plugin <pid> <命令名>` 之下。只允许加载至少在一个伴侣配置中启用、且没有被卸载的插件（用户已确认，Issue #56 U3）；其他插件的命令不出现在帮助中，调用时以退出码 2 报"插件未启用"。CLI 进程加载插件的清单和模块，只把绑定了 CLI 通行证的 `ApiClient` 交给 `run`，不提供 `ctx`。插件只能通过 API 做事。

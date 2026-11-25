@@ -227,6 +227,7 @@
 | `memory` | `memory.read.public` / `memory.read.private` / `memory.write` |
 | `assets` | `assets.write`（读取仅限当前调用方获授权的资产，不另要求写权限） |
 | `services` | 声明了依赖的服务时出现，只能查到已声明的服务 |
+| `uploads` | 清单声明了 `uploads: {max_bytes}`：`read(upload_id) -> bytes`、`release(upload_id)`，只能读发给本插件、已完成、未过期的上传（comic-spec §8.4，SDK 0.20） |
 | `appearance` | `appearance.read`：`current() -> {description, references: list[AssetRef]}`，只读本伴侣当前的形象资料，参考图只在本次调用中有效（comic-spec §8.1，SDK 0.20） |
 | `peer` | `peer` |
 | `model` | `model.invoke` |
