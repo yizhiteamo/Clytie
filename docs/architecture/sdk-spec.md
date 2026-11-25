@@ -393,7 +393,7 @@ SDK 0.15 起，插件命令只提交会话引用，本体按第 5 节处理确�
 async request(method: str, path: str, *, json: JsonObject | None = None,
               query: dict[str, str] | None = None) -> ApiResponse
 ```
-`ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单见 `api-spec.md` 第 4、5 节。CLI 扩展只拿到绑定 CLI 通行证的 `ApiClient`，不提供 `ctx`。
+`ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单见 `api-spec.md` 第 4、5 节。CLI 扩展只拿到绑定 CLI 通行证的 `ApiClient`，不提供 `ctx`。SDK 0.20 起，清单声明了 `uploads` 的插件，如果命令参数中有 `file` 字段，由本体 CLI 读取这个文件并上传到临时区（comic-spec §8.4），再把 `file` 换成 `upload_id` 交给命令处理函数；处理函数拿不到文件路径。
 
 插件路由 handler 为 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主限制 10 秒超时和 1 MB 响应。清单的 `/plugins/<pid>/<子路径>` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/<子路径>`，请求转交伴侣子进程执行。登录、防伪和审计由本体统一处理。SDK 0.20 起，声明 `confirm: true` 的写入路由由宿主要求确认，另声明 `admin_password: true` 时按 api-spec §2.3 校验管理口令。
 
