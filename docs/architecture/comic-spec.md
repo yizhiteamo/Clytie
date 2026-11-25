@@ -90,6 +90,9 @@
 
 - `comic-maker` 提供一个上下文段落：列出当前会话可以用的角色名字和关键词，并说明有没有 `self`。预算 300 字，超出时只列名字。
 - 只在 `draw_comic` 对当前说话人可用时提供（主动开口时，按 `proactive.tools` 判断）。
+- 怎么判断（实现时补充，2026-11-25）：
+  - 段落在清单中声明 `when_tool: "draw_comic"`。宿主只在这次请求最终交给模型的工具中有 `draw_comic` 时，才调用这个段落；否则根本不调用。这样判断的依据和她实际能用的工具完全一致；
+  - `ContextRequest` 新增 `has_appearance: bool`：本伴侣有没有可用的形象资料（有描述或"当前"参考图任一项）。段落处理器只拿到这个真假值，拿不到描述和参考图，读取形象仍然只能在工具调用中用 `appearance.read`（第 8.1 节）。
 
 ## 5. 字体库与页眉页脚
 
@@ -150,6 +153,7 @@ platform-capabilities-spec §3 的规则这一期第一次实现：
 
 - 新权限 `appearance.read`，对应 `ctx.appearance.current() -> {description, references: list[AssetRef]}`。
 - 服务清单新增 `context`、`scope_as`；处理函数在 `context: true` 时多收一个 `call`。
+- 上下文段落的清单新增 `when_tool`（本插件的一个工具名），`ContextRequest` 新增 `has_appearance: bool`（第 4.3 节）。
 - 都是新增，已有插件不用修改。
 
 ## 9. 验收（C1，离线）
@@ -176,7 +180,7 @@ platform-capabilities-spec §3 的规则这一期第一次实现：
    - 取消时一起取消。
 5. 角色表和字体：
    - 导入检查，包括格式、大小、像素，字体的中文字符；
-   - 会话限制；角色表段落的内容和预算；
+   - 会话限制；角色表段落的内容和预算；`draw_comic` 不在本次工具中时不调用段落处理器；处理器只拿到 `has_appearance`，拿不到描述和参考图；
    - 页眉页脚：有字体时排版，没有字体时跳过，可以关闭。
 6. 工具说明中有台词要短、不画真人长相、只用角色表的规则。
 7. 文档同步：`plugins/catalog.md` 加入 `comic-maker`，CHANGELOG 记录 SDK 0.20。双平台 CI 通过，线上画图调用为 0。

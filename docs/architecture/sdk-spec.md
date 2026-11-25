@@ -300,7 +300,7 @@ async execute(plan: Plan, inv: Invocation, cancel) -> ToolResult
 ### 5.6 其他扩展点
 | 扩展点 | 签名 |
 |---|---|
-| `context_section` | `async contribute(req: ContextRequest) -> ContextSection?`；`ContextRequest`：`scene`、`actor: Actor?`（默认 `None`）、`budget_chars`；SDK 0.16 增加可选的 `conversation`，指向本次会话；主动消息时提供目标会话，actor 为空，普通回复显式传入发送者；`ContextSection`：`title`、`text`、`priority: int` |
+| `context_section` | `async contribute(req: ContextRequest) -> ContextSection?`；`ContextRequest`：`scene`、`actor: Actor?`（默认 `None`）、`budget_chars`；SDK 0.16 增加可选的 `conversation`，指向本次会话；主动消息时提供目标会话，actor 为空，普通回复显式传入发送者；SDK 0.20 增加 `has_appearance: bool`（本伴侣有没有可用的形象资料，只是真假值）；清单可以声明 `when_tool`（本插件的工具名），只在本次请求最终提供了这个工具时才调用（comic-spec §4.3）；`ContextSection`：`title`、`text`、`priority: int` |
 | `schedule` | 清单声明 `{id, every: ISO 8601 固定时长}` 或 `{id, at: "HH:MM", days: [...]}`；处理函数 `async on_tick(tick: Tick)`；`every` 的范围见 §7.7，按 kernel-spec §9 执行 |
 | `service` | 清单声明 `{name, version, methods: [...]}`；`async call(method: str, args: dict) -> dict`。使用方通过 `ctx.services.get(name).call(...)` 调用，参数和返回值都必须可序列化 |
 | `event_subscriber` | 清单声明事件名（可用 `前缀.*`）；`async on_event(e: BusEvent)` |
