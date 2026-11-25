@@ -301,7 +301,7 @@ import clytie.supervisor.entry as entry
 import clytie.supervisor.heartbeat as heartbeat
 OriginalLines = entry.Lines
 class ObservedLines(OriginalLines):
-    def __init__(self, stream, on_message=None):
+    def __init__(self, stream, on_message=None, *, upload_chunks=False):
         def observed(message):
             if message is None:
                 Path(sys.argv[6]).write_text("eof-read", encoding="utf-8")
@@ -314,7 +314,7 @@ class ObservedLines(OriginalLines):
             if message is None:
                 # Acknowledges the real callback, not merely parent pipe close.
                 Path(sys.argv[7]).write_text("eof-observed", encoding="utf-8")
-        super().__init__(stream, observed)
+        super().__init__(stream, observed, upload_chunks=upload_chunks)
 entry.Lines = ObservedLines
 class ObservedHeartbeat(heartbeat.Heartbeat):
     def __init__(self, clock, emit):
