@@ -25,6 +25,9 @@ def test_only_declared_ledger_fields_supply_asset_dependencies():
 
 def test_retained_invocation_asset_ids_survive_content_retention():
     assert ledger_references("invocation", {"result": None, "asset_ids": ["a" * 64]}) == {"a" * 64}
+    assert ledger_references("audit", {"kind": "service.call", "asset_ids": ["b" * 64]}) == {
+        "b" * 64
+    }
 
 
 def test_late_tool_result_is_structured_but_arbitrary_audit_content_is_not():

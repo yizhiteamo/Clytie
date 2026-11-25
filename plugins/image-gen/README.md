@@ -27,3 +27,7 @@ plugins:
 工具通过本体现有幂等键、取消、权限和任务回应流程运行。回应反映整个任务的终态：工具错误交给模型正常说明后，任务仍可正常完成。取消已发出的 HTTP 请求不保证服务端不会计费。插件不做图片内容审核。
 
 接口依据：https://developers.openai.com/api/reference/resources/images/methods/generate 和 https://developers.openai.com/api/reference/resources/images/methods/edit 。
+
+## 供能力插件调用的绘图服务
+
+`image.render` 的 `render` 方法接收 `prompt`、有序的 `references` 和 `size`，按 `draw_image` 的权限运行。尺寸可选 `1024x1024`、`1024x1536`、`1536x1024`。无参考图时走生成接口；有参考图时最多八张，按顺序作为重复的 `image[]` 文件字段上传到编辑接口。画质取后端配置。成功返回一张图片资产，普通画图工具用于“修改上一张”的历史独立保存。[OpenAI 图像生成指南](https://developers.openai.com/api/docs/guides/image-generation)

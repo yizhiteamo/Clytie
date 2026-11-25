@@ -162,6 +162,7 @@ def samples():
         conversation,
         ref,
         asset,
+        t.CurrentAppearance(description="fictional appearance", references=[asset]),
         t.MediaPart(),
         t.MediaContent(data=b"\x89PNG\xff", media_type="image/png"),
         *parts,

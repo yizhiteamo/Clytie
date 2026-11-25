@@ -19,7 +19,7 @@ def make_manifest(root, plugin_id, **overrides):
         "summary": "手写虚构插件",
         "category": "example",
         "version": "1.0.0",
-        "requires": {"sdk": ">=0.7,<0.20"},
+        "requires": {"sdk": ">=0.7,<0.21"},
         "entry": "plugin:Plugin",
         "contributes": {},
         "permissions": [],
@@ -78,6 +78,37 @@ def test_plan_is_topological_and_does_not_enable_missing_optional(tmp_path):
     assert plan.order == ("plugin-b", "plugin-a")
     assert plan.additional == ("plugin-b",)
     assert resolve(items, reversed(["plugin-a", "plugin-b"])).order == plan.order
+
+
+def test_scoped_service_must_reference_a_tool_from_its_own_manifest(tmp_path):
+    from clytie.sdk.types import ServiceDeclaration
+
+    (tool,) = json.loads((ROOT / "plugins/echo-tool/plugin.json").read_text(encoding="utf8"))[
+        "contributes"
+    ]["tools"]
+    service = dict(
+        name="fictional.render",
+        version="1.0",
+        methods=["render"],
+        handler="render",
+        context=True,
+        scope_as=tool["name"],
+    )
+    path = make_manifest(
+        tmp_path,
+        "fictional-renderer",
+        permissions=["appearance.read"],
+        contributes={"tools": [tool], "services": [service]},
+    )
+    manifest = read_manifest(path, repo_root=ROOT)
+    declaration = ServiceDeclaration.model_validate(manifest.data["contributes"]["services"][0])
+    assert declaration.context and declaration.scope_as == tool["name"]
+    data = json.loads(path.read_bytes())
+    data["contributes"]["services"][0]["scope_as"] = "another_plugins_tool"
+    path.write_text(json.dumps(data), encoding="utf8")
+    with pytest.raises(ManifestError) as exc:
+        read_manifest(path, repo_root=ROOT)
+    assert any(i.pointer == "/contributes/services/0/scope_as" for i in exc.value.issues)
 
 
 @pytest.mark.parametrize("case", ["missing", "version", "conflict", "cycle"])

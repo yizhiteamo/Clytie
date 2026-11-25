@@ -1,5 +1,6 @@
 """上下文方法协议；可选属性由宿主按权限提供，未授权时不存在。"""
 
+from dataclasses import dataclass
 from pathlib import Path
 from random import Random
 from typing import Protocol
@@ -10,6 +11,7 @@ from .types import (
     Actor,
     AssetRef,
     Conversation,
+    CurrentAppearance,
     HttpResponse,
     JsonObject,
     JsonValue,
@@ -107,8 +109,25 @@ class Assets(Protocol):
     async def path(self, asset_id: str) -> Path: ...
 
 
+class AppearanceReader(Protocol):
+    async def current(self) -> CurrentAppearance: ...
+
+
+@dataclass(frozen=True)
+class ServiceCall:
+    trace_id: str
+    actor: Actor | None
+    conversation: Conversation
+    cancel: CancelToken
+
+
 class AssetWriter(Protocol):
     async def put(self, data: bytes, media_type: str, origin: str) -> AssetRef: ...
+
+
+class Uploads(Protocol):
+    async def read(self, upload_id: str) -> bytes: ...
+    async def release(self, upload_id: str) -> None: ...
 
 
 class MemoryView(Protocol):

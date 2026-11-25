@@ -286,6 +286,12 @@ async def test_cancel_grace_uses_injected_clock_and_accepts_running_cancel_resul
     await assert_task_cancellation(completed, started=started.wait(), allow_cancelled_result=True)
 
 
+async def test_appearance_reader_contract(tmp_path):
+    profile = t.CurrentAppearance(description="fictional appearance", references=[])
+    ctx = FakeContext(root=tmp_path, permissions=["appearance.read"], appearance=profile)
+    await checks.assert_appearance_reader_contract(ctx.appearance, profile)
+
+
 def test_context_protocol_inventory_is_covered():
     # 新增协议却没有契约入口时本测试失败。
     expected = {
@@ -299,6 +305,8 @@ def test_context_protocol_inventory_is_covered():
         "State": "state",
         "Assets": "assets",
         "AssetWriter": "asset_writer",
+        "AppearanceReader": "appearance_reader",
+        "Uploads": "uploads",
         "MemoryView": "memory_view",
         "MemoryWriter": "memory_insert",
         "WritableMemoryView": "memory_writer",

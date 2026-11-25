@@ -134,6 +134,11 @@ class AssetRef(SDKModel):
     origin: str
 
 
+class CurrentAppearance(SDKModel):
+    description: str
+    references: FrozenList[AssetRef]
+
+
 class TextPart(SDKModel):
     type: Literal["text"] = "text"
     text: str
@@ -599,6 +604,7 @@ class CompanionState(SDKModel):
 
 
 class ContextRequest(SDKModel):
+    has_appearance: bool = False
     conversation: Conversation | None = None
     scene: str
     actor: Actor | None = None
@@ -615,10 +621,14 @@ class ApiRouteDeclaration(SDKModel):
     method: str
     path: Annotated[str, StringConstraints(pattern=r"^/plugins/[a-z][a-z0-9]*(?:-[a-z0-9]+)*/")]
     audit: bool | None = None
+    confirm: bool = False
+    admin_password: bool = False
     handler: str
 
     @model_validator(mode="after")
     def check_audit(self):
+        if self.admin_password and not self.confirm:
+            raise ValueError("admin_password requires confirm=true")
         if self.method != "GET" and self.audit is not True:
             raise ValueError("non-GET plugin routes require audit=true")
         if any(part in {".", ".."} for part in self.path.split("/")):
@@ -638,6 +648,8 @@ class ServiceDeclaration(SDKModel):
     version: str
     methods: FrozenList[str] = Field(default_factory=FrozenList)
     handler: str
+    context: bool = False
+    scope_as: str | None = None
 
 
 class ScheduleDeclaration(SDKModel):

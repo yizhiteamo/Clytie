@@ -395,7 +395,7 @@ async request(method: str, path: str, *, json: JsonObject | None = None,
 ```
 `ApiResponse`：`status: int`、`json: JsonValue | None`。路径以 `/api/v1/` 开头；具体路由清单见 `api-spec.md` 第 4、5 节。CLI 扩展只拿到绑定 CLI 通行证的 `ApiClient`，不提供 `ctx`。SDK 0.20 起，清单声明了 `uploads` 的插件，如果命令参数中有 `file` 字段，由本体 CLI 读取这个文件并上传到临时区（comic-spec §8.4），再把 `file` 换成 `upload_id` 交给命令处理函数；处理函数拿不到文件路径。
 
-插件路由 handler 为 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主限制 10 秒超时和 1 MB 响应。清单的 `/plugins/<pid>/<子路径>` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/<子路径>`，请求转交伴侣子进程执行。登录、防伪和审计由本体统一处理；插件非 GET 路由不能作为确认或口令级操作。
+插件路由 handler 为 `async (request: {method, subpath, query, json}) -> {status, json}`，宿主限制 10 秒超时和 1 MB 响应。清单的 `/plugins/<pid>/<子路径>` 实际挂在 `/api/v1/companions/<cid>/plugins/<pid>/<子路径>`，请求转交伴侣子进程执行。登录、防伪和审计由本体统一处理。SDK 0.20 起，声明 `confirm: true` 的写入路由由宿主要求确认，另声明 `admin_password: true` 时按 api-spec §2.3 校验管理口令。
 
 ### 7.4 通知与事件负载
 
@@ -604,3 +604,9 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 - `ToolResult` 新增可选的 `material`（content-spec §7）。
 - 本体工具新增 `core_recall_material`。
 - 都是新增，已有插件不用修改。决策记录见 ADR 0037。
+
+### SDK 0.20 漫画能力
+
+工具调用中的 `ctx.appearance.current()` 需要 `appearance.read`，返回描述和当前参考图的临时引用。服务清单可用 `context: true` 在处理函数末尾接收本次调用信息，用 `scope_as` 指定权限与使用范围按本插件的哪个工具检查。委托读取、产物归属与取消见 comic-spec §8.1–8.2。
+
+声明 `uploads: {max_bytes}` 的插件可以通过 `ctx.uploads.read(upload_id)` 读取发给自身的已完成上传，用完调用 `ctx.uploads.release(upload_id)`。有效期、分块限制和本机 API 见 comic-spec §8.4。

@@ -29,6 +29,7 @@ from clytie.sdk.types import (
     BusEvent,
     CompanionState,
     Denial,
+    ModelRequest,
     ModelTurn,
     Receipt,
     TokenUsage,
@@ -86,6 +87,7 @@ class HostPlan:
     restore_cascaded: bool = False
     previously_cascaded: tuple[str, ...] = ()
     backup_support: dict = field(default_factory=dict)
+    appearance_readers: tuple[str, ...] = ()
 
     @property
     def ok(self):
@@ -127,6 +129,7 @@ class PluginHost(MigrationMixin):
         self.credentials = {}
         self.accounts = {}
         self.proactive_backends = {}
+        self.upload_stores = {}
 
         def resolve_backends(cid, pid):
             bound = self.asset_store.bind(cid, pid)
@@ -177,6 +180,7 @@ class PluginHost(MigrationMixin):
         self.unit_configs, self.identities = {}, {}
         self.recollection_models = {}
         self.plugin_models = {}
+        self.service_agents = {}
         self.events, self.failures = [], []
         self.snapshots = UpgradeSnapshots(self.home, clock, self.log)
         self.operations = Operations(self.home, self.log, self.clock)
@@ -189,6 +193,13 @@ class PluginHost(MigrationMixin):
         self.event_bus = EventBus(self.clock, self.log, self._event_subscribers)
         self.schedulers = {}
         self.timezone = getattr(getattr(self.clock, "local_tz", None), "key", "UTC")
+
+    def uploads(self, cid):
+        from .uploads import Uploads
+
+        if cid not in self.upload_stores:
+            self.upload_stores[cid] = Uploads(self.home, cid, self.clock)
+        return self.upload_stores[cid]
 
     def configure(
         self,
@@ -450,6 +461,12 @@ class PluginHost(MigrationMixin):
             restore,
             previous,
             {pid: self.backup_support(companion_id, pid) for pid in steps},
+            tuple(
+                pid
+                for pid in steps
+                if operation == "enable"
+                and "appearance.read" in self.manifests[pid].data["permissions"]
+            ),
         )
         self._plans[plan_id] = plan
         return plan
@@ -854,8 +871,17 @@ class PluginHost(MigrationMixin):
     async def _plugin_generate(self, runtime, req, cancel, *, purpose):
         from clytie.agent.plugin_models import error_turn
 
+        from .invocations import current_frame
+
         runtime.model_lifetime.raise_if_cancelled()
         cid, pid = runtime.companion_id, runtime.manifest.id
+        frame = current_frame(cid, pid)
+        if frame is not None and frame.parent is not None:
+            frame.check()
+            if not isinstance(req, ModelRequest):
+                return error_turn("invalid_request")
+            req = req.model_copy(update={"trace_id": frame.call.trace_id})
+            cancel = frame.call.cancel
         memory_model = self.recollection_models.get((cid, pid))
         if memory_model is not None and current_consolidator() == (cid, pid):
             return await memory_model.generate(req, cancel, purpose=purpose, scene=current_scene())
@@ -921,7 +947,10 @@ class PluginHost(MigrationMixin):
         method=None,
         scene="public_group",
         conversation_id=None,
+        service_caller=None,
     ):
+        from .invocations import dispatch
+
         runtime = self.runtimes.get((companion_id, plugin_id))
         registration = next(
             (
@@ -936,7 +965,17 @@ class PluginHost(MigrationMixin):
         if point == "channel" and method == "events":
             return self._event_feed(runtime, registration)
         task = asyncio.create_task(
-            self._invoke(runtime, registration, point, args, method, scene, conversation_id)
+            dispatch(
+                self,
+                runtime,
+                registration,
+                point,
+                args,
+                method,
+                scene,
+                conversation_id,
+                service_caller,
+            )
         )
         runtime.calls.add(task)
         try:
@@ -947,7 +986,9 @@ class PluginHost(MigrationMixin):
     async def _invoke(
         self, runtime, registration, point, args, method, scene, conversation_id=None
     ):
-        if point in {"service", "schedule", "event_subscriber"}:
+        if point in {"schedule", "event_subscriber"} or (
+            point == "service" and not registration.declaration.get("context")
+        ):
             scene = "public_group"
             conversation_id = None
         try:
@@ -1164,9 +1205,14 @@ class PluginHost(MigrationMixin):
             return merged
         return current if phase in {"after_generation", "before_send"} else None
 
-    async def context_sections(self, companion_id, request, *, conversation_id=None):
+    async def context_sections(
+        self, companion_id, request, *, conversation_id=None, available_tools=()
+    ):
         sections = []
         for reg in self.registrations(companion_id, "context_section"):
+            required_tool = reg.declaration.get("when_tool")
+            if required_tool and required_tool not in available_tools:
+                continue
             result = await self.invoke(
                 companion_id,
                 reg.plugin_id,
@@ -1310,6 +1356,8 @@ class PluginHost(MigrationMixin):
 
     async def _close_all(self):
         result = {}
+        for store in self.upload_stores.values():
+            await store.close()
         for cid in sorted(
             set(self.settings) | {key[0] for key in self.runtimes} | set(self.memory_resources)
         ):

@@ -1,6 +1,7 @@
 """测试里新定义的插件不改宿主即可装配及调用全部扩展点。"""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from clytie.sdk import CancelToken
@@ -236,6 +237,41 @@ async def test_new_plugin_all_points_and_dispatch_without_core_modification(tmp_
     await runtime.ctx.events.publish("new-plugin.changed", {})
     assert await call("api_route", "/plugins/new-plugin/status", {}) == {}
     assert runtime.plugin.seen
+    await h.close()
+
+
+async def test_context_section_only_runs_for_its_available_tool(tmp_path):
+    tool = json.loads((Path(__file__).parents[1] / "plugins/echo-tool/plugin.json").read_bytes())[
+        "contributes"
+    ]["tools"][0]
+    plugin(
+        tmp_path,
+        "section-plugin",
+        SOURCE_ALL,
+        contributes={
+            "tools": [dict(tool, factory="create_tool")],
+            "context_section": {
+                "handler": "observe",
+                "budget_chars": 30,
+                "when_tool": tool["name"],
+            },
+        },
+    )
+    h = host(tmp_path)
+    runtime = await enable(h, "section-plugin")
+    request = ContextRequest(scene="owner_private", budget_chars=30, has_appearance=True)
+    await h.context_sections("companion_a", request, available_tools={"other_tool"})
+    assert runtime.plugin.seen == []
+    await h.context_sections("companion_a", request, available_tools={tool["name"]})
+    (observed,) = runtime.plugin.seen
+    assert observed.has_appearance is True
+    assert set(observed.model_dump()) == {
+        "actor",
+        "conversation",
+        "scene",
+        "budget_chars",
+        "has_appearance",
+    }
     await h.close()
 
 

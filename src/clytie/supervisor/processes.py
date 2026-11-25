@@ -10,24 +10,30 @@ from pathlib import Path
 
 
 class Lines:
-    def __init__(self, stream, on_message=None):
+    def __init__(self, stream, on_message=None, *, upload_chunks=False):
         self.queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         descriptor = stream.fileno()
 
         def pump():
-            pending = b""
+            pending = bytearray()
+            ordinary_limit = 1024 * 1024
+            # A full upload chunk is exactly 1 MiB of base64 before the IPC envelope.
+            frame_limit = ordinary_limit + (1024 if upload_chunks else 0)
             try:
                 while True:
                     chunk = os.read(descriptor, 4096)
                     if not chunk:
                         break
-                    pending += chunk
-                    if len(pending) > 1024 * 1024:
-                        break
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
+                    start = len(pending)
+                    pending.extend(chunk)
+                    while (end := pending.find(b"\n", start)) >= 0:
+                        if end > frame_limit:
+                            return
+                        line = pending[:end]
+                        del pending[: end + 1]
+                        start = 0
                         try:
                             value = json.loads(line)
                             if (
@@ -36,11 +42,19 @@ class Lines:
                                 or not isinstance(value.get("seq"), int)
                             ):
                                 continue
+                            if len(line) > ordinary_limit and not (
+                                upload_chunks
+                                and value["type"] == "request"
+                                and value.get("op") == "upload/chunk"
+                            ):
+                                return
                         except (ValueError, UnicodeError):
                             continue
                         if on_message:
                             on_message(value)
                         loop.call_soon_threadsafe(self.queue.put_nowait, value)
+                    if len(pending) > frame_limit:
+                        break
             except (OSError, RuntimeError):
                 pass
             finally:

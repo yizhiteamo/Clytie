@@ -134,7 +134,7 @@ async def companion_main(home, cid):
             if startup and not startup.done() and heartbeat.phase != "migrating":
                 loop.call_soon_threadsafe(startup.cancel)
 
-    lines = Lines(sys.stdin.buffer, observed)
+    lines = Lines(sys.stdin.buffer, observed, upload_chunks=True)
     first = await lines.receive()
     if first is None:
         return 0

@@ -5,7 +5,7 @@
   "summary": "搜索公开来源并提取网页正文",
   "category": "tool",
   "version": "0.1.0",
-  "requires": {"sdk": ">=0.19,<0.20"},
+  "requires": {"sdk": ">=0.19,<0.21"},
   "entry": "plugin:Plugin",
   "priority": 100,
   "dependencies": {},
