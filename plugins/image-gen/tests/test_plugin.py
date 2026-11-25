@@ -2,6 +2,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,30 @@ async def setup(tmp_path):
     plugin = module.Plugin()
     await plugin.start(ctx)
     return module, ctx, plugin
+
+
+async def test_render_service_reads_references_and_returns_product_without_edit_history(tmp_path):
+    _, ctx, plugin = await setup(tmp_path)
+    inv = sample_invocation()
+    token = CancelToken()
+    source = await ctx.asset_writer.put(b"sample reference", "image/png", "fictional")
+
+    async def render(prompt, images, size, cancel):
+        assert cancel is token
+        assert images == [(b"sample reference", "image/png")]
+        assert prompt == "fictional scene" and size == "1024x1536"
+        return b"sample page", "image/png", {"input_tokens": 7}
+
+    plugin.backends = [SimpleNamespace(render=render)]
+    args = {
+        "prompt": "fictional scene",
+        "size": "1024x1536",
+        "references": [source.model_dump(mode="json")],
+    }
+    result = await plugin.render_service("render", args, SimpleNamespace(cancel=token))
+    assert await ctx.assets.read(result["asset"]["asset_id"]) == b"sample page"
+    assert result["usage"] == {"input_tokens": 7}
+    assert await ctx.storage.get(plugin.history_key(inv)) is None
 
 
 class FakeBackend:

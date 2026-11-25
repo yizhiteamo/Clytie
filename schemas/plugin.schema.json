@@ -43,6 +43,14 @@
         "sdk"
       ]
     },
+    "uploads": {
+      "type": "object",
+      "properties": {
+        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 3355.4432e4}
+      },
+      "required": ["max_bytes"],
+      "additionalProperties": false
+    },
     "config_writable": {
       "type": "array",
       "uniqueItems": true,
@@ -342,6 +350,7 @@
         "context_section": {
           "type": "object",
           "properties": {
+            "when_tool": {"type": "string", "minLength": 1},
             "handler": {
               "type": "string",
               "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
@@ -453,6 +462,8 @@
                 },
                 "uniqueItems": true
               },
+              "context": { "type": "boolean", "default": false },
+              "scope_as": { "type": "string", "minLength": 1 },
               "handler": {
                 "type": "string",
                 "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
@@ -737,6 +748,12 @@
               },
               "audit": {
                 "type": "boolean"
+              },
+              "confirm": {
+                "type": "boolean"
+              },
+              "admin_password": {
+                "type": "boolean"
               }
             },
             "patternProperties": {
@@ -750,6 +767,16 @@
               "audit"
             ],
             "allOf": [
+              {
+                "if": {
+                  "required": ["admin_password"],
+                  "properties": {"admin_password": {"const": true}}
+                },
+                "then": {
+                  "required": ["confirm"],
+                  "properties": {"confirm": {"const": true}}
+                }
+              },
               {
                 "if": {
                   "properties": {
@@ -850,6 +877,7 @@
           "network",
           "network.public",
           "assets.write",
+          "appearance.read",
           "subprocess",
           "gpu"
         ]

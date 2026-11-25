@@ -59,6 +59,25 @@ REASONS = {
 }
 
 
+def invalid_argument_location(schema, error):
+    """定位嵌套列表项，只使用清单声明的字段名和序号，不回显参数。"""
+    path = ""
+    for key in error.absolute_path:
+        if not isinstance(schema, dict):
+            break
+        if isinstance(key, int):
+            path += f"[{key + 1}]"
+            schema = schema.get("items")
+        elif key in schema.get("properties", {}):
+            path += ("." if path else "") + key
+            schema = schema["properties"][key]
+        else:
+            break
+    if "[" in path:
+        return f"invalid_arguments：{path}（序号从 1 开始），未满足 {error.validator}。"
+    return "invalid_arguments"
+
+
 class Capability:
     def __init__(self, host, cid, reg, material_budget=6000):
         self.host, self.cid, self.reg = host, cid, reg
@@ -281,6 +300,7 @@ class Agent:
         await self.boundary.initialize()
         self.protection.update(await self.model_call("quota"))
         self.host.plugin_models[self.cid] = self.plugin_models
+        self.host.service_agents[self.cid] = self
         await self.kernel.start()
         from clytie.memory.retrieval import HostExtension
 
@@ -382,6 +402,33 @@ class Agent:
             return False
         roles = scope.get(conversation.kind)
         return roles is None or actor.role in roles
+
+    def service_allowed(self, call, tool):
+        actor = call.actor
+        if actor is None:
+            actor = self.admission.private_actors.get(call.conversation.conversation_id)
+            if call.conversation.kind != "private" or actor is None or actor.role != "owner":
+                return False
+            declaration = self.declarations().get(tool)
+            if declaration is None or (self.protection.active and declaration[1].get("heavy")):
+                return False
+        return self.reason(actor, tool, call.conversation) is None
+
+    async def audit_service(self, trace, pid, service, method, status, products, usage):
+        def write():
+            with self.ledger.transaction():
+                self.ledger.audit(
+                    "service.call",
+                    trace_id=trace,
+                    plugin=pid,
+                    service=service,
+                    method=method,
+                    status=status,
+                    asset_ids=products,
+                    usage=usage,
+                )
+
+        await self.kernel.persist(trace, write)
 
     async def cancellable(self, conversation, actor=None):
         return [
@@ -1213,6 +1260,7 @@ class Agent:
             memory_trace=trace,
             images=images,
             materials=materials,
+            available_tools=set() if exhausted else {spec.name for spec in specs},
             **({"use": use} if use is not None else {}),
         )
         request_messages = [*context, *dialogue]
@@ -1561,16 +1609,15 @@ class Agent:
                 content=REASONS.get(reason, reason),
                 error={"code": reason, "message": ""},
             )
-        if list(
-            Draft202012Validator(spec.model_dump(mode="json")["parameters"]).iter_errors(
-                call.model_dump(mode="json")["arguments"]
-            )
-        ):
+        schema = spec.model_dump(mode="json")["parameters"]
+        errors = Draft202012Validator(schema).iter_errors(call.model_dump(mode="json")["arguments"])
+        invalid = next(errors, None)
+        if invalid is not None:
             return ToolResult(
                 data={},
                 call_id=call.call_id,
                 status="error",
-                content="invalid_arguments",
+                content=invalid_argument_location(schema, invalid),
                 error={"code": "invalid_arguments", "message": ""},
             )
         if call.tool.startswith("core_"):

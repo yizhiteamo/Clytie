@@ -11,7 +11,7 @@ from aiohttp import web
 
 from clytie.supervisor.common import write
 
-from . import appearance
+from . import appearance, uploads
 from .auth import APIError, Auth, Identity, csrf
 
 ROUTES = [
@@ -42,6 +42,9 @@ ROUTES = [
     ("POST", "/silence"),
     *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart", "proactive")],
     ("GET", "/companions/<cid>/smoke/records"),
+    ("POST", uploads.START),
+    ("PUT", uploads.CHUNK),
+    ("POST", uploads.COMPLETE),
     *[("GET" if route == appearance.ROOT else "POST", route) for route in appearance.FIELDS],
     ("GET", "/companions/<cid>/tasks/<task_id>"),
     ("GET", "/companions/<cid>/boundary"),
@@ -144,18 +147,29 @@ class Server:
                     request.method,
                     request.headers.get("X-Clytie-CSRF"),
                 )
-            if route in appearance.FIELDS and request.query:
+            if (route in appearance.FIELDS or route in uploads.OPERATIONS) and request.query:
                 raise APIError("invalid_request")
             if route == appearance.ADD:
                 request = request.clone(client_max_size=appearance.UPLOAD_BODY_BYTES)
+            elif route == uploads.CHUNK:
+                # Accept the exact boundary even on aiohttp releases using an inclusive check.
+                request = request.clone(client_max_size=uploads.CHUNK_BODY_LIMIT + 1)
             try:
-                data = await request.json() if request.can_read_body else {}
+                if route == uploads.CHUNK:
+                    body = await request.read()
+                    if len(body) > uploads.CHUNK_BODY_LIMIT:
+                        raise APIError("request_too_large", 413)
+                    data = {"content": body.decode("ascii")}
+                else:
+                    data = await request.json() if request.can_read_body else {}
             except web.HTTPRequestEntityTooLarge:
-                if route == appearance.ADD:
+                if route == appearance.ADD or route in uploads.OPERATIONS:
                     raise APIError("request_too_large", 413) from None
                 raise
             if not isinstance(data, dict):
                 raise APIError("invalid_request")
+            if route in uploads.OPERATIONS:
+                uploads.validate(route, params, data)
             if route == "/auth/login":
                 session_cookie = self.auth.login(data.get("password"))
                 identity = Identity(
@@ -163,7 +177,12 @@ class Server:
                 )
                 result = {"csrf": csrf(session_cookie)}
             else:
-                confirm, password, description = await self.backend.policy(route, params, data)
+                policy_params = (
+                    {**params, "method": request.method} if "<subpath>" in route else params
+                )
+                confirm, password, description = await self.backend.policy(
+                    route, policy_params, data
+                )
                 if confirm and data.get("confirm") is not True:
                     if password and not self.auth.admin:
                         if description and not description.endswith(("。", "！", "？")):
@@ -194,8 +213,15 @@ class Server:
                         clean["_backup_config_confirmed"] = data.get("confirm") is True
                     if route in {"/backup/memory/plan", "/backup/restore/plan"}:
                         clean["_source_repository_confirmed"] = data.get("confirm") is True
+                    dispatch_params = params
+                    if "<subpath>" in route:
+                        dispatch_params = {
+                            **params,
+                            "confirmed": confirm,
+                            "password_checked": password,
+                        }
                     result = await self.backend.call(
-                        route, params, clean, dict(request.query), request.method
+                        route, dispatch_params, clean, dict(request.query), request.method
                     )
             status = 200
             body = {"ok": True, "result": result}

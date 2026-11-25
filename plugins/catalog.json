@@ -17,6 +17,29 @@
       "version": "0.1.0"
     },
     {
+      "category": "tool",
+      "conflicts": [],
+      "dependencies": {
+        "image-gen": {
+          "version": ">=0.1,<1"
+        }
+      },
+      "id": "comic-maker",
+      "name": "漫画工具",
+      "permissions": [
+        "appearance.read",
+        "assets.write"
+      ],
+      "release_notes": null,
+      "signature": null,
+      "source": {
+        "kind": "official",
+        "url": null
+      },
+      "summary": "用角色参考图和逐页分镜画漫画，可在页眉页脚排字。",
+      "version": "0.1.0"
+    },
+    {
       "category": "memory",
       "conflicts": [],
       "dependencies": {},

@@ -15,6 +15,7 @@ from clytie.sdk.types import (
     ProcessResult,
 )
 
+from .invocations import AppearanceReader, current_frame
 from .memory import memory_view
 from .support import json_copy, timed
 from .surface import surface
@@ -81,18 +82,32 @@ class Context(SimpleNamespace):
 
 
 class ReadAssets:
-    def __init__(self, backend=None):
+    def __init__(self, backend, cid, pid):
         self._backend = backend
+        self._cid, self._pid = cid, pid
+
+    def _grant(self, asset_id):
+        frame = current_frame(self._cid, self._pid)
+        return frame.lookup(asset_id) if frame is not None else None
 
     def _require(self, asset_id):
         if self._backend is None:
             raise KeyError(asset_id)
 
     async def info(self, asset_id):
+        grant = self._grant(asset_id)
+        if grant is not None:
+            return grant.ref.model_copy(update={"asset_id": asset_id})
         self._require(asset_id)
         return AssetRef.model_validate(await self._backend.info(asset_id))
 
     async def read(self, asset_id):
+        grant = self._grant(asset_id)
+        if grant is not None:
+            frame = current_frame(self._cid, self._pid)
+            result = await grant.read()
+            frame.check()
+            return result
         self._require(asset_id)
         result = await self._backend.read(asset_id)
         if not isinstance(result, bytes):
@@ -100,6 +115,8 @@ class ReadAssets:
         return result
 
     async def path(self, asset_id):
+        if self._grant(asset_id) is not None:
+            raise PermissionError("temporary_asset_has_no_path")
         self._require(asset_id)
         path = await self._backend.path(asset_id)
         if not path.is_file() or path.stat().st_mode & 0o222:
@@ -141,8 +158,9 @@ class State:
 
 
 class ServiceProxy:
-    def __init__(self, host, companion, provider, name, methods):
+    def __init__(self, host, companion, caller, provider, name, methods):
         self._host, self._companion, self._provider = host, companion, provider
+        self._caller = caller
         self._name, self._methods = name, tuple(methods)
 
     async def call(self, method, args):
@@ -153,7 +171,13 @@ class ServiceProxy:
             raise ValueError("service arguments must be a JSON object")
         try:
             result = await self._host.invoke(
-                self._companion, self._provider, "service", self._name, method, args
+                self._companion,
+                self._provider,
+                "service",
+                self._name,
+                method,
+                args,
+                service_caller=current_frame(self._companion, self._caller),
             )
         except self._host.failure_type as exc:
             raise ServiceUnavailable(self._name) from exc
@@ -163,10 +187,10 @@ class ServiceProxy:
 
 
 class Services:
-    def __init__(self, host, companion, available):
+    def __init__(self, host, companion, caller, available):
         self._host, self._companion = host, companion
         self._proxies = {
-            name: ServiceProxy(host, companion, provider, name, methods)
+            name: ServiceProxy(host, companion, caller, provider, name, methods)
             for name, (provider, methods) in available.items()
         }
 
@@ -318,13 +342,19 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
             manifest.data["contributes"].get("events", {}).get("publish", ()),
         ),
         "state": State(host, runtime.companion_id, manifest.id),
-        "assets": ReadAssets(backends.get("assets")),
+        "assets": ReadAssets(backends.get("assets"), runtime.companion_id, manifest.id),
     }
+    if "appearance.read" in granted and not migration:
+        values["appearance"] = AppearanceReader(host, runtime.companion_id, manifest.id)
     channel = (
         not migration
         and "channel" in manifest.data["contributes"]
         and runtime.unit_role in {None, "channel"}
     )
+    if not migration and "uploads" in manifest.data:
+        from .uploads import UploadView
+
+        values["uploads"] = UploadView(host.uploads(runtime.companion_id), manifest.id)
     if channel:
         from .credentials import ChannelCredentials
 
@@ -384,7 +414,7 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
             for declaration in provider.data["contributes"].get("services", ()):
                 services[declaration["name"]] = (dependency, declaration["methods"])
     if services and not migration:
-        values["services"] = Services(host, runtime.companion_id, services)
+        values["services"] = Services(host, runtime.companion_id, manifest.id, services)
     if (
         not migration
         and "channel" in manifest.data["contributes"]
@@ -400,6 +430,8 @@ def build_context(host, runtime, config, backends, *, permissions=None, migratio
         "events": ("publish",),
         "state": ("set",),
         "assets": ("info", "read", "path"),
+        "appearance": ("current",),
+        "uploads": ("read", "release"),
         "services": ("get",),
         "subprocess": ("run",),
         "http": ("request",),

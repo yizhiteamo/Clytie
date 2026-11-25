@@ -51,6 +51,9 @@ def read_manifest(path: Path, *, repo_root: Path | None = None) -> Manifest:
     if reader.errors:
         raise ManifestError(reader.errors)
     if data is not None:
+        if "uploads" in data:
+            # JSON Schema integer includes integral exponent notation.
+            data["uploads"]["max_bytes"] = int(data["uploads"]["max_bytes"])
         if data.get("id") != path.parent.name:
             reader.issue(path, ("id",), f"directory id {path.parent.name}", data.get("id"))
         for field, value in [(("version",), data.get("version"))]:
@@ -77,6 +80,24 @@ def read_manifest(path: Path, *, repo_root: Path | None = None) -> Manifest:
                 reader.issue(path, position, "PEP 440 version range", expression)
         if isinstance(data.get("config"), dict):
             reader.plugin_schema(data["config"], path, ("config",))
+        contributes = data["contributes"]
+        tools = {tool["name"] for tool in contributes.get("tools", ())}
+        when_tool = contributes.get("context_section", {}).get("when_tool")
+        if when_tool is not None and when_tool not in tools:
+            reader.issue(
+                path,
+                ("contributes", "context_section", "when_tool"),
+                "a tool declared by the context provider",
+                when_tool,
+            )
+        for index, service in enumerate(contributes.get("services", ())):
+            if "scope_as" in service and service["scope_as"] not in tools:
+                reader.issue(
+                    path,
+                    ("contributes", "services", index, "scope_as"),
+                    "a tool declared by the service provider",
+                    service["scope_as"],
+                )
         types = {
             "before_attention": BeforeAttentionDirective,
             "attention": AttentionDirective,
