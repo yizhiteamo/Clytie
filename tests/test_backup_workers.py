@@ -15,11 +15,15 @@ from clytie.sdk.testing import MockClock
 
 
 async def completed(workers, operation_id):
-    for _ in range(500):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 60
+    while True:
         result = next(item for item in workers.status() if item.get("id") == operation_id)
         if result["phase"] in {"committed", "failed", "cancelled", "recovery_blocked"}:
             await workers.stop("wait")
             return result
+        if loop.time() >= deadline:
+            break
         await SystemClock().sleep(0.02)
         if isinstance(workers.clock, MockClock):
             workers.clock.advance(0.02)
