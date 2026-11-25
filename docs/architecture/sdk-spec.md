@@ -249,6 +249,7 @@ async react(intent: DeliveryIntent, cancel) -> Receipt
 features() -> ChannelFeatures
 ```
 `ChannelFeatures`：`max_text_chars`、`supports_react`、`supports_quote`、`supports_card`、`media_limits: dict`。
+SDK 0.21 新增 `max_images_per_message: int = 1`（至少 1）：一条消息最多能放几张图；大于 1 时，本体按 agent-spec §3.5 合并同一个工具结果的图片（ADR 0040）。
 
 SDK 0.14 的 `supports_media_fetch` 默认 `False`。声明支持的平台提供
 `async fetch_media(part: MediaPart, cancel: CancelToken) -> MediaContent`，
@@ -610,3 +611,8 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 工具调用中的 `ctx.appearance.current()` 需要 `appearance.read`，返回描述和当前参考图的临时引用。服务清单可用 `context: true` 在处理函数末尾接收本次调用信息，用 `scope_as` 指定权限与使用范围按本插件的哪个工具检查。委托读取、产物归属与取消见 comic-spec §8.1–8.2。
 
 声明 `uploads: {max_bytes}` 的插件可以通过 `ctx.uploads.read(upload_id)` 读取发给自身的已完成上传，用完调用 `ctx.uploads.release(upload_id)`。有效期、分块限制和本机 API 见 comic-spec §8.4。
+
+### SDK 0.21 一条消息放多张图（用户 2026-11-25 确认）
+
+- `ChannelFeatures` 新增 `max_images_per_message: int = 1`，合并规则见 agent-spec §3.5。
+- 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0040。

@@ -94,6 +94,10 @@
 
 - 回复草稿 `ReplyDraft`：`parts` 为文字；`form = plain`；`quote` 为空。之后依次经过 `after_generation`、出站检查（第 9 节）、附加任务单、`before_send`。
 - 本次循环中 `ok` 的工具结果带来的产物（`ToolResult.assets`），各作为一条独立的 intent，排在文字回复之后。
+- **一条消息放多张图**（SDK 0.21，ADR 0040）：渠道声明了 `max_images_per_message` 大于 1 时，同一个工具结果的图片产物按顺序合并为尽量少的 intent：
+  - 每条不超过 `max_images_per_message` 张，图片总大小不超过 `media_limits.image.max_bytes`；放不下时另起一条，顺序不变；
+  - 不同工具结果的产物、图片以外的产物不合并；文字回复和任务单照旧各自成条，位置不变；
+  - 主动开口时同样适用。
 - **任务单**：记录是 task、并且有文字回复或产物要发出时，按 kernel-spec §13.3 生成任务单。
   - 有文字回复：接在文字回复最后一条 intent 的末尾（另起一行）。
   - 没有文字回复、只有产物（用户已确认）：任务单单独作为一条文字 intent，排在全部产物之后。不另外生成其他文字。
