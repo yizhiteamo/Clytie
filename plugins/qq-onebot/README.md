@@ -11,6 +11,7 @@ B2 正向 WebSocket 平台插件。按 OneBot v11 标准与仓库 `docs/plugins/
 - `reconnect_delays` 至少一项，默认按 1、2、4、8、16、30 秒重连，耗尽后持续按最后一项间隔重试；成功核验连接后下一次断线重新按这组间隔处理。auth_invalid 或插件停止时退出重连。
 - `queue_limit` 默认 128，溢出丢弃并记录告警和状态计数；不无限积压。
 - `max_message_bytes` 默认 16 MiB；`max_text_chars` 默认 4000。
+- `max_images_per_message` 指定一条消息最多放几张图，默认 4，可设为 1 到 9 的整数。同一条消息的图片按顺序编码为多个 `image` 段，总大小受 `media_limits.image.max_bytes` 限制。
 - `emoji_ids` 没有默认编号，四项 👌⏳✅❌ 都有编号才启用回应；接口不存在时仅当前连接降级。
 - `retcode_classes` 默认空对象。只允许把明确的返回码配置成 rate_limited 或 transient；其他明确失败永久失败，不按错误文字猜测。
 - `media_limits` 默认空对象，不声明媒体发送能力。需要发图时配置 image 的 `max_bytes` 与 MIME `formats`，例如 image/png。audio 和 video 使用对应配置；超限或不支持的类型明确失败。

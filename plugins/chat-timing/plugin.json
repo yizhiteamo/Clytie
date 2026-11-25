@@ -6,7 +6,7 @@
   "category": "behavior",
   "version": "0.1.0",
   "requires": {
-    "sdk": ">=0.17,<0.21"
+    "sdk": ">=0.17,<0.22"
   },
   "entry": "plugin:Plugin",
   "permissions": [],

@@ -78,6 +78,32 @@ def invalid_argument_location(schema, error):
     return "invalid_arguments"
 
 
+def asset_part_groups(assets, features):
+    """按一个工具结果的产物顺序装消息，只有相邻的图片可以合并。"""
+    images = []
+    size = 0
+    image_limit = features.media_limits.get("image")
+    for asset in assets:
+        media = asset.media_type.partition("/")[0]
+        kind = media if media in {"image", "audio", "video"} else "file"
+        part = {"type": kind, "asset": asset}
+        if images and (
+            kind != "image"
+            or len(images) >= features.max_images_per_message
+            or size + asset.size > image_limit["max_bytes"]
+        ):
+            yield images
+            images = []
+            size = 0
+        if kind == "image" and image_limit:
+            images.append(part)
+            size += asset.size
+        else:
+            yield [part]
+    if images:
+        yield images
+
+
 class Capability:
     def __init__(self, host, cid, reg, material_budget=6000):
         self.host, self.cid, self.reg = host, cid, reg
@@ -1319,7 +1345,7 @@ class Agent:
         try:
             if not proactive and actor is not None and actor.role == "owner":
                 spoken_names = self.outbound.names_in_batch(events)
-            assets, dialogue, rounds = [], [], 0
+            result_assets, dialogue, rounds = [], [], 0
             materials = Materials()
             picked = []
             selected_refs = []
@@ -1451,8 +1477,8 @@ class Agent:
                             token,
                             proactive=proactive_tools,
                         )
-                    if result.status == "ok":
-                        assets.extend(result.assets)
+                    if result.status == "ok" and result.assets:
+                        result_assets.append(result.assets)
                     content = result.content
                     budget = self.config.get("context", {}).get("material_budget_chars", 6000)
                     if len(content) > budget and call.tool != RECALL.name:
@@ -1484,7 +1510,7 @@ class Agent:
                 actor,
                 events,
                 text,
-                assets,
+                result_assets,
                 token,
                 spoken_names=spoken_names,
                 proactive=proactive,
@@ -1747,7 +1773,7 @@ class Agent:
         actor,
         events,
         text,
-        assets,
+        result_assets,
         token,
         *,
         spoken_names,
@@ -1885,13 +1911,11 @@ class Agent:
             )
             for i, parts in enumerate(groups)
         ]
-        for asset in assets:
-            media = asset.media_type.split("/")[0]
-            part = {
-                "type": media if media in {"image", "audio", "video"} else "file",
-                "asset": asset,
-            }
-            intents.append(self.intent(record, [part], kind=kind))
+        if result_assets:
+            features = self.kernel.delivery.channels[record["channel_id"]].features()
+            for assets in result_assets:
+                for parts in asset_part_groups(assets, features):
+                    intents.append(self.intent(record, parts, kind=kind))
         if record["task_id"] and intents and not proactive:
             start = (
                 record.get("execution_started_at")

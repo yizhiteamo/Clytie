@@ -400,6 +400,11 @@ def test_manifest_tool_constraints_and_confirmation():
         word in tool["description"]
         for word in ("短", "真人", "角色表", "self", "来源", "continues", "换场景")
     )
+    assert all(
+        rule in tool["description"]
+        for rule in ("指定", "1–4 页", "6–9 格", "短笑话", "场景、动作和表情")
+    )
+    assert any(example["call"] and "两页" in example["input"] for example in tool["examples"])
     assert tool["timeout_s"] == 3600
     page = tool["parameters"]["properties"]["pages"]["items"]
     assert (

@@ -10,6 +10,21 @@ from clytie.sdk import types as t
 AT = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
 
+def test_channel_image_limit_is_backward_compatible_and_positive():
+    features = t.ChannelFeatures(
+        max_text_chars=200,
+        supports_react=False,
+        supports_quote=False,
+        supports_card=False,
+        media_limits={},
+    )
+    assert features.max_images_per_message == 1
+    assert features.model_copy(update={"max_images_per_message": 12}).max_images_per_message == 12
+    for invalid in (0, -1, 1.5, True):
+        with pytest.raises(ValidationError):
+            features.model_copy(update={"max_images_per_message": invalid})
+
+
 def samples():
     actor = t.Actor(actor_id="owner", role="owner", channel_id="fake-channel")
     conversation = t.Conversation(
