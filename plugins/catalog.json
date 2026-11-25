@@ -37,7 +37,7 @@
         "url": null
       },
       "summary": "用角色参考图和逐页分镜画漫画，可在页眉页脚排字。",
-      "version": "0.1.0"
+      "version": "0.1.1"
     },
     {
       "category": "memory",
@@ -156,7 +156,7 @@
         "url": null
       },
       "summary": "通过配置的图像模型生成和修改图片",
-      "version": "0.1.0"
+      "version": "0.1.1"
     },
     {
       "category": "memory",

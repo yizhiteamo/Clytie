@@ -1,8 +1,10 @@
 """脚本模型通过漫画工具与绘图服务逐页绘制；所有传输使用虚构图片。"""
 
+import asyncio
 import base64
 import hashlib
 import json
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +22,11 @@ from .test_vision_image import encoded_image
 async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, failure):
     single_reference(tmp_path)
     panel = {"scene": "fictional garden", "characters": ["self"], "dialogue": []}
-    story = {"title": "Paper garden", "pages": [{"panels": [panel]}, {"panels": [panel]}]}
+    story = {
+        "title": "Paper garden",
+        "pages": [{"panels": [{**panel, "sfx": f"rustle-{n}"}]} for n in range(1, 5)],
+    }
+    story["pages"][3]["continues"] = True
     if failure == "storyboard":
         story["pages"][1]["panels"] = []
     agent, channel, model = await make_agent(
@@ -34,20 +40,33 @@ async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, f
         {"finish": "stop", "text": ""},
         changes={"appearance": {"self_check": False}},
     )
-    pages = [encoded_image("PNG", color=c) for c in ("green", "yellow")]
+    pages = [encoded_image("PNG", color=c) for c in ("green", "yellow", "purple", "blue")]
     calls = []
+    responded = []
+    second_started = asyncio.Event()
+    release_second = asyncio.Event()
 
     async def request(method, url, **options):
         assert method == "POST" and url.endswith("/images/edits")
         body = options["body"]
-        calls.append(body.count(b'name="image[]"'))
-        if len(calls) == 2:
-            assert pages[0] in body
+        (number,) = (n for n in range(1, 5) if f"rustle-{n}".encode() in body)
+        calls.append(number)
+        assert body.count(b'name="image[]"') == (1 if number == 1 else 2)
+        if number > 1:
+            assert pages[2 if number == 4 else 0] in body
+        if number == 2:
+            second_started.set()
+            await release_second.wait()
+        if number == 3:
+            await second_started.wait()
+        responded.append(number)
+        if number == 4:
             if failure == "render":
                 return HttpResponse(status=429, headers={}, body=b"{}")
+            release_second.set()
         payload = {
-            "data": [{"b64_json": base64.b64encode(pages[len(calls) - 1]).decode()}],
-            "usage": {"input_tokens": len(calls)},
+            "data": [{"b64_json": base64.b64encode(pages[number - 1]).decode()}],
+            "usage": {"input_tokens": number},
         }
         return HttpResponse(status=200, headers={}, body=json.dumps(payload).encode())
 
@@ -75,7 +94,8 @@ async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, f
         await enable(h, "comic-maker")
         agent.config["plugins"].update(dict.fromkeys(settings, {"enabled": True}))
         trace = await agent.receive(event(agent))
-        await agent.drain()
+        # Bound a deadlocked test independently of the simulated business deadline.
+        await asyncio.wait_for(asyncio.shield(agent.drain()), 10)  # noqa: TID251
         if failure == "storyboard":
             assert not calls and not agent.ledger.rows("invocation")
             errors = [
@@ -87,14 +107,24 @@ async def test_comic_pages_share_record_and_deliver_in_order_or_none(tmp_path, f
             ]
             assert any("pages[2].panels" in error and "minItems" in error for error in errors)
             return
-        assert calls == [1, 2]
+        assert sorted(calls) == [1, 2, 3, 4]
+        assert responded == ([1, 3, 4] if failure else [1, 3, 4, 2])
+        record = agent.ledger.get("record", trace)
+        claimed = datetime.fromisoformat(record["claimed_at"])
+        assert datetime.fromisoformat(record["deadline"]) == claimed + timedelta(hours=1)
         service = [row for row in agent.ledger.rows("audit") if row["kind"] == "service.call"]
-        assert [row["trace_id"] for row in service] == [trace, trace]
-        assert service[0]["usage"] == {"input_tokens": 1}
-        assert service[1]["status"] == ("error" if failure else "ok")
+        assert len(service) == 4 and all(row["trace_id"] == trace for row in service)
+        succeeded = sorted(row["usage"]["input_tokens"] for row in service if row["status"] == "ok")
+        assert succeeded == ([1, 3] if failure else [1, 2, 3, 4])
+        if failure:
+            assert any(row["status"] == "error" for row in service)
         delivered = [
             p.asset.asset_id for msg in channel.sent for p in msg.parts if p.type == "image"
         ]
         assert delivered == ([] if failure else [hashlib.sha256(p).hexdigest() for p in pages])
+        (invocation,) = agent.ledger.rows("invocation")
+        assert invocation["asset_ids"] == delivered
     finally:
+        second_started.set()
+        release_second.set()
         await finish(agent)

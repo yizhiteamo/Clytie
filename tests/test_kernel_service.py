@@ -221,8 +221,9 @@ async def test_owner_latest_does_not_cancel_other_queued_chat_and_excludes_self(
     kernel.ledger.close()
 
 
-async def test_deadline_uses_first_tool_and_produces_cancelled_deadline(tmp_path):
-    kernel, channel, clock = setup(tmp_path, max_task_seconds=10)
+@pytest.mark.parametrize(("limit", "effective"), [(7200, 3600), (900, 900)])
+async def test_deadline_uses_first_tool_and_produces_cancelled_deadline(tmp_path, limit, effective):
+    kernel, _, clock = setup(tmp_path, max_task_seconds=limit)
     r, inv, _ = await new_record(kernel)
     work = asyncio.create_task(
         kernel.execute(
@@ -231,17 +232,21 @@ async def test_deadline_uses_first_tool_and_produces_cancelled_deadline(tmp_path
             ToolCall(call_id="call", tool="echo", arguments={}),
             Capability(clock, block=True),
             inv,
-            timeout_s=100,
+            timeout_s=3600,
         )
     )
-    await clock.advance_and_drain(10)
+    await clock.advance_and_drain(effective - 1)
+    assert not work.done()
+    await clock.advance_and_drain(1)
+    assert work.done()
     result = await work
     assert result.status == "cancelled" and result.error.code == "deadline"
     await kernel.seal(r["trace_id"], "cancelled", error=dict(code="deadline", message=""))
     await clock.advance_and_drain(kernel.reactions.interval)
     await kernel.reactions.drain()
     await kernel.bus.drain()
-    assert any(entry[1] == "task.timeout_capped" for entry in kernel.log.entries)
+    capped = any(entry[1] == "task.timeout_capped" for entry in kernel.log.entries)
+    assert capped == (limit < 3600)
     kernel.ledger.close()
 
 

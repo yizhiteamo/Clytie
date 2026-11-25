@@ -1,7 +1,9 @@
 """检查全部分镜后才允许进行第一笔画图调用。"""
 
+import asyncio
 import hashlib
 import json
+from dataclasses import dataclass
 
 from clytie.sdk.context import ServiceUnavailable
 from clytie.sdk.immutable import thaw
@@ -37,6 +39,8 @@ def check_story(args, config):
         panels = page.get("panels") if isinstance(page, dict) else None
         if not isinstance(panels, list) or not panels:
             raise ValueError(prefix + "至少需要一格。")
+        if "continues" in page and not isinstance(page["continues"], bool):
+            raise ValueError(prefix + "的 continues 须为布尔值。")
         if len(panels) > config.get("max_panels", 10):
             raise ValueError(prefix + "分格数超出上限。")
         for i, panel in enumerate(panels, 1):
@@ -69,18 +73,70 @@ def cast_of(page):
 
 
 def render_prompt(story, n, cast, descriptions, style, labels):
-    return "\n".join(
-        [
-            "画出一整页漫画。",
-            LAYOUT,
-            f"画风：{style}",
-            f"漫画标题：{story['title']}（第 {n} 页）",
-            "角色资料：" + json.dumps({r: descriptions[r] for r in cast}, ensure_ascii=False),
-            "所附参考图依次为：" + "、".join(labels),
-            "逐格分镜（含说话人及台词原文）："
-            + json.dumps(story["pages"][n - 1]["panels"], ensure_ascii=False),
-        ]
+    lines = [
+        "画出一整页漫画。",
+        LAYOUT,
+        f"画风：{style}",
+        f"漫画标题：{story['title']}（第 {n} 页）",
+        "角色资料：" + json.dumps({r: descriptions[r] for r in cast}, ensure_ascii=False),
+        "所附参考图依次为：" + "、".join(labels),
+    ]
+    if n > 1:
+        last_panel = story["pages"][n - 2]["panels"][-1]
+        continuity = {key: last_panel[key] for key in ("scene", "dialogue")}
+        lines.append(
+            "上一页最后一格（只用于衔接，不画进本页）："
+            + json.dumps(continuity, ensure_ascii=False)
+        )
+    lines.append(
+        "逐格分镜（含说话人及台词原文）："
+        + json.dumps(story["pages"][n - 1]["panels"], ensure_ascii=False)
     )
+    return "\n".join(lines)
+
+
+@dataclass
+class RenderedPage:
+    original: AssetRef
+    decorated: AssetRef
+    summary: str
+
+
+class PageError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+async def render_pages(pages, parallel, render, cancel):
+    # Page numbers are one-based. Preserve their order when selecting ready pages.
+    waiting = {n: n - 1 if page.get("continues") else 1 for n, page in enumerate(pages, 1)}
+    waiting[1] = None
+    completed = {}
+    running = {}
+    cancelled = asyncio.create_task(cancel.wait())
+    try:
+        while waiting or running:
+            cancel.raise_if_cancelled()
+            for n, reference in list(waiting.items()):
+                if len(running) == parallel:
+                    break
+                if reference is not None and reference not in completed:
+                    continue
+                original = completed[reference].original if reference is not None else None
+                task = asyncio.create_task(render(n, original))
+                running[task] = n
+                del waiting[n]
+            done, _ = await asyncio.wait([*running, cancelled], return_when=asyncio.FIRST_COMPLETED)
+            cancel.raise_if_cancelled()
+            for task in done:
+                n = running.pop(task)
+                completed[n] = task.result()
+        return [completed[n] for n in range(1, len(pages) + 1)]
+    finally:
+        for task in (*running, cancelled):
+            task.cancel()
+        await asyncio.gather(*running, cancelled, return_exceptions=True)
 
 
 class ComicTool:
@@ -143,13 +199,17 @@ class ComicTool:
         if service is None:
             return failure(call_id, "unavailable", "画图服务不可用。")
         style = story.get("style", ctx.config.get("style", DEFAULT_STYLE))
-        result_pages, summaries = [], []
-        previous = None
-        for n, page in enumerate(story["pages"], 1):
+
+        async def render(n, reference):
             cancel.raise_if_cancelled()
+            page = story["pages"][n - 1]
             cast = cast_of(page)
-            selected, missing = page_references(page["panels"], portraits, previous)
-            labels = ["上一页（画风）"] if previous else []
+            selected, missing = page_references(page["panels"], portraits, reference)
+            labels = []
+            if reference is not None:
+                labels.append(
+                    "上一页（画风和衔接）" if page.get("continues") else "第 1 页（画风）"
+                )
             for ref in selected[len(labels) :]:
                 labels.append(" / ".join(r for r in cast if ref in portraits[r]))
             prompt = render_prompt(story, n, cast, descriptions, style, labels)
@@ -162,28 +222,35 @@ class ComicTool:
                         "references": [r.model_dump(mode="json") for r in selected],
                     },
                 )
-            except ServiceUnavailable:
-                return failure(call_id, "unavailable", f"第 {n} 页画图服务不可用。")
+            except ServiceUnavailable as exc:
+                raise PageError("unavailable", f"第 {n} 页画图服务不可用。") from exc
             cancel.raise_if_cancelled()
             if "error" in result:
                 code = result["error"]
-                return failure(call_id, code, f"第 {n} 页绘制失败（{code}）。")
+                raise PageError(code, f"第 {n} 页绘制失败（{code}）。")
             try:
-                previous = AssetRef.model_validate(thaw(result["asset"]))
-                result_pages.append(await self.plugin.decorate(previous, story["title"], n))
-            except (KeyError, ValueError, OSError):
-                return failure(call_id, "invalid_page", f"第 {n} 页的图片无法读取或排版。")
+                original = AssetRef.model_validate(thaw(result["asset"]))
+                decorated = await self.plugin.decorate(original, story["title"], n)
+            except (KeyError, ValueError, OSError) as exc:
+                raise PageError("invalid_page", f"第 {n} 页的图片无法读取或排版。") from exc
             line = f"第 {n} 页：" + ("、".join(names[r] for r in cast) or "无角色")
             if missing:
                 line += "；未附参考图：" + "、".join(missing)
-            summaries.append(line)
+            return RenderedPage(original, decorated, line)
+
+        try:
+            pages = await render_pages(
+                story["pages"], ctx.config.get("max_parallel_pages", 2), render, cancel
+            )
+        except PageError as exc:
+            return failure(call_id, exc.code, str(exc))
         cancel.raise_if_cancelled()
         return ToolResult(
             call_id=call_id,
             status="ok",
-            assets=result_pages,
+            assets=[page.decorated for page in pages],
             data={},
-            content=f"共 {len(result_pages)} 页。\n" + "\n".join(summaries),
+            content=f"共 {len(pages)} 页。\n" + "\n".join(page.summary for page in pages),
         )
 
 

@@ -4,7 +4,7 @@
   "name": "漫画工具",
   "summary": "用角色参考图和逐页分镜画漫画，可在页眉页脚排字。",
   "category": "tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "requires": {
     "sdk": ">=0.20,<0.21"
   },
@@ -26,7 +26,7 @@
       {
         "name": "draw_comic",
         "factory": "create_draw",
-        "description": "按分镜绘制多页漫画。台词要短，数字、产品名和来源写在配文里。只用角色表的 ID 和 self。不画真人长相，用文字或不露脸的剪影代替。",
+        "description": "按分镜绘制多页漫画。台词要短，数字、产品名和来源写在配文里。只用角色表的 ID 和 self。不画真人长相，用文字或不露脸的剪影代替。同一场景跨页、剧情紧接上一页时标 continues。换场景或换话题时省略，例如每日一报每页讲一条新闻。",
         "when_not_to_use": "讨论漫画、转述画漫画的要求、明确拒绝画漫画时不用。",
         "examples": [
           {
@@ -60,6 +60,10 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                  "continues": {
+                    "type": "boolean",
+                    "description": "本页是否紧接上一页的场景。第 1 页忽略此项。"
+                  },
                   "panels": {
                     "type": "array",
                     "items": {
@@ -135,6 +139,7 @@
           "stranger"
         ],
         "heavy": true,
+        "timeout_s": 3600,
         "risk": "low",
         "delivery": "image"
       }
@@ -310,6 +315,12 @@
         "type": "integer",
         "minimum": 1,
         "default": 10
+      },
+      "max_parallel_pages": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 2
       },
       "max_panels": {
         "type": "integer",

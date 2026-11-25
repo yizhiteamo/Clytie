@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import sys
@@ -147,3 +148,95 @@ async def test_edit_plan_rechecks_last_image(tmp_path):
     await ctx.storage.set(plugin.history_key(inv), [{"asset_id": "b" * 64}])
     result = await edit.execute(plan, inv, CancelToken())
     assert result.error.code == "invalid_request" and len(backend.calls) == 1
+
+
+async def test_render_limit_independent_of_serial_draw_and_edit(tmp_path):
+    _, ctx, plugin = await setup(tmp_path)
+    release_pages = asyncio.Event()
+    release_edit = asyncio.Event()
+    active_pages = set()
+    calls = []
+
+    class Backend(FakeBackend):
+        async def render(self, prompt, images, size, cancel):
+            active_pages.add(prompt)
+            calls.append(prompt)
+            try:
+                await release_pages.wait()
+                return b"fictional-page", "image/png", {}
+            finally:
+                active_pages.remove(prompt)
+
+        async def edit(self, prompt, data, media_type, cancel):
+            calls.append("edit")
+            await release_edit.wait()
+            return data, media_type
+
+    backend = Backend(ctx)
+    plugin.backends = [backend]
+    inv = sample_invocation()
+    call = sample_call().model_copy(update={"arguments": {"prompt": "fictional"}})
+    draw, edit = plugin.create_draw(), plugin.create_edit()
+    plan = await draw.prepare(call, inv)
+    assert (await draw.execute(plan, inv, CancelToken())).status == "ok"
+    backend.calls.clear()
+    edit_plan = await edit.prepare(call, inv)
+
+    def render(index, token):
+        args = {"prompt": f"page-{index}", "size": "1024x1536"}
+        return asyncio.create_task(
+            plugin.render_service("render", args, SimpleNamespace(cancel=token))
+        )
+
+    tokens = [CancelToken() for _ in range(6)]
+    pages = [render(i, token) for i, token in enumerate(tokens)]
+    editing = asyncio.create_task(edit.execute(edit_plan, inv, CancelToken()))
+    drawing = asyncio.create_task(draw.execute(plan, inv, CancelToken()))
+    try:
+        await ctx.clock.drain()
+        assert len(active_pages) == 4
+        assert calls.count("edit") == 1 and not backend.calls
+
+        tokens[4].cancel()
+        pages[1].cancel()
+        await ctx.clock.drain()
+        assert pages[4].cancelled() and pages[1].cancelled()
+        assert active_pages == {"page-0", "page-2", "page-3", "page-5"}
+        assert "page-4" not in calls
+
+        release_edit.set()
+        await ctx.clock.drain()
+        assert editing.result().status == drawing.result().status == "ok"
+        assert backend.calls == ["fictional"]
+        assert len(active_pages) == 4
+    finally:
+        release_edit.set()
+        release_pages.set()
+        results = await asyncio.gather(*pages, editing, drawing, return_exceptions=True)
+    assert all("asset" in results[index] for index in (0, 2, 3, 5))
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), OSError()])
+async def test_render_timeout_is_transient_without_retry_or_fallback(tmp_path, error):
+    module, ctx, plugin = await setup(tmp_path)
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append(kwargs["timeout_s"])
+        raise error
+
+    async def read(ref):
+        return "fictional-value"
+
+    ctx.http = SimpleNamespace(request=request)
+    ctx.credentials = SimpleNamespace(read=read)
+    config = {"model": "fictional", "api_key_ref": "fictional"}
+    plugin.backends = [module.OpenAIBackend(ctx, config), module.OpenAIBackend(ctx, config)]
+    plugin.fallback = True
+    result = await plugin.render_service(
+        "render",
+        {"prompt": "fictional", "size": "1024x1536"},
+        SimpleNamespace(cancel=CancelToken()),
+    )
+    assert result == {"error": "transient"}
+    assert calls == [300]

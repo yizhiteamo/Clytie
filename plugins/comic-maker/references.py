@@ -4,10 +4,10 @@ from clytie.sdk.types import AssetRef
 
 
 def page_references(
-    panels: list[dict], portraits: dict[str, list[AssetRef]], previous_page: AssetRef | None
+    panels: list[dict], portraits: dict[str, list[AssetRef]], style_page: AssetRef | None
 ) -> tuple[list[AssetRef], list[str]]:
     roles = list(dict.fromkeys(role for panel in panels for role in panel["characters"]))
-    selected = [previous_page] if previous_page is not None else []
+    selected = [style_page] if style_page is not None else []
     represented = set()
     for index in range(max((len(portraits[role]) for role in roles), default=0)):
         for role in roles:

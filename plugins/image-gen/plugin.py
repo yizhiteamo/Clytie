@@ -5,7 +5,7 @@ import hashlib
 
 from clytie.sdk.types import AssetRef, Denial, ErrorInfo, Plan, ToolResult
 
-from .backend import RENDER_SIZES, BackendError, OpenAIBackend
+from .backend import RENDER_SIZES, BackendError, OpenAIBackend, run_cancellable
 
 
 class ImageTool:
@@ -39,7 +39,7 @@ class ImageTool:
     async def execute(self, plan, inv, cancel):
         cancel.raise_if_cancelled()
         ctx = self.plugin.ctx
-        async with self.plugin.lock:
+        async with self.plugin.tool_lock:
             cancel.raise_if_cancelled()
             await ctx.clock.sleep(0)
             image, media_type = None, None
@@ -99,7 +99,8 @@ class Plugin:
     async def start(self, ctx):
         await ctx.clock.sleep(0)
         self.ctx = ctx
-        self.lock = asyncio.Lock()
+        self.tool_lock = asyncio.Lock()
+        self.render_slots = asyncio.Semaphore(4)
         self.fallback = ctx.config.get("fallback_on_refusal", False)
         self.backends = [OpenAIBackend(ctx, config) for config in ctx.config["backends"]]
 
@@ -133,7 +134,10 @@ class Plugin:
             or len(references) > 8
         ):
             return {"error": "invalid_request"}
-        async with self.lock:
+        return await run_cancellable(self._render(prompt, references, size, cancel), cancel)
+
+    async def _render(self, prompt, references, size, cancel):
+        async with self.render_slots:
             cancel.raise_if_cancelled()
             images = []
             try:

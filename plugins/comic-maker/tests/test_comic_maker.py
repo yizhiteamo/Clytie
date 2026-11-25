@@ -1,8 +1,11 @@
+import asyncio
 import hashlib
 import importlib.util
 import io
 import json
+import re
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +14,7 @@ from PIL import Image, ImageFont, PngImagePlugin
 
 from clytie.sdk import CancelToken
 from clytie.sdk.testing import FakeContext, MockClock
+from clytie.sdk.testing.helpers import checkpoint
 from clytie.sdk.testing.samples import sample_conversation, sample_invocation
 from clytie.sdk.types import Denial, ToolCall
 
@@ -83,13 +87,13 @@ def arguments(*panels):
     return {"title": "蓝花", "pages": [{"panels": [p]} for p in panels]}
 
 
-async def draw(plugin, args):
+async def draw(plugin, args, cancel=None):
     tool, inv = plugin.create_draw(), sample_invocation()
     call = ToolCall(call_id="fake-comic", tool="draw_comic", arguments=args)
     plan = await tool.prepare(call, inv)
     if isinstance(plan, Denial):
         return plan
-    return await tool.execute(plan, inv, CancelToken())
+    return await tool.execute(plan, inv, cancel or CancelToken())
 
 
 def character(**overrides):
@@ -118,6 +122,7 @@ async def commit(plugin, entry):
             "第 2 页",
         ),
         (lambda a: a["pages"][1].update(panels=[]), "第 2 页"),
+        (lambda a: a["pages"][1].update(continues="true"), "第 2 页"),
         (lambda a: a["pages"][1]["panels"][0].update(scene=" "), "第 2 页"),
         (lambda a: a["pages"][1]["panels"][0].update(characters=["unknown"]), "未知角色"),
         (lambda a: a["pages"][1]["panels"][0].update(characters=["self"]), "形象"),
@@ -160,7 +165,9 @@ async def test_page_assets_prompt_previous_page_and_no_dialogue_in_result(comic)
 async def test_no_partial_assets_after_failure(comic):
     plugin, _, renderer = comic
     renderer.fail_on = 2
-    result = await draw(plugin, arguments(panel(), panel(), panel()))
+    args = arguments(panel(), panel(), panel())
+    args["pages"][2]["continues"] = True
+    result = await draw(plugin, args)
     assert result.status == "error" and not result.assets
     assert "第 2 页" in result.content and len(renderer.requests) == 2
 
@@ -175,6 +182,158 @@ async def test_invalid_second_render_omits_first_page(comic):
     ctx.services["image.render"] = SimpleNamespace(call=render)
     result = await draw(plugin, arguments(panel(), panel()))
     assert result.status == "error" and not result.assets and "第 2 页" in result.content
+
+
+async def settle_until(condition):
+    for _ in range(100):
+        if condition():
+            return
+        await checkpoint()
+    pytest.fail("render scheduler did not reach the expected state")
+
+
+class ControlledRenderer:
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.started = []
+        self.pending = {}
+        self.requests = {}
+        self.assets = {}
+        self.cancelled = set()
+        self.peak = 0
+
+    async def call(self, method, args):
+        assert method == "render"
+        n = int(re.search(r"漫画标题：蓝花（第 (\d+) 页）", args["prompt"])[1])
+        assert n not in self.requests
+        self.requests[n] = args
+        self.pending[n] = asyncio.get_running_loop().create_future()
+        self.peak = max(self.peak, len(self.pending))
+        self.started.append(n)
+        try:
+            error = await self.pending[n]
+            if error:
+                return {"error": error}
+            asset = await self.ctx.asset_writer.put(png((0, 0, n)), "image/png", "image-gen")
+            self.assets[n] = asset
+            return {"asset": asset.model_dump(mode="json")}
+        except asyncio.CancelledError:
+            self.cancelled.add(n)
+            raise
+        finally:
+            del self.pending[n]
+
+    async def expect_started(self, *pages):
+        await settle_until(lambda: len(self.started) >= len(pages))
+        assert sorted(self.started) == sorted(pages)
+        self.started.clear()
+
+    def finish(self, n, error=None):
+        self.pending[n].set_result(error)
+
+
+@asynccontextmanager
+async def controlled_draw(comic, flags, cancel=None):
+    plugin, ctx, _ = comic
+    renderer = ControlledRenderer(ctx)
+    ctx.services["image.render"] = renderer
+    story = arguments(*(panel() for _ in flags))
+    for n, (page, flag) in enumerate(zip(story["pages"], flags), 1):
+        if flag is not None:
+            page["continues"] = flag
+        page["panels"].append(
+            {
+                "scene": f"亭子 {n}",
+                "characters": [],
+                "dialogue": [{"speaker": "旁白", "text": f"花瓣 {n}"}],
+            }
+        )
+    task = asyncio.create_task(draw(plugin, story, cancel))
+    try:
+        yield renderer, task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_independent_pages_and_continuation_chain_return_in_page_order(comic):
+    async with controlled_draw(comic, [True, None, True, True, False, None]) as (render, task):
+        await render.expect_started(1)
+        assert render.requests[1]["references"] == []
+        render.finish(1)
+        await render.expect_started(2, 5)
+        render.finish(5)
+        await render.expect_started(6)
+        render.finish(2)
+        await render.expect_started(3)
+        render.finish(3)
+        await render.expect_started(4)
+        render.finish(4)
+        render.finish(6)
+        result = await task
+    assert render.peak == 2 and result.status == "ok"
+    assert list(result.assets) == [render.assets[n] for n in range(1, 7)]
+    assert [f"第 {n} 页：无角色" for n in range(1, 7)] == result.content.splitlines()[1:]
+    assert "只用于衔接" not in render.requests[1]["prompt"]
+    for n, reference in [(2, 1), (3, 2), (4, 3), (5, 1), (6, 1)]:
+        request = render.requests[n]
+        assert request["references"] == [render.assets[reference].model_dump(mode="json")]
+        label = "上一页（画风和衔接）" if n in (3, 4) else "第 1 页（画风）"
+        assert f"所附参考图依次为：{label}\n" in request["prompt"]
+        assert f"亭子 {n - 1}" in request["prompt"] and f"花瓣 {n - 1}" in request["prompt"]
+        assert "只用于衔接，不画进本页" in request["prompt"]
+
+
+async def test_single_slot_preserves_order_and_style_reference(comic):
+    comic[1].config = {"max_parallel_pages": 1}
+    async with controlled_draw(comic, [None, None, True, None]) as (render, task):
+        for n in range(1, 5):
+            await render.expect_started(n)
+            render.finish(n)
+        assert (await task).status == "ok"
+    assert render.peak == 1
+    assert [render.requests[n]["references"][0]["asset_id"] for n in (2, 3, 4)] == [
+        render.assets[n].asset_id for n in (1, 2, 1)
+    ]
+
+
+async def test_four_slots_respect_configured_limit(comic):
+    comic[1].config = {"max_parallel_pages": 4}
+    async with controlled_draw(comic, [None] * 6) as (render, task):
+        await render.expect_started(1)
+        render.finish(1)
+        await render.expect_started(2, 3, 4, 5)
+        render.finish(5)
+        await render.expect_started(6)
+        for n in (6, 4, 3, 2):
+            render.finish(n)
+        assert (await task).status == "ok"
+    assert render.peak == 4
+
+
+@pytest.mark.parametrize("stop", ["rate_limited", "token", "task"])
+async def test_failure_or_cancellation_drains_siblings_and_stops_queued_pages(comic, stop):
+    cancel = CancelToken()
+    async with controlled_draw(comic, [None] * 4, cancel) as (render, task):
+        await render.expect_started(1)
+        render.finish(1)
+        await render.expect_started(2, 3)
+        if stop == "rate_limited":
+            render.finish(2, "rate_limited")
+            await settle_until(task.done)
+            result = task.result()
+            assert result.status == "error" and result.error.code == "rate_limited"
+            assert "第 2 页" in result.content and not result.assets
+            assert render.cancelled == {3}
+        else:
+            if stop == "token":
+                cancel.cancel()
+            else:
+                task.cancel()
+            await settle_until(task.done)
+            assert task.cancelled()
+            assert render.cancelled == {2, 3}
+    assert set(render.requests) == {1, 2, 3} and not render.pending
 
 
 async def test_reference_previews_revalidate_and_strip_metadata(comic):
@@ -237,7 +396,21 @@ def test_manifest_tool_constraints_and_confirmation():
     manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
     tool = manifest["contributes"]["tools"][0]
     assert tool["name"] == "draw_comic" and tool["heavy"]
-    assert all(word in tool["description"] for word in ("短", "真人", "角色表", "self", "来源"))
+    assert all(
+        word in tool["description"]
+        for word in ("短", "真人", "角色表", "self", "来源", "continues", "换场景")
+    )
+    assert tool["timeout_s"] == 3600
+    page = tool["parameters"]["properties"]["pages"]["items"]
+    assert (
+        page["properties"]["continues"]["type"] == "boolean" and "continues" not in page["required"]
+    )
+    assert manifest["config"]["properties"]["max_parallel_pages"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 2,
+    }
     section = manifest["contributes"]["context_section"]
     assert section["budget_chars"] == 300 and section["when_tool"] == "draw_comic"
     commit_route = next(r for r in manifest["contributes"]["api_routes"] if r["method"] == "POST")
