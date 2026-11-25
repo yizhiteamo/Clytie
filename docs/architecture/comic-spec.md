@@ -149,6 +149,14 @@ platform-capabilities-spec §3 的规则这一期第一次实现：
   - 参数：提示词、参考图资产（最多 8 张）、尺寸（`1024x1024`、`1024x1536` 或 `1536x1024`）；
   - 返回一张图片资产。画质沿用 `image-gen` 的配置；带参考图时使用画图接口的参考图输入，具体接口以官方文档为准，在 PR 中写明依据。
 
+### 8.3 SDK 0.20
+
+- 新权限 `appearance.read`，对应 `ctx.appearance.current() -> {description, references: list[AssetRef]}`。
+- 服务清单新增 `context`、`scope_as`；处理函数在 `context: true` 时多收一个 `call`。
+- 清单新增 `uploads: {max_bytes}`，对应 `ctx.uploads.read`、`ctx.uploads.release`；路由可以声明 `confirm`、`admin_password`（第 8.4 节）。
+- 上下文段落的清单新增 `when_tool`（本插件的一个工具名），`ContextRequest` 新增 `has_appearance: bool`（第 4.3 节）。
+- 都是新增，已有插件不用修改。
+
 ### 8.4 插件导入文件的通道（实现时补充，2026-11-25）
 
 角色参考图最多 20 MiB，字体最多 30 MiB，而本机 API 单次请求最多 1 MiB；插件路由原来也不能要求确认和口令（api-spec §5）。所以补一个通用的导入通道，以后别的插件导入文件也用它。
@@ -171,14 +179,6 @@ platform-capabilities-spec §3 的规则这一期第一次实现：
      - 图片：尺寸、是否能完整解码，以及"参考图会随画图请求发给画图服务商"；
      - 字体：字体名、用途、是否包含常用简体中文字符，以及"请确认这个字体的许可证允许你这样使用"；
   3. 用户确认后，CLI 调用提交路由（`confirm: true`，已经设置管理口令时要输入口令）。插件写入：参考图进资产库，字体放在插件的私有目录中，并记下确认许可证的时间；然后释放上传。
-
-### 8.3 SDK 0.20
-
-- 新权限 `appearance.read`，对应 `ctx.appearance.current() -> {description, references: list[AssetRef]}`。
-- 服务清单新增 `context`、`scope_as`；处理函数在 `context: true` 时多收一个 `call`。
-- 清单新增 `uploads: {max_bytes}`，对应 `ctx.uploads.read`、`ctx.uploads.release`；路由可以声明 `confirm`、`admin_password`（第 8.4 节）。
-- 上下文段落的清单新增 `when_tool`（本插件的一个工具名），`ContextRequest` 新增 `has_appearance: bool`（第 4.3 节）。
-- 都是新增，已有插件不用修改。
 
 ## 9. 验收（C1，离线）
 
