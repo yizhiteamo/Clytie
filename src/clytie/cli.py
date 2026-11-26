@@ -24,7 +24,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     smoke.add_argument("--home")
     smoke.add_argument("--yes", action="store_true", help="仍需当次确认")
     supervisor_parser = subcommands.add_parser("supervisor", help="守护进程")
-    supervisor_parser.add_argument("action", choices=["start", "status", "stop", "silence"])
+    supervisor_parser.add_argument(
+        "action", choices=["start", "status", "stop", "silence", "notify-test"]
+    )
     supervisor_parser.add_argument("--home")
     supervisor_parser.add_argument("--json", action="store_true")
     supervisor_parser.add_argument("--detach", action="store_true")

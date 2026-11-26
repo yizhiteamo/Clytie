@@ -295,6 +295,8 @@ async def execute(args, client=None):
             {"path": args.value},
         )
     if command == "supervisor":
+        if args.action == "notify-test":
+            return await cli.request("POST", "/supervisor/notify-test", {})
         path = (
             "/status"
             if args.action == "status"
@@ -635,6 +637,15 @@ def run(args):
             if isinstance(output, dict) and output.get("recovery_code"):
                 print("恢复码只显示这一次，请打印或存入密码管理器：")
                 print(output.pop("recovery_code"))
+        if (
+            args.command == "supervisor"
+            and args.action == "status"
+            and output.get("ok")
+            and not args.json
+        ):
+            from clytie.supervisor.entry import print_channel_offline_status
+
+            print_channel_offline_status(output["result"]["companions"])
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if response.json.get("ok") else 4 if response.status in {401, 403, 428, 429} else 1
     except NotRunning:

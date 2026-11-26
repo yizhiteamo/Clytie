@@ -62,7 +62,7 @@
       "conflicts": [],
       "dependencies": {},
       "id": "desktop-notifier",
-      "name": "desktop-notifier",
+      "name": "Windows 桌面通知",
       "permissions": [
         "subprocess"
       ],
@@ -72,8 +72,8 @@
         "kind": "official",
         "url": null
       },
-      "summary": "仅使用虚构数据验证扩展点的参考插件",
-      "version": "0.2.0"
+      "summary": "将 Clytie 提醒显示为本机 Windows 桌面通知。",
+      "version": "0.3.0"
     },
     {
       "category": "tool",

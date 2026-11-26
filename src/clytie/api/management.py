@@ -696,6 +696,7 @@ class Management:
                     self.home / "supervisor/silence.json", {"on": False, "since": None}
                 ),
                 "undelivered": self.svc.notifications.undelivered,
+                "notification_problems": self.svc.health_warnings(),
                 "api_port": self.api_port,
                 "management": {
                     "operations": self.memory_workers.status(),
@@ -723,6 +724,11 @@ class Management:
                 raise APIError("invalid_request")
             self.svc.request_stop(mode)
             return {"accepted": True}
+        if route == "/supervisor/notify-test":
+            result = await self.svc.notifications.notify_test()
+            if result.get("status") == "no_notifier":
+                raise APIError("no_notifier", 409)
+            return result
         if route == "/supervisor/escalate":
             await self.svc.escalate()
             return {}

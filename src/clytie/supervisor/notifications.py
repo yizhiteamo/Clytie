@@ -18,7 +18,10 @@ class Notifications:
         self.path = Path(home) / "supervisor/notify-state.json"
         self.clock, self.log, self.audit = clock, log, audit
         self.plugins = list(plugins)
+        self.by_id = {}
         self.cooldown = cooldown_hours * 3600
+        self.offline_repeat = 3 * 3600
+        self.mute = set()
         self.zone = ZoneInfo("UTC")
         self.states = read(self.path, {})
         self.problems = {}
@@ -27,26 +30,69 @@ class Notifications:
 
     @property
     def undelivered(self):
-        return sum(v["state"] == "failed" for v in self.states.values())
+        return sum(
+            state["state"] == "failed" and not self.is_muted(key)
+            for key, state in self.states.items()
+        )
+
+    def is_muted(self, key):
+        return key.partition(":")[0] in self.mute
+
+    def platform_online(self, key):
+        # Discard an in-flight snapshot as well as a previous delivery's cooldown.
+        self.problems.pop(key, None)
+        if self.states.pop(key, None) is not None:
+            try:
+                write(self.path, self.states)
+            except OSError as exc:
+                # The next notification tick retries persistence.
+                self.log.warning(
+                    "supervisor.notification_state_write_failed", error=type(exc).__name__
+                )
 
     async def update(self, problems, *, pending=()):
         async with self._lock:
-            await self._update(dict(problems), set(pending))
+            await self._update(problems, set(pending))
 
-    async def _send(self, notice):
+    async def _deliver(self, notifier, notice):
+        token = CancelToken()
+        try:
+            receipt = await timed(notifier.notify(notice, token), self.clock, 10)
+            return receipt.status if receipt.status in ("sent", "failed", "unknown") else "unknown"
+        except Exception:
+            return "unknown"
+        finally:
+            token.cancel("notification_finished")
+
+    async def _send(self, notice, *, current_problems=None):
         for notifier, outward in self.plugins:
+            if current_problems is not None and (
+                notice.dedupe_key not in self.problems or notice.dedupe_key not in current_problems
+            ):
+                break
             if outward and self.silenced:
                 continue
-            token = CancelToken()
-            try:
-                result = await timed(notifier.notify(notice, token), self.clock, 10)
-                if result.status == "sent":
-                    return True
-            except Exception:
-                pass
-            finally:
-                token.cancel("notification_finished")
+            if await self._deliver(notifier, notice) == "sent":
+                return True
         return False
+
+    async def notify_test(self):
+        if not self.by_id:
+            self.audit.append("notification_test", result="no_notifier")
+            return {"status": "no_notifier", "results": {}}
+        notice = Notice(
+            level="info",
+            title="Clytie",
+            body="这是一条测试通知。看到它，说明桌面通知可以正常显示。",
+            dedupe_key=f"notification_test:{uuid4().hex}",
+        )
+        results = {}
+        for pid, (notifier, outward) in self.by_id.items():
+            if outward and self.silenced:
+                continue
+            results[pid] = "failed" if notifier is None else await self._deliver(notifier, notice)
+        self.audit.append("notification_test", results=results)
+        return {"results": results}
 
     async def safety_trip(self, cid, group, count, until):
         from clytie.agent.safety_belt import notice_body, recovery_time
@@ -69,7 +115,9 @@ class Notifications:
                 and key.split(":")[1] not in pending
             ):
                 self.states.pop(key)
-        for key, body in problems.items():
+        for key, body in tuple(problems.items()):
+            if self.is_muted(key) or key not in self.problems or key not in problems:
+                continue
             previous = self.states.get(key)
             if previous:
                 if key.startswith("startup_stalled:") and previous["state"] == "cooldown":
@@ -77,14 +125,18 @@ class Notifications:
                 elapsed = (
                     self.clock.now() - datetime.fromisoformat(previous["at"])
                 ).total_seconds()
-                if elapsed < (self.cooldown if previous["state"] == "cooldown" else 600):
+                cooldown = (
+                    self.offline_repeat if key.startswith("platform_offline:") else self.cooldown
+                )
+                if elapsed < (cooldown if previous["state"] == "cooldown" else 600):
                     continue
             notice = Notice(level="warn", title="Clytie", body=body, dedupe_key=key)
-            sent = await self._send(notice)
-            self.states[key] = {
-                "state": "cooldown" if sent else "failed",
-                "at": self.clock.now().isoformat(),
-            }
+            sent = await self._send(notice, current_problems=problems)
+            if key in self.problems and (sent or key in problems):
+                self.states[key] = {
+                    "state": "cooldown" if sent else "failed",
+                    "at": self.clock.now().isoformat(),
+                }
             if not sent:
                 self.log.warning("supervisor.notification_failed", key=key)
             self.audit.append("notification", result="sent" if sent else "failed", reason=key)
