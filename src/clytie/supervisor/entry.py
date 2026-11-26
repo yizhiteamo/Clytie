@@ -426,7 +426,12 @@ async def daemon_main(home, detached=False, maintenance=False):
             subprocess_backend=ProcessBackend(clock),
         )
     )
-    supervisor.notifications.cooldown = instance.get("notify", {}).get("cooldown_hours", 6) * 3600
+    notify = instance.get("notify", {})
+    offline = notify.get("platform_offline", {})
+    supervisor.platform_offline_after = offline.get("after_minutes", 15) * 60
+    supervisor.notifications.offline_repeat = offline.get("repeat_hours", 3) * 3600
+    supervisor.notifications.cooldown = notify.get("cooldown_hours", 6) * 3600
+    supervisor.notifications.mute = set(notify.get("mute", []))
     detached_events = asyncio.Queue()
     loop = asyncio.get_running_loop()
     handshake = StartupHandshake(loop, detached_events)
@@ -494,6 +499,7 @@ async def daemon_main(home, detached=False, maintenance=False):
                 instance.get("notify", {}).get("plugins", []), instance.get("plugins", {})
             )
             supervisor.notifications.plugins = notifiers.notifiers
+            supervisor.notifications.by_id = notifiers.by_id
             supervisor.finalize = notifiers.close
 
     try:
@@ -658,6 +664,12 @@ def internal(argv):
         return asyncio.run(daemon_main(home, detached=args.detach, maintenance=args.maintenance))
 
 
+def print_channel_offline_status(companions):
+    for cid, row in companions.items():
+        for plugin, since in row.get("channel_offline_since", {}).items():
+            print(f"{cid} {plugin} 平台离线（自{since}起）")
+
+
 def run(args):
     from clytie.api import local_supervisor_start, local_supervisor_status
 
@@ -684,5 +696,6 @@ def run(args):
                 print("静默待确认（迁移中，尚未连接平台）")
             if row.get("migration_stalled"):
                 print("迁移暂时无心跳（startup_stalled，等待中，不强制终止）")
+        print_channel_offline_status(health.get("companions", {}))
         print(json.dumps(health, ensure_ascii=False))
     return 0

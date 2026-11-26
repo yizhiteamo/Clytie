@@ -38,7 +38,7 @@ ROUTES = [
     *[("POST", "/backup/key/" + x) for x in ("export", "verify", "acknowledge")],
     *[("POST", "/auth/" + x) for x in ("login", "logout", "reauth")],
     *[("POST", "/admin/" + x) for x in ("password", "logout-all")],
-    *[("POST", "/supervisor/" + x) for x in ("stop", "escalate")],
+    *[("POST", "/supervisor/" + x) for x in ("stop", "escalate", "notify-test")],
     ("POST", "/silence"),
     *[("POST", "/companions/<cid>/" + x) for x in ("start", "stop", "restart", "proactive")],
     ("GET", "/companions/<cid>/smoke/records"),

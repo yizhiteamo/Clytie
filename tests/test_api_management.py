@@ -20,8 +20,49 @@ def management(tmp_path):
         companions=["companion_a", "companion_b"],
         rows={c: {"state": "stopped", "inflight_tasks": 2} for c in ("companion_a", "companion_b")},
         setting=lambda group, key, default: default,
+        health_warnings=lambda: [],
     )
     return Management(svc, None)
+
+
+async def test_notify_test_route_returns_plugin_results_and_no_notifier(tmp_path):
+    from clytie.api.server import match
+    from clytie.sdk.types import Receipt
+    from clytie.supervisor.common import Audit
+    from clytie.supervisor.notifications import Notifications
+
+    api = management(tmp_path)
+    n = Notifications(tmp_path, api.clock, None, Audit(tmp_path, api.clock))
+    api.svc.notifications = n
+    route, params = match("POST", "/api/v1/supervisor/notify-test")
+    with pytest.raises(APIError, match="no_notifier"):
+        await api.call(route, params, {}, {}, "POST")
+
+    class Notifier:
+        async def notify(self, notice, cancel):
+            return Receipt(intent_id="fictional", status="sent", at=api.clock.now())
+
+    n.by_id = {"fictional-notifier": (Notifier(), False)}
+    result = await api.call(route, params, {}, {}, "POST")
+    assert result["results"] == {"fictional-notifier": "sent"}
+
+
+async def test_get_status_includes_offline_start_and_muted_problem(tmp_path):
+    from clytie.supervisor.service import Supervisor
+
+    svc = Supervisor(tmp_path, ["companion_a"], None, MockClock())
+    since = svc.clock.now().isoformat()
+    svc.rows["companion_a"] = {
+        "state": "degraded",
+        "channel_offline_since": {"fake-channel": since},
+    }
+    svc.problems["backup_key:instance"] = "备份密钥待保管"
+    svc.notifications.mute = {"backup_key"}
+    api = Management(svc, None)
+    result = await api.call("/status", {}, {}, {}, "GET")
+    assert result["companions"]["companion_a"]["channel_offline_since"] == {"fake-channel": since}
+    assert "备份密钥待保管（不弹通知）" in result["notification_problems"]
+    assert result["undelivered"] == 0
 
 
 @pytest.mark.parametrize("clear_by", ["save", "restart"])

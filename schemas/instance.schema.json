@@ -401,6 +401,47 @@
           "minimum": 1,
           "maximum": 168,
           "default": 6
+        },
+        "mute": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "restart_stopped",
+              "blocked",
+              "auth_invalid",
+              "quota_exhausted",
+              "stop_killed",
+              "platform_offline",
+              "startup_stalled",
+              "backup_key",
+              "backup",
+              "api_unavailable"
+            ]
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "platform_offline": {
+          "type": "object",
+          "properties": {
+            "after_minutes": {
+              "type": "integer",
+              "minimum": 5,
+              "maximum": 1440,
+              "default": 15
+            },
+            "repeat_hours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 168,
+              "default": 3
+            }
+          },
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {}
+          }
         }
       },
       "additionalProperties": false,

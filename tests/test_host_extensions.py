@@ -299,6 +299,12 @@ async def test_desktop_notification_uses_fixed_script_and_fake_backend_only(tmp_
     assert receipt.status == "sent" and len(calls) == 1
     args, options = calls[0]
     assert title not in " ".join(args)
-    assert options["env"] == {"CLYTIE_NOTICE_TITLE": title, "CLYTIE_NOTICE_BODY": title}
+    assert options["env"] == {
+        "CLYTIE_NOTICE_APP_ID": (
+            r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+        ),
+        "CLYTIE_NOTICE_TITLE": title,
+        "CLYTIE_NOTICE_BODY": title,
+    }
     assert options["cwd"] == runtime.storage.path and options["shell"] is False
     await h.close()
