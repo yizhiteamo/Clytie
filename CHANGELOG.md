@@ -1,5 +1,9 @@
 # 变更记录
 
+## B10 平台离线提醒
+
+- 守护进程会提醒持续离线的平台。实例可设置离线阈值、重复间隔和静音种类，并用 `clytie supervisor notify-test` 逐个测试通知插件。Windows 桌面通知默认使用 PowerShell 的应用标识。
+
 ## SDK 0.21.0（漫画简报与多图消息）
 
 - 平台可用 `ChannelFeatures.max_images_per_message` 声明每条消息最多包含几张图，默认 1。QQ OneBot 默认支持 4 张，可配置为 1–9 张。

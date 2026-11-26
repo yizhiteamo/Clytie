@@ -76,6 +76,7 @@ async def test_memory_response_loss_retains_operation_id_and_never_replays(
         ("boundary", "release", "/companions/companion_a/boundary/release"),
         ("plugin", "list", "/companions/companion_a/plugins"),
         ("supervisor", "stop", "/supervisor/stop"),
+        ("supervisor", "notify-test", "/supervisor/notify-test"),
         ("supervisor", "silence", "/silence"),
         ("admin", "logout-all", "/admin/logout-all"),
     ],
@@ -171,3 +172,32 @@ async def test_plugin_cli_disabled_and_uninstalled_never_load(tmp_path, monkeypa
     write(tmp_path / "plugins/.host/uninstalled.json", ["api-example"])
     with pytest.raises(ValueError, match="插件未启用"):
         await plugin_command(args, CLI(FakeClient(tmp_path)))
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_supervisor_status_displays_offline_since_and_muted_problem(
+    tmp_path, monkeypatch, capsys, running
+):
+    since = "2026-01-01T00:00:00+00:00"
+    companions = {"companion_a": {"channel_offline_since": {"fake-channel": since}}}
+    warning = "backup_key（不弹通知）"
+    health = {"companions": companions, "warnings": [warning]}
+    monkeypatch.setattr(
+        "clytie.supervisor.entry.status", lambda _: {"running": running, "health": health}
+    )
+
+    async def request(self, method, path, *, json=None, query=None):
+        assert method == "GET" and path == "/api/v1/status"
+        return ApiResponse(
+            status=200,
+            json={
+                "ok": True,
+                "result": {"companions": companions, "notification_problems": [warning]},
+            },
+        )
+
+    monkeypatch.setattr("clytie.api.client.Client.request", request)
+    assert main(["supervisor", "status", "--home", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert f"平台离线（自{since}起）" in output
+    assert warning in output

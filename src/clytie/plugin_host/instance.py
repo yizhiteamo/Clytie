@@ -13,7 +13,12 @@ from .surface import surface
 class InstanceNotifiers:
     def __init__(self, host, *, subprocess_backend=None):
         self.host, self.backend = host, subprocess_backend
-        self.runtimes, self.notifiers = [], []
+        self.runtimes = []
+        self.by_id = {}
+
+    @property
+    def notifiers(self):
+        return [entry for entry in self.by_id.values() if entry[0] is not None]
 
     async def start(self, ids, configs=None):
         configs = configs or {}
@@ -21,6 +26,8 @@ class InstanceNotifiers:
             manifest = self.host.manifests[pid]
             if "notifier" not in manifest.data["contributes"]:
                 raise ValueError("notifier required")
+            outward = bool(manifest.data["contributes"]["notifier"].get("outward", False))
+            self.by_id[pid] = (None, outward)
             runtime = Runtime("", manifest, None, manifest.priority)
             try:
                 cls, runtime.module_name = self.host._load_class(manifest)
@@ -35,10 +42,8 @@ class InstanceNotifiers:
                 await timed(runtime.plugin.start(runtime.ctx), self.host.clock, 10)
                 runtime.registrations = assemble(runtime, scope="instance")
                 self.runtimes.append(runtime)
-                self.notifiers.extend(
-                    (r.implementation, bool(r.declaration.get("outward", False)))
-                    for r in runtime.registrations
-                )
+                for registration in runtime.registrations:
+                    self.by_id[pid] = (registration.implementation, outward)
             except Exception:
                 if runtime.plugin:
                     try:
@@ -49,7 +54,7 @@ class InstanceNotifiers:
 
     async def close(self):
         runtimes, self.runtimes = self.runtimes, []
-        self.notifiers = []
+        self.by_id.clear()
         for runtime in reversed(runtimes):
             try:
                 await timed(runtime.plugin.stop(), self.host.clock, 10)

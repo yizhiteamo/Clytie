@@ -89,6 +89,30 @@ def test_valid_home_and_all_returned_config_is_read_only(tmp_path):
     assert report.companions[0]["model"]["status"] == "found"
 
 
+@pytest.mark.parametrize("kind", ["safety_belt", "fictional_unknown"])
+def test_invalid_notification_mute_kind_rejects_instance(tmp_path, kind):
+    home, repo, instance, _ = make_home(tmp_path)
+    instance["notify"] = {"mute": [kind]}
+    write_yaml(home / "clytie.local.yaml", instance)
+    report = load_home(home, repo_root=repo)
+    assert any(error.pointer == "/notify/mute/0" for error in report.global_errors)
+
+
+def test_notification_config_defaults_and_overrides(tmp_path):
+    home, repo, instance, _ = make_home(tmp_path)
+    report = load_home(home, repo_root=repo)
+    assert report.valid
+    notify = report.instance["notify"]
+    assert notify["mute"] == ()
+    assert notify["platform_offline"] == {"after_minutes": 15, "repeat_hours": 3}
+    instance["notify"] = {"mute": ["backup_key"], "platform_offline": {"repeat_hours": 2}}
+    write_yaml(home / "clytie.local.yaml", instance)
+    report = load_home(home, repo_root=repo)
+    assert report.valid
+    assert report.instance["notify"]["mute"] == ("backup_key",)
+    assert report.instance["notify"]["platform_offline"] == {"after_minutes": 15, "repeat_hours": 2}
+
+
 def test_deep_merge_replaces_lists_scalars_and_null_without_mutating_sources():
     first = {"nested": {"keep": 1, "replace": [1, 2]}, "scalar": "before"}
     second = {"nested": {"replace": [3]}, "scalar": None}

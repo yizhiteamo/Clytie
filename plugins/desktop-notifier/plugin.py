@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from clytie.sdk.types import Receipt
 
+POWERSHELL_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
 SCRIPT = """
 $ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] > $null
@@ -14,7 +16,7 @@ $texts = $xml.GetElementsByTagName('text')
 $texts.Item(0).InnerText = $env:CLYTIE_NOTICE_TITLE
 $texts.Item(1).InnerText = $env:CLYTIE_NOTICE_BODY
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Clytie').Show($toast)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:CLYTIE_NOTICE_APP_ID).Show($toast)
 """
 
 
@@ -28,7 +30,11 @@ class DesktopNotifier:
             self.ctx.subprocess.run(
                 ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SCRIPT],
                 timeout_s=5,
-                env={"CLYTIE_NOTICE_TITLE": notice.title, "CLYTIE_NOTICE_BODY": notice.body},
+                env={
+                    "CLYTIE_NOTICE_APP_ID": self.ctx.config.get("app_id", POWERSHELL_APP_ID),
+                    "CLYTIE_NOTICE_TITLE": notice.title,
+                    "CLYTIE_NOTICE_BODY": notice.body,
+                },
             )
         )
         cancelled = asyncio.create_task(cancel.wait())

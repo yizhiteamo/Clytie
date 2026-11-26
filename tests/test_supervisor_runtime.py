@@ -213,6 +213,7 @@ async def test_instance_context_and_desktop_fake_backend(tmp_path):
     assembly = InstanceNotifiers(h, subprocess_backend=Backend())
     await assembly.start(["desktop-notifier"])
     assert len(assembly.notifiers) == 1
+    assert assembly.by_id["desktop-notifier"] == assembly.notifiers[0]
     ctx = assembly.runtimes[0].ctx
     assert set(dir(ctx)) == {"config", "clock", "log", "subprocess"}
     for forbidden in ("companion_id", "memory", "ledger", "storage", "random"):

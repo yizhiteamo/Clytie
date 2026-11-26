@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -36,6 +37,16 @@ class Launcher(Protocol):
     async def launch(self, cid): ...
 
 
+@dataclass(frozen=True)
+class SampleTime:
+    monotonic: float
+    wall: datetime
+
+    def gap_since(self, previous):
+        # Some systems pause their monotonic clock during suspend.
+        return max(self.monotonic - previous.monotonic, (self.wall - previous.wall).total_seconds())
+
+
 class Supervisor:
     def __init__(
         self, home, companions, launcher, clock, *, config=None, notifications=None, external=()
@@ -58,6 +69,9 @@ class Supervisor:
         self.last_write = None
         self.last_content = None
         self.problems = {}
+        self.platform_offline_after = 15 * 60
+        self.offline_starts = {}
+        self.last_channel_sample = {}
         self.pending_health = set(self.companions)
         self.silenced = read(self.home / "supervisor/silence.json", {"on": False})["on"]
         self.notifications.silenced = self.silenced
@@ -105,6 +119,7 @@ class Supervisor:
                 inflight_tasks=0,
                 sending=0,
                 channels={},
+                channel_offline_since={},
                 model="unknown",
                 quota="unknown",
                 silenced=self.silenced,
@@ -161,10 +176,12 @@ class Supervisor:
     async def monitor(self, cid):
         row = self.rows[cid]
         while not self.stopping and cid not in self.suspended:
-            row.update(state="starting", phase="starting", migration_stalled=False)
+            row.update(state="starting", phase="starting", migration_stalled=False, channels={})
             startup_elapsed = 0
             accounted = self.clock.monotonic()
             fatal, ready = None, None
+            first_sample_start = None
+            last_heartbeat = None
             reason = None
             last = self.clock.monotonic()
             io_session, exit_confirmed = None, False
@@ -221,23 +238,32 @@ class Supervisor:
                     kind = msg.get("type")
                     if kind == "ready":
                         ready = self.clock.monotonic()
-                        last = ready
                         if not self.stopping and cid not in self.suspended:
                             row["state"] = "running"
+                            first_sample_start = SampleTime(ready, self.clock.now())
+                            if (
+                                row["channels"]
+                                and first_sample_start.gap_since(last_heartbeat) <= hang
+                            ):
+                                self._observe_channels(cid, last_heartbeat, first_sample_start)
+                                first_sample_start = None
+                        last = ready
                         row["phase"] = "running"
                         self.ready_events[cid].set()
                     elif kind == "heartbeat":
                         last = self.clock.monotonic()
+                        sample = SampleTime(last, self.clock.now())
+                        if last_heartbeat is not None and sample.gap_since(last_heartbeat) > hang:
+                            first_sample_start = None
+                        last_heartbeat = sample
                         phase = msg.get("phase", row["phase"])
                         if phase in {"starting", "migrating", "running", "stopping"}:
                             row["phase"] = phase
                         if phase == "running":
                             self.pending_health.discard(cid)
-                            self.problems = {
-                                k: v
-                                for k, v in self.problems.items()
-                                if not k.startswith(f"auth_invalid:{cid}:")
-                            }
+                            for key in tuple(self.problems):
+                                if key.startswith(f"auth_invalid:{cid}:"):
+                                    del self.problems[key]
                         row["migration_stalled"] = False
                         self.problems.pop(f"startup_stalled:{cid}", None)
                         for key in ("inflight_tasks", "sending"):
@@ -302,6 +328,11 @@ class Supervisor:
                             row["state"] = (
                                 "degraded" if row["model"] == "auth_invalid" else "running"
                             )
+                            if phase == "running":
+                                self._observe_channels(cid, sample, first_sample_start)
+                            else:
+                                self._clear_channel_timers(cid)
+                            first_sample_start = None
                         if row["model"] == "auth_invalid":
                             plugin = msg.get("model_plugin", "model")
                             self.problems[f"auth_invalid:{cid}:{plugin}"] = f"{cid} {plugin}"
@@ -375,6 +406,7 @@ class Supervisor:
                         await child.kill()
                         reason = "startup_timeout"
                         break
+                self._clear_channel_timers(cid)
                 self.backup_io.disconnect(io_session)
                 code = await child.wait()
                 exit_confirmed = True
@@ -404,6 +436,7 @@ class Supervisor:
                     await child.wait()
                     exit_confirmed = True
             finally:
+                self._clear_channel_timers(cid)
                 if io_session is not None:
                     self.backup_io.disconnect(io_session)
                     if exit_confirmed:
@@ -448,6 +481,52 @@ class Supervisor:
             row["restart_count"] += 1
             self.audit.append("restart", cid, reason=row["restart_reason"])
 
+    def _clear_channel_timers(self, cid):
+        for plugin in self.offline_starts.pop(cid, {}):
+            self.problems.pop(f"platform_offline:{cid}:{plugin}", None)
+        self.rows[cid]["channel_offline_since"] = {}
+        self.last_channel_sample.pop(cid, None)
+
+    def _expire_channel_sample(self, cid, now):
+        last = self.last_channel_sample.get(cid)
+        if last is not None and now.gap_since(last) > self.config.get("hang_seconds", 30):
+            self._clear_channel_timers(cid)
+
+    def _observe_channels(self, cid, sampled_at, first_sample_start):
+        self._expire_channel_sample(cid, sampled_at)
+        self.last_channel_sample[cid] = sampled_at
+        # The first running snapshot can arrive one heartbeat after ready.
+        if first_sample_start is None or sampled_at.gap_since(first_sample_start) > self.config.get(
+            "hang_seconds", 30
+        ):
+            first_sample_start = sampled_at
+        row = self.rows[cid]
+        previous = self.offline_starts.get(cid, {})
+        starts = {}
+        for plugin, status in row["channels"].items():
+            if status in {"offline", "connecting", "unknown"}:
+                starts[plugin] = previous.get(plugin, first_sample_start)
+            elif status == "online":
+                self.notifications.platform_online(f"platform_offline:{cid}:{plugin}")
+        for plugin in previous.keys() - starts.keys():
+            self.problems.pop(f"platform_offline:{cid}:{plugin}", None)
+        self.offline_starts[cid] = starts
+        row["channel_offline_since"] = {
+            plugin: start.wall.isoformat() for plugin, start in starts.items()
+        }
+
+    def _refresh_channel_problems(self):
+        now = SampleTime(self.clock.monotonic(), self.clock.now())
+        for cid in tuple(self.last_channel_sample):
+            self._expire_channel_sample(cid, now)
+            for plugin, start in self.offline_starts.get(cid, {}).items():
+                elapsed = now.monotonic - start.monotonic
+                if elapsed >= self.platform_offline_after:
+                    self.problems[f"platform_offline:{cid}:{plugin}"] = (
+                        f"{cid} 的平台 {plugin} 已离线 {int(elapsed // 60)} 分钟。"
+                        "消息发不出去，请检查协议端是否在运行、账号是否仍然登录。"
+                    )
+
     async def tick(self):
         while True:
             try:
@@ -455,6 +534,7 @@ class Supervisor:
                     self.clock.monotonic() >= getattr(self, "_old_instances_next", 0)
                 ):
                     await self.refresh_old_instances()
+                self._refresh_channel_problems()
                 await self.notifications.update(self.problems, pending=self.pending_health)
                 await self.flush_health()
             except OSError as exc:
@@ -535,6 +615,12 @@ class Supervisor:
             self.problems.pop(key, None)
         return summary
 
+    def health_warnings(self):
+        return [
+            body + "（不弹通知）" if self.notifications.is_muted(key) else body
+            for key, body in self.problems.items()
+        ]
+
     async def flush_health(self):
         external = []
         for component in self.external:
@@ -546,7 +632,7 @@ class Supervisor:
             undelivered=self.notifications.undelivered,
             state="stopping" if self.stopping else "running",
             api_port=getattr(self, "api_port", None),
-            warnings=list(self.problems.values()),
+            warnings=self.health_warnings(),
             management={
                 "operations": self.management_workers.status(),
                 "still_finishing": self.management_workers.still_finishing,
@@ -651,6 +737,7 @@ class Supervisor:
 
     async def _stop_companion(self, cid, mode=None):
         self.suspended.add(cid)
+        self._clear_channel_timers(cid)
         row = self.rows[cid]
         child = self.children.get(cid)
         if child is None or row["state"] in {"stopped", "blocked", "restart_stopped", "backoff"}:
@@ -720,7 +807,9 @@ class Supervisor:
         if child:
             await child.kill()
             await child.wait()
-        self.problems = {k: v for k, v in self.problems.items() if k.split(":")[1] != cid}
+        for key in tuple(self.problems):
+            if key.split(":")[1] == cid:
+                del self.problems[key]
         self.pending_health.add(cid)
         self.ready_events[cid].clear()
         self.rows[cid].update(state="starting", failures=0, restart_reason=reason)
@@ -749,6 +838,8 @@ class Supervisor:
 
     async def stop(self, task_mode=None, *, source="internal"):
         self.stopping = True
+        for cid in self.rows:
+            self._clear_channel_timers(cid)
         if self.management_workers:
             self.management_workers.stopping = True
         if self._closing is None:

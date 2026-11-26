@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "id": "desktop-notifier",
-  "name": "desktop-notifier",
-  "summary": "仅使用虚构数据验证扩展点的参考插件",
+  "name": "Windows 桌面通知",
+  "summary": "将 Clytie 提醒显示为本机 Windows 桌面通知。",
   "category": "notifier",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "requires": {
     "sdk": ">=0.7,<0.22"
   },
@@ -22,7 +22,13 @@
   },
   "config": {
     "type": "object",
-    "properties": {},
+    "properties": {
+      "app_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "已在 Windows 注册的应用标识。省略时使用 Windows PowerShell 的标识。"
+      }
+    },
     "additionalProperties": false
   },
   "data": {
