@@ -88,6 +88,7 @@
 | `GET /status` | 健康汇总（supervisor-spec §3.2）、静默状态、提醒、未送达通知的计数 | | |
 | `POST /supervisor/stop` | `{task_mode?}`，安全停止整个守护进程（supervisor-spec §6.2）；先返回已受理，停止在后台进行 | 是 | |
 | `POST /supervisor/escalate` | 等待模式改为取消模式 | | |
+| `POST /supervisor/notify-test` | 通过 `notify.plugins` 发一条固定的测试通知，返回每个通知插件的结果（supervisor-spec §5.5，B10） | | |
 | `POST /silence` | `{on: bool}`；返回逐个伴侣的 `confirmed` / `pending_migrating`（supervisor-spec §7） | 是（开启和解除都要） | |
 | `POST /companions/<cid>/start` | 启动一个停止中的伴侣；对 `blocked` 和 `restart_stopped` 的伴侣，相当于 supervisor-spec §4.2 的手动重启 | | |
 | `POST /companions/<cid>/stop` | `{task_mode?}`，只安全停止这个伴侣；停止后不会被自动重启 | 是 | |
@@ -215,6 +216,7 @@ API 拒绝文件路径参数。CLI 最多读取 20 MiB 图片。保存前显示�
 | `clytie supervisor stop [--wait-tasks] [--yes]` | `POST /supervisor/stop` |
 | `clytie supervisor status [--json]` | 运行中时调用 `GET /status`，没有运行时读取 `run/health.json`（A4.1 行为） |
 | `clytie supervisor silence on\|off [--yes]` | `POST /silence` |
+| `clytie supervisor notify-test` | `POST /supervisor/notify-test`（B10） |
 | `clytie companion start\|stop\|restart <cid> [--yes]` | 第 4.1 节 |
 | `clytie companion proactive <cid> pause\|resume\|status` | `POST /companions/<cid>/proactive`；`status` 读 `GET /status` 中这个伴侣的 `proactive` |
 | `clytie companion appearance show <cid>` | 第 4.2a 节的 GET |

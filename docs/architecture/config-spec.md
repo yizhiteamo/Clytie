@@ -276,6 +276,9 @@ Issue #41（用户已确认）：conversations 中 channel、kind、platform_id 
 | `supervisor.stop.timeout_seconds` | 整数 10–3600（120） |
 | `notify.plugins` | 插件 id 列表（空）；只能是声明了 `notifier` 的插件 |
 | `notify.cooldown_hours` | 整数 1–168（6） |
+| `notify.mute` | 提醒种类列表（空）；不能包含 `safety_belt`（supervisor-spec §5.4，B10） |
+| `notify.platform_offline.after_minutes` | 整数 5–1440（15）（supervisor-spec §5.3，B10） |
+| `notify.platform_offline.repeat_hours` | 整数 1–168（3）（supervisor-spec §5.3，B10） |
 
 插件清单的 `notifier` 新增可选字段 `outward: bool`（`false`）。
 

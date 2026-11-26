@@ -169,6 +169,47 @@ python -m clytie supervisor start   （前台运行，单实例）
 - 多个通知插件时依次尝试，第一个返回 `sent` 的就算送达。
 - **静默期间**：清单中声明 `notifier.outward: true` 的通知插件（经平台账号发出，消息会离开本机）暂停使用；其他插件照常工作。这个字段默认 `false`，`desktop-notifier` 不声明。
 
+### 5.3 平台离线提醒（B10，用户 2026-11-26 确认）
+
+QQ 在协议端掉线后，平台状态是"离线"，不是 `auth_invalid`，原来不会提醒主人。B10 增加这种提醒，决策记录见 ADR 0041。
+
+- **计时**：守护进程按心跳中的 `channels`，为每个伴侣的每个平台插件记录"从何时起不在线"。
+  - `offline`、`connecting`、`unknown` 都算不在线；
+  - 只在伴侣处于 `running` 或 `degraded` 时计时。伴侣在启动、等待重启、被阻止或已停止时，清除计时，这些情况由已有的提醒负责；
+  - 收到 `online` 时清除计时。收到 `auth_invalid` 时也清除计时，它按第 4.3 节立即提醒，不重复提醒；
+  - 启动后一直没连上的平台，从伴侣进入 `running` 起计时；
+  - 两次心跳的间隔超过 `supervisor.hang_seconds` 时（例如电脑睡眠后唤醒），从下一次心跳重新计时，睡眠的时间不算离线时间。
+- **提醒**：连续不在线满 `notify.platform_offline.after_minutes`（默认 15 分钟）时提醒一次，`dedupe_key` 为 `platform_offline:<cid>:<plugin>`。
+- **重复**：一直没恢复时，每隔 `notify.platform_offline.repeat_hours`（默认 3 小时）再提醒一次。这个种类用这个间隔代替 `notify.cooldown_hours`。
+- **恢复**：收到 `online` 后，清除这条问题和它的冷却状态，不发恢复提醒。之后再次掉线满 15 分钟，重新提醒。
+- **正文**（固定格式，不经过模型）：伴侣 id、平台插件 id、已经离线多久，再加一句"消息发不出去，请检查协议端是否在运行、账号是否仍然登录"。不含账号、群号和聊天内容。
+- **状态**：`run/health.json` 和 `GET /status` 中，每个伴侣带 `channel_offline_since: {plugin: 时间}`；`supervisor status` 显示"平台离线（自某时起）"。
+- 计时不持久保存，守护进程重启后重新计时。已送达提醒的冷却照第 5.2 节持久保存。
+- **限制**：提醒由本机发出。电脑关机、睡眠，或者守护进程自己没有运行时，没有提醒。
+
+### 5.4 不弹出的提醒种类（B10）
+
+- 全局配置 `notify.mute` 列出不发送的提醒种类。种类是 `dedupe_key` 第一个冒号前的部分，例如 `backup_key`。
+- 可以写的种类：第 5.2 节表中各行、第 5.3 节的 `platform_offline`，以及 `startup_stalled`、`backup_key`、`backup`、`api_unavailable`。写了未知的种类，按配置错误处理。
+- `safety_belt` 不能写进来：群聊安全带每次触发都要提示（chat-behavior-spec §4，用户 2026-11-22 确认）。写了按配置错误处理。
+- 静音的种类不发送、不重试，也不计入"未送达"。`status` 照常列出这条问题，并注明"不弹通知"。
+- 用途：备份以后要重构，可能不再默认生成密钥（用户 2026-11-26 说明）。在那之前，实例用这项配置关掉 `backup_key` 的提醒，不用"确认已保管密钥"的命令去消除它。
+
+### 5.5 测试通知（B10）
+
+- `POST /supervisor/notify-test`（CLI 为 `clytie supervisor notify-test`）：守护进程通过 `notify.plugins` 发一条固定的测试通知，标题 `Clytie`，正文"这是一条测试通知。看到它，说明桌面通知可以正常显示。"
+- 测试通知发给每一个通知插件，不在第一个 `sent` 后停止。返回每个插件的 id 和结果（`sent`、`failed`、`unknown`）；没有配置通知插件时返回 `no_notifier`。
+- 不受冷却和 `notify.mute` 影响，不计入"未送达"。静默期间跳过 `outward` 插件，和第 5.2 节一致。写审计 `notification_test`。
+- 插件返回 `sent` 只说明命令执行成功，不能证明通知真的显示出来。要主人亲眼看到才算通过。
+
+### 5.6 `desktop-notifier` 正式使用（B10）
+
+- 现在的写法用自定义的应用标识 `Clytie` 创建通知。Windows 一般只显示已注册应用标识的通知；用自定义标识时，通知可能不显示，命令却正常结束。
+- 改为默认使用 Windows PowerShell 已注册的应用标识。通知的来源显示为"Windows PowerShell"，标题仍是 `Clytie`。插件配置 `app_id` 可以改成其他已注册的标识。
+- 不创建开始菜单快捷方式，不改注册表，不安装任何东西。
+- 插件的名称和简介改为正式插件的写法；README 写明用法、应用标识的限制和"返回 `sent` 不等于已显示"。
+- 通知内容仍只通过环境变量传入，不进入命令字符串（现有规则）。
+
 ## 6. 安全停止
 
 ### 6.1 单个伴侣
@@ -261,6 +302,9 @@ python -m clytie supervisor start   （前台运行，单实例）
 | `supervisor.stop.timeout_seconds` | 整数 10–3600（120） |
 | `notify.plugins` | 插件 id 列表（空）；只能是声明了 `notifier` 的插件 |
 | `notify.cooldown_hours` | 整数 1–168（6） |
+| `notify.mute` | 提醒种类列表（空）；见第 5.4 节（B10） |
+| `notify.platform_offline.after_minutes` | 整数 5–1440（15）；见第 5.3 节（B10） |
+| `notify.platform_offline.repeat_hours` | 整数 1–168（3）；见第 5.3 节（B10） |
 
 插件清单的 `notifier` 新增可选字段 `outward: bool`（`false`）。
 
@@ -293,6 +337,17 @@ python -m clytie supervisor start   （前台运行，单实例）
 12. **健康**：`run/health.json` 的字段与状态取值都正确；守护进程未运行时 `supervisor status` 显示"未运行"和"可能过时"；不为检查而调用模型（用假模型的调用计数断言）；没有实现 `state()` 的平台插件显示 `unknown`。
 13. **通信通道**：未知的 `type` 只记 WARN；消息中没有原文（用虚构敏感词断言）；子进程的标准输出只用于这个通道。
 14. **冒烟测试**：使用真实子进程和 fake-channel、fake-model：启动 → `ready` → 心跳 → 用假的退出指令模拟崩溃 → 重启 → 安全停止，Windows 和 Linux 的 CI 都运行。
+15. **B10 平台离线提醒**（第 5.3–5.6 节，MockClock 和假通知后端）：
+    - 平台为 `offline`、`connecting` 或 `unknown` 连续满 15 分钟时提醒一次；差一秒不提醒；中途收到 `online` 时计时清零；
+    - 一直离线时每 3 小时再提醒一次，正文中的离线时长跟着更新；恢复后清除冷却，再次掉线满 15 分钟重新提醒；恢复时不发提醒；
+    - `auth_invalid` 只按第 4.3 节提醒，不再计入离线提醒；伴侣不在 `running` 或 `degraded` 时不计时；启动后一直没连上的平台从 `running` 起计时；
+    - 两次心跳的间隔超过 `hang_seconds` 后重新计时，模拟睡眠后唤醒不误报；
+    - 多个平台、多个伴侣分别计时；守护进程重启后重新计时；
+    - 正文中没有账号、群号和原文（用虚构敏感词断言）；`status` 显示离线的起始时间；
+    - `notify.mute`：静音的种类不发送、不重试、不计入未送达，`status` 照常显示；写 `safety_belt` 或未知种类时配置报错；
+    - 测试通知：每个通知插件都发并返回各自的结果；不受冷却和静音影响；没有通知插件时返回 `no_notifier`；写审计；
+    - `desktop-notifier`：默认使用 PowerShell 的应用标识，可以用 `app_id` 修改；通知内容只通过环境变量传入（沿用现有的命令注入测试）；
+    - 离线测试不弹出真实通知，线上调用为 0。
 
 ## 11. 需要同步修改的其他文档
 
@@ -311,7 +366,7 @@ python -m clytie supervisor start   （前台运行，单实例）
 
 - HTTP API、登录、CLI 中的 stop/restart/silence 命令（A4.2；A4.1 只提供内部入口并测试）。
 - 备份、保留策略、恢复校验、副本目录、日志轮转、密钥 CLI（A4.3）。
-- 真正的 docker / NapCat 管理、真实桌面通知弹窗、经平台账号的通知插件（阶段二，并需要用户同意）。
+- 真正的 docker / NapCat 管理、真实桌面通知弹窗、经平台账号的通知插件（阶段二，并需要用户同意）。真实桌面通知由 B10 接入（第 5.3–5.6 节）。
 - `--detach` 后台运行与双击启动脚本（A4.2）；托盘图标（阶段三，可选）。
 - 开机自启、系统服务（不做；云服务器迁移时如需要，另经用户同意）。
 
