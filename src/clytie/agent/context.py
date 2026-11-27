@@ -1,7 +1,7 @@
 """从同一本账本装配上下文；不向插件开放账本。"""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
 from pydantic import TypeAdapter
@@ -20,6 +20,11 @@ PART = TypeAdapter(MessagePart)
 
 def message(role, text):
     return ChatMessage(role=role, parts=[TextPart(text=text)])
+
+
+def history_time(value):
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 class HistoryMessage(NamedTuple):
@@ -185,7 +190,7 @@ class Context:
             msg = row["message"]
             sender = Actor.model_validate(msg["sender"])
             yield HistoryMessage(
-                msg.get("sent_at") or row["received_at"],
+                history_time(msg.get("sent_at") or row["received_at"]),
                 "user",
                 sender,
                 row["event_id"],
@@ -204,7 +209,7 @@ class Context:
             if not self.visible(record, conversation):
                 continue
             yield HistoryMessage(
-                row.get("created_at", record["created_at"]),
+                history_time(row.get("created_at", record["created_at"])),
                 "assistant",
                 None,
                 row["intent_id"],

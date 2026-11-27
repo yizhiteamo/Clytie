@@ -388,6 +388,13 @@ async def test_quiet_history_and_queued_live_contribute_in_sent_order(h):
     h.switch("online")
     await h.tick(1)
     live = event(h.agent, "fictional newer", scene="public_group", mention=True)
+    live = live.model_copy(
+        update={
+            "message": live.message.model_copy(
+                update={"sent_at": old.message.sent_at + timedelta(milliseconds=250)}
+            )
+        }
+    )
     await h.companion._receive_event(live)
     await h.tick(12)
     await h.recovery.cycle
