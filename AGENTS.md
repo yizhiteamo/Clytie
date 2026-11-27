@@ -157,6 +157,7 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/architecture/content-spec.md` | B9 内容来源：`web-tools` 插件（搜索、读网页）、轻量能力、只访问公网、资料保留，B9b 和看视频的方向 |
 | `docs/architecture/comic-spec.md` | C 漫画工具与漫画简报：`comic-maker` 插件、角色表、字体库、`appearance.read`、能力之间的服务调用 |
 | `docs/architecture/proactive-spec.md` | B8 主动私聊与睡眠作息：`proactive-chat` 插件、主动开口使用能力、暂停主动聊天、B8b 已确认的方向 |
+| `docs/architecture/catch-up-spec.md` | B11 掉线期间的消息补收：什么时候补、怎样判断看过、私聊和群的规则、她怎样回应、补收不到时、平台插件的历史读取 |
 | `docs/architecture/runtime-services-spec.md` | 阶段二运行时服务：插件凭据、生产 HTTP/WebSocket |
 | `docs/architecture/backup-spec.md` | A4.3 备份与维护：在线快照、保留与容量、副本、恢复切换、旧实例与密钥 |
 | `docs/architecture/api-spec.md` | A4.2 本机 API、登录、审计、CLI、后台运行与插件路由 |

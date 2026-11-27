@@ -170,6 +170,8 @@
 | `material_full_minutes` | 整数 0–1440（15）：资料附全文的时长（content-spec §7） |
 | `material_budget_chars` | 整数 0–100,000（6,000）：单个工具结果和资料全文的字数上限（content-spec §7） |
 
+**`catch_up`**（B11，全部可选）：掉线期间的消息补收，字段和默认值见 catch-up-spec §10。
+
 ## 4. 插件清单 `plugin.json`
 
 字段含义见 `plugins.md` 第 4 节。结构：
