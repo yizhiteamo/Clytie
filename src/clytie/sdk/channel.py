@@ -1,6 +1,7 @@
 """平台契约；入站归一化由平台内部完成。"""
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .cancellation import CancelToken
@@ -13,7 +14,8 @@ class Channel(Protocol):
     """supports_membership 为真时，另提供 async is_member(conversation_id, actor_id) -> bool | None。
 
     supports_media_fetch 为真时，另提供 async fetch_media(part: MediaPart, cancel) -> MediaContent。
-    两个方法均为可选扩展，原有平台可以继续实现基础协议。
+    supports_history 为真时，另提供 async history(conversation_id, *, after, limit, cancel)
+    返回按发送时间排列的 EventEnvelope 列表。以上方法均为可选扩展。
     """
 
     async def connect(self) -> None: ...
@@ -31,6 +33,14 @@ class Channel(Protocol):
 
 class ChannelUnavailable(PluginUnavailable):
     """平台连接阶段的结构化失败。"""
+
+
+class HistoryChannel(Channel, Protocol):
+    """声明 supports_history 的平台提供的可选扩展。"""
+
+    async def history(
+        self, conversation_id: str, *, after: datetime, limit: int, cancel: CancelToken
+    ) -> list[EventEnvelope]: ...
 
 
 def channel_state(channel):

@@ -1,5 +1,10 @@
 # 变更记录
 
+## SDK 0.22.0（掉线期间的消息补收）
+
+- 平台可用 `supports_history` 声明可选的 `history()` 方法。QQ OneBot 的 `history` 默认关闭。
+- 恢复连接后，伴侣可补收主人私聊和登记的群消息，按账本防重，分批回应。
+
 ## B10 平台离线提醒
 
 - 守护进程会提醒持续离线的平台。实例可设置离线阈值、重复间隔和静音种类，并用 `clytie supervisor notify-test` 逐个测试通知插件。Windows 桌面通知默认使用 PowerShell 的应用标识。

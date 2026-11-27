@@ -560,7 +560,7 @@ class Agent:
             lines
         )
 
-    async def receive(self, event):
+    async def receive(self, event, *, holding=None, historical=False):
         if event.companion_id != self.cid:
             raise ValueError("wrong companion")
         if not await self.admission.accept_checked(event):
@@ -578,8 +578,13 @@ class Agent:
                 event = event.model_copy(
                     update={"message": event.message.model_copy(update={"parts": parts})}
                 )
-        finalization = OwnedFinalization(self.kernel.delivery)
+        finalization = (
+            holding.reserve(self.kernel.delivery)
+            if holding is not None
+            else OwnedFinalization(self.kernel.delivery)
+        )
         state = {"accepted": False, "handed": False, "images": images}
+        state.update(holding=holding, historical=historical)
 
         async def receive_owned():
             try:
@@ -616,6 +621,8 @@ class Agent:
         )
         key, new = await asyncio.shield(command)
         state["accepted"] = new
+        if new and state.get("historical") and state.get("holding") is not None:
+            state["holding"].unseen += 1
         if new and event.message and event.message.sender.role == "owner":
             trace = self.proactive_writing.get(event.conversation.conversation_id)
             if trace is not None:
@@ -697,6 +704,16 @@ class Agent:
             self.kernel.duplicates += 1
             return None
         event = await self._mark_addressed(event, finalization)
+        holding = state["holding"]
+        if holding is not None and holding.stage(event, finalization, state):
+            state["handed"] = True
+            return
+        return await self._process_claimed(event, finalization, state)
+
+    async def _process_claimed(
+        self, event, finalization, state, *, batch_note=None, assemble=False
+    ):
+        key = event.event_id
         if (
             event.message
             and event.conversation.kind == "group"
@@ -721,10 +738,7 @@ class Agent:
             await finalization.persist(self.ledger.ignore, key)
             return None
         mentioned = any(p.type == "mention" and p.is_self for p in event.message.parts)
-        cancel = fast_cancel(
-            event.message,
-            self.cancel_words(),
-        )
+        cancel = None if state["historical"] else fast_cancel(event.message, self.cancel_words())
         if (
             event.conversation.kind == "group"
             and not mentioned
@@ -756,11 +770,15 @@ class Agent:
             await self.kernel.delivery.deliver(record["trace_id"], finalization=finalization)
             return record["trace_id"]
         batch_key = (event.conversation.conversation_id, event.message.sender.actor_id)
+        if assemble:
+            batch_key += (state["holding"].batch_id,)
         if batch_key in self.batches:
             batch = self.batches[batch_key]
             batch["events"].append(event)
             batch["finalizations"].append(finalization)
             state["handed"] = True
+            if assemble:
+                return batch_key
             if batch.get("prepare_allowed"):
                 batch["generation"] += 1
                 generation = batch["generation"]
@@ -777,9 +795,12 @@ class Agent:
             "finalizations": [finalization],
             "started": self.clock.monotonic(),
             "mode": before if isinstance(before, Mode) else None,
+            "catch_up": batch_note,
         }
         self.batches[batch_key] = batch
         state["handed"] = True
+        if assemble:
+            return batch_key
         return await self.attention(batch_key)
 
     async def _mark_addressed(self, event, finalization):
@@ -992,9 +1013,11 @@ class Agent:
         for responsibility in batch["finalizations"][1:]:
             responsibility.release()
         extra = ""
-        cancel = fast_cancel(
-            event.message,
-            self.cancel_words(),
+        note = batch.get("catch_up")
+        cancel = (
+            None
+            if note and event.event_id in note.historical
+            else fast_cancel(event.message, self.cancel_words())
         )
         # 在同会话队列前执行控制动作，否则无法取消队首正在运行的聊天。
         if cancel is not None:
@@ -1012,6 +1035,7 @@ class Agent:
                 prepared_round=prepared_round,
                 respond=opinion if isinstance(opinion, Respond) else None,
                 extra=extra,
+                catch_up=note,
             ),
         )
         batch["queued"] = True
@@ -1262,6 +1286,7 @@ class Agent:
         *,
         proactive_tools=False,
         materials,
+        catch_up=None,
     ):
         specs, states = await self.tools(
             conversation, actor, proactive, proactive_tools=proactive_tools
@@ -1284,6 +1309,7 @@ class Agent:
             memory_trace=trace,
             images=images,
             materials=materials,
+            catch_up=catch_up,
             available_tools=set() if exhausted else {spec.name for spec in specs},
             **({"use": use} if use is not None else {}),
         )
@@ -1336,6 +1362,7 @@ class Agent:
         direct=None,
         respond=None,
         prepared_round=None,
+        catch_up=None,
     ):
         token = self.kernel.tokens.setdefault(trace, CancelToken())
         self.kernel.record_tasks[trace] = asyncio.current_task()
@@ -1392,6 +1419,7 @@ class Agent:
                         selected_refs,
                         proactive_tools=proactive_tools,
                         materials=materials,
+                        catch_up=catch_up,
                     )
                     turn = await self.generate(
                         trace, messages, [] if exhausted else specs, conversation, token

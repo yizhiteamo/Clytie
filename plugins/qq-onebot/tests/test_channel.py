@@ -55,6 +55,8 @@ class Protocol(FakeWebSocketConnection):
             result = {"status": "ok", "data": {"user_id": self.account}}
         else:
             result = self.reply
+            if callable(result):
+                result = result(payload)
             if result is None:
                 result = {"status": "ok", "retcode": 0, "data": {"message_id": 7001}}
         if result != "silence":
@@ -431,6 +433,155 @@ async def test_event_identity_queue_limits_and_status_counters(tmp_path):
         assert (await anext(stream)).event_id == "qq-onebot:2"
         await stream.aclose()
         assert any(entry[1] == "qq.queue_overflow" for entry in ctx.log.entries)
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize("kind", ["group", "private"])
+async def test_history_matches_live_event_and_addresses_bound_conversation(tmp_path, kind):
+    from datetime import timedelta
+
+    ctx, channel, protocol = make(tmp_path, history=True)
+    target = "test_group" if kind == "group" else "owner_private"
+    peer = "1000000003" if kind == "group" else "1000000004"
+    if kind == "private":
+        ctx.identity.conversations[kind, peer] = Conversation(
+            conversation_id=target, kind=kind, scene="owner_private", channel_id="qq-onebot"
+        )
+    raw = message(-7, message_type=kind, time=int(ctx.clock.now().timestamp()))
+    historical = dict(raw)
+    del historical["self_id"]
+    protocol.reply = {"status": "ok", "data": {"messages": [historical]}}
+    await channel.connect()
+    try:
+        protocol.messages.put_nowait(json.dumps(raw))
+        live = await anext(channel.events())
+        events = await channel.history(
+            target,
+            after=live.message.sent_at - timedelta(seconds=1),
+            limit=50,
+            cancel=CancelToken(),
+        )
+        assert events == [live]
+        action = protocol.actions[-1]
+        assert action["action"] == f"get_{'group' if kind == 'group' else 'friend'}_msg_history"
+        assert action["params"] == {
+            "group_id" if kind == "group" else "user_id": peer,
+            "message_seq": "0",
+            "count": 50,
+            "reverse_order": False,
+        }
+    finally:
+        await channel.close()
+
+
+async def test_history_disabled_and_unsupported_do_not_request_again(tmp_path):
+    for enabled in (False, True):
+        ctx, channel, protocol = make(tmp_path, history=enabled)
+        protocol.reply = {"status": "failed", "retcode": 1404}
+        await channel.connect()
+        try:
+            assert channel.features().supports_history == enabled
+            for _ in range(2):
+                with pytest.raises(ChannelUnavailable):
+                    await channel.history(
+                        "test_group", after=ctx.clock.now(), limit=1, cancel=CancelToken()
+                    )
+            assert not channel.features().supports_history
+            assert len(protocol.actions[1:]) == int(enabled)
+        finally:
+            await channel.close()
+
+
+@pytest.mark.parametrize("last_page", ["complete", "failed", "cancelled"])
+async def test_history_pages_overlap_limit_after_and_partial_cancel(tmp_path, last_page):
+    from datetime import timedelta
+
+    ctx, channel, wire = make(tmp_path, history=True, history_page_size=4)
+    base = ctx.clock.now()
+    stamp = int(base.timestamp())
+
+    def item(n, **changes):
+        return message(n, time=stamp + n, **changes)
+
+    def reply(request):
+        if request["params"]["message_seq"] == "0":
+            return {
+                "status": "ok",
+                "data": {
+                    "messages": [
+                        item(3),
+                        item(5),
+                        item(4, user_id=1000000001),
+                        item(6, group_id=1000000008),
+                    ]
+                },
+            }
+        assert request["params"]["message_seq"] == "3"
+        if last_page == "failed":
+            return {"status": "failed", "retcode": 1400}
+        return {"status": "ok", "data": {"messages": [item(3), item(1), item(2), "bad"]}}
+
+    wire.reply = reply
+    await channel.connect()
+    token = CancelToken()
+    try:
+        job = asyncio.create_task(
+            channel.history("test_group", after=base + timedelta(seconds=1), limit=4, cancel=token)
+        )
+        await ctx.clock.advance_and_drain(0.99)
+        assert len(wire.actions) == 2 and not job.done()
+        if last_page == "cancelled":
+            token.cancel("timeout")
+        await ctx.clock.advance_and_drain(0.01)
+        events = await job
+        expected = [2, 3, 5] if last_page == "complete" else [3, 5]
+        assert [e.message.ref.platform_message_id for e in events] == list(map(str, expected))
+        assert len(wire.actions) == (2 if last_page == "cancelled" else 3)
+        assert ctx.state.snapshot.states[ctx.plugin_id]["malformed"] >= 1
+    finally:
+        await channel.close()
+
+
+@pytest.mark.parametrize(
+    "reply", [{"status": "failed", "retcode": 1400}, {"status": "ok", "data": {"messages": {}}}]
+)
+async def test_history_first_page_failure_is_structured(tmp_path, reply):
+    ctx, channel, wire = make(tmp_path, history=True)
+    wire.reply = reply
+    await channel.connect()
+    try:
+        with pytest.raises(ChannelUnavailable) as exc:
+            await channel.history(
+                "test_group", after=ctx.clock.now(), limit=50, cancel=CancelToken()
+            )
+        assert exc.value.code == "history_failed"
+        assert channel.features().supports_history
+    finally:
+        await channel.close()
+
+
+async def test_history_1404_resets_only_on_verified_reconnect(tmp_path):
+    ctx, channel, first = make(tmp_path, history=True)
+    first.reply = {"status": "failed", "retcode": 1404}
+    second = Protocol(reply={"status": "ok", "data": {"messages": []}})
+    ctx.websocket.connections.append(second)
+    await channel.connect()
+    try:
+        with pytest.raises(ChannelUnavailable):
+            await channel.history(
+                "test_group", after=ctx.clock.now(), limit=2, cancel=CancelToken()
+            )
+        assert not channel.features().supports_history
+        await first.close()
+        await ctx.clock.advance_and_drain(1)
+        assert channel.features().supports_history
+        assert (
+            await channel.history(
+                "test_group", after=ctx.clock.now(), limit=2, cancel=CancelToken()
+            )
+            == []
+        )
     finally:
         await channel.close()
 
