@@ -81,10 +81,11 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 供本体补收掉线期间的消息（catch-up-spec §8–§9）。下面的动作和字段在标准之外，按第 1 节在真实核对中确认；不一致时先改本节，再改代码。
 
 - 插件配置 `history`，默认 `false`。为 `false` 时 `supports_history = false`，不发送下面的动作。
-- 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": <对方账号>, "count": <条数>}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": <群号>, "count": <条数>}, "echo": ...}`。
+- 依据：NapCat 公开文档（napneko.pages.dev 的"接口"和"完整接口定义"页，2026-11-27 查阅）。私聊历史的参数表写明：`user_id`（字符串，QQ 号）、`message_seq`（字符串，默认 `'0'`，"起始信息"）、`count`（数字，默认 20）、`reverseOrder`（布尔，默认 `false`，"倒序"）；返回 `messages`（消息数组，"参考 onebot11"）。群历史在接口列表中写明参数 `group_id`、`count`，其余参数文档没有展开，按与私聊相同处理，真实核对时确认。
+- 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": "<对方账号>", "message_seq": "<位置>", "count": <条数>, "reverseOrder": false}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": <群号>, "message_seq": "<位置>", "count": <条数>, "reverseOrder": false}, "echo": ...}`。第一次请求的 `message_seq` 为 `"0"`，表示从最新一条开始。
 - 返回：`status = "ok"` 时，`data.messages` 是列表，每一项是标准的私聊或群消息事件格式（`message_id`、`user_id`、`time`、`message`、`sender` 等）。`data.messages` 不是列表时，这次读取按失败处理。
 - 每项按实时事件的映射处理（同一个函数）：自己发的消息跳过；缺少 `self_id` 时用本连接的账号；畸形的项跳过并计数。
-- 分页：第一次请求不带位置参数，取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求带上本页最早一项的位置（`message_seq` 或 `message_id`，以协议端公开文档和真实核对为准），并注意返回中是否包含这一项本身，按编号去重。拿不到位置时不翻页，只用第一页。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
+- 分页：第一次请求取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求的 `message_seq` 取本页最早一项的 `message_seq` 字段；项中没有这个字段时不翻页，只用第一页。返回可能包含作为位置的那一项本身，按 `message_id` 去重。文档没有写明返回顺序和 `reverseOrder` 的确切含义，所以插件不依赖返回顺序，自己按 `time` 排序。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
 - `status = "failed"` 且 `retcode = 1404`：本连接内按不支持处理，不再发送；重连后按配置重新启用。其他失败、超时、断线：这次读取失败，只记动作名、`status` 和 `retcode`。
-- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。
+- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。文档没有说明这一点。另外核对：位置参数用 `message_seq` 是否能翻页，`reverseOrder` 为 `false` 时取的是不是位置之前的消息，群历史的参数是否与私聊相同。
 - 测试：私聊和群的请求格式；分页和停止条件；没有 `message_seq` 时只用第一页；自己的消息被跳过；`data.messages` 不是列表；1404 后本连接内不再请求；配置为 `false` 时不请求。
