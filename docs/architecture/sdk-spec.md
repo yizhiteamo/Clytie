@@ -616,3 +616,9 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 
 - `ChannelFeatures` 新增 `max_images_per_message: int = 1`，合并规则见 agent-spec §3.5。
 - 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0040。
+
+### SDK 0.22 读取历史消息（B11，草案 2026-11-27）
+
+- `ChannelFeatures` 新增 `supports_history: bool = False`。支持的平台提供可选方法 `async history(conversation_id, *, after, limit, cancel) -> list[EventEnvelope]`：返回这个会话中发送时间晚于 `after` 的最新 `limit` 条消息，按发送时间从早到晚排列，映射与 `events()` 相同，`event_id` 与实时推送一致。
+- 只有本体的补收调用它（catch-up-spec §8）。以后的会话服务 `history`（platform-capabilities-spec §2）可以复用。
+- 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0042。

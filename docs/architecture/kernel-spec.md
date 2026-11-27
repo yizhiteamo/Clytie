@@ -14,7 +14,7 @@
 
 | 实体 | 主键 | 关键字段 |
 |---|---|---|
-| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|merged\|dropped_on_restart`、`merged_into = trace_id`（消息合并，见 `agent-spec.md` §2）；`ignored` 原因字段取值包括 `boundary_paused`、`cancel_only` |
+| `inbound` 入站消息 | `event_id` | `companion_id`、`channel_id`、`platform_message_id`、`conversation_id`、`sender`（逻辑身份）、`scene`、`received_at`、`parts`（原文，见第 13 节）、`dedupable`、`state: received\|processing\|ignored\|merged\|dropped_on_restart`、`merged_into = trace_id`（消息合并，见 `agent-spec.md` §2）；`ignored` 原因字段取值包括 `boundary_paused`、`cancel_only`、`catch_up`（补收的聊天记录，catch-up-spec §5.1） |
 | `record` 处理记录 | `trace_id` | `source_event_id?`（主动消息、定时任务为空）、`conversation_id`、`requester?`、`kind: chat\|task`、`task_id?`、`tool?`、`parent_trace_id?`、`scene`、`exec_status`、`delivery_status`、`deadline`、各阶段耗时、`created_at` |
 | `invocation` 能力调用 | `invocation_id` | `trace_id`、`plugin_id`、`tool`、`idem_key`、`args`、`status`、`result`、`error?`、`asset_ids`、开始/结束时间 |
 | `intent` 待交付 | `intent_id` | `trace_id`、`kind`、`parts`、`target?`、`split?`、`not_before?`、`status`（第 6 节） |
