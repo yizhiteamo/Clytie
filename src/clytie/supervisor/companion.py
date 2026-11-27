@@ -43,6 +43,9 @@ class Companion:
         self.runtime.owner_managed = True
         self.storage_owner = None
         self.stop_finalization = None
+        self._storage_close_stage = None
+        self._last_close_counts = {}
+        self.on_storage_close = None
         self._health_data = {"inflight_tasks": 0, "sending": 0, "storage_observed_at": None}
         self._memory_notices = set()
         self.agent = self.kernel = None
@@ -207,6 +210,13 @@ class Companion:
             return {}
         notices = set(self.agent.boundary.warnings) | self._memory_notices
         notices.update(self.agent.appearance_warnings)
+        if self._storage_close_stage:
+            counts = self._storage_close_counts()
+            notices.update(f"storage_close.{kind}={count}" for kind, count in counts.items())
+            if counts != self._last_close_counts:
+                if counts:
+                    self.log.warning("storage.close_wait", **counts)
+                self._last_close_counts = counts
         channel_plugins = {r.key: r.plugin_id for r in self.host.registrations(self.cid, "channel")}
         states = {}
         priority = {"unknown": 0, "online": 1, "connecting": 2, "offline": 3, "auth_invalid": 4}
@@ -475,20 +485,42 @@ class Companion:
             raise asyncio.CancelledError
         return ledger
 
+    def _storage_close_counts(self):
+        sample = self.storage_owner.status()
+        lifecycle = self.stop_finalization
+        # The startup reservation belongs to finish() itself, not to an external executor.
+        reserved = int(lifecycle is not None and not lifecycle.released)
+        counts = {
+            "finalizer": sample["finalizers"] - reserved,
+            "capture": int(sample["capture_pending"]),
+            "ordinary": sample["ordinary"],
+            "stop_finalizer": int(bool(lifecycle and lifecycle.tasks)),
+            "maintenance": int(
+                self._storage_close_stage == "maintenance" and not self.runtime.maintenance.done()
+            ),
+        }
+        return {kind: count for kind, count in counts.items() if count}
+
     async def _close_storage(self):
         if self.storage_owner is not None:
             # 未退出的插件仍可能持有停止回调责任；等待外层期限处理。
             if self.cid in self.host.memory_resources:
                 return
+            self._storage_close_stage = "finalizers"
+            if self.on_storage_close is not None:
+                await self.on_storage_close()
             if self.stop_finalization is not None:
                 await self.stop_finalization.finish()
                 self.host.stop_finalizations.pop(self.cid, None)
             if self.runtime.maintenance:
+                self._storage_close_stage = "maintenance"
                 task = self.runtime.maintenance
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 self.runtime.maintenance = None
+            self._storage_close_stage = "owner"
             await self.storage_owner.close()
+            self._storage_close_stage = None
             self.host.storage_owners.pop(self.cid, None)
         self.runtime.close()
 

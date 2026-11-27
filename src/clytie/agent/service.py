@@ -701,9 +701,7 @@ class Agent:
             event.message
             and event.conversation.kind == "group"
             and event.message.sender.role != "owner"
-            and await finalization.persist(
-                self.safety_belt.paused, event.conversation.conversation_id
-            )
+            and await finalization.read(self.safety_belt.paused, event.conversation.conversation_id)
         ):
             await finalization.persist(self.ledger.ignore, key, "safety_paused")
             await self.host.behavior(self.cid, "message_received", event)
@@ -785,7 +783,7 @@ class Agent:
         return await self.attention(batch_key)
 
     async def _mark_addressed(self, event, finalization):
-        return await finalization.persist(self.conversation_messages.mark, event)
+        return await finalization.read(self.conversation_messages.mark, event)
 
     async def attention(self, key, *, judgment=None, registration=None):
         batch = self.batches[key]
@@ -844,7 +842,7 @@ class Agent:
 
         remaining = 120 - (self.clock.monotonic() - batch["started"])
         defer = isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0)
-        already_paused = defer and await finalization.persist(paused)
+        already_paused = defer and await finalization.read(paused)
         if generation != batch["generation"]:
             return None
         if defer and not already_paused and not self.shutting_down:
@@ -952,7 +950,7 @@ class Agent:
                     return "stale"
                 return None
 
-            invalid = await finalization.persist(invalidated)
+            invalid = await finalization.read(invalidated)
             if invalid:
                 already_paused = invalid == "safety_paused"
                 await self.prewrites.discard(batch, invalid)
