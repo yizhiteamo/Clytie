@@ -210,8 +210,6 @@ class Companion:
         try:
             async for event in channel.events():
                 await self._receive_event(event)
-                if self._closing or self.stop_requested():
-                    return
         finally:
             if not self._closing and not self.stop_requested():
                 self._feeds_ended += 1
@@ -219,15 +217,19 @@ class Companion:
     async def _receive_event(self, event):
         delay = 0
         try:
-            while not self._closing and not self.stop_requested():
+            while True:
                 try:
                     await self.agent.receive(event)
                     return
                 except StorageBusy:
+                    if self._closing or self.stop_requested():
+                        return
                     if not delay:
                         self._inbound_retrying += 1
                     delay = min(2 * delay, 30) if delay else 1
                     await self.clock.sleep(delay)
+                    if self._closing or self.stop_requested():
+                        return
                 except Exception as exc:
                     self._inbound_failed += 1
                     code = getattr(exc, "code", None)

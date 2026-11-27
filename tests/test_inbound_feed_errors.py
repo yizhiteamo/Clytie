@@ -138,6 +138,50 @@ async def test_stopping_cancels_busy_feed_without_consuming_next(feed, monkeypat
     assert not any(w.startswith("inbound.") for w in runtime.health()["warnings"])
 
 
+async def test_consume_during_stop_records_ignored_inbound(feed, monkeypatch):
+    runtime, queue, _ = feed
+    retrying, busy, incoming = (inbound(runtime) for _ in range(3))
+    attempts = []
+    received = asyncio.Event()
+    receive = runtime.agent.receive
+
+    async def receive_event(event):
+        attempts.append(event)
+        if event in (retrying, busy):
+            raise StorageBusy()
+        await receive(event)
+        received.set()
+
+    monkeypatch.setattr(runtime.agent, "receive", receive_event)
+    queue.put_nowait(retrying)
+    await spin(lambda: "inbound.storage_busy=1" in runtime.health()["warnings"])
+
+    # Hold wait-mode shutdown at its drain step, before it cancels the channel feed.
+    release = asyncio.Event()
+    monkeypatch.setattr(runtime.agent, "drain", release.wait)
+    stopping = asyncio.create_task(runtime.stop("wait"))
+    try:
+        await spin(lambda: runtime.agent.shutting_down)
+        queue.put_nowait(busy)
+        queue.put_nowait(incoming)
+        await runtime.clock.advance_and_drain(1)
+        feed_task = runtime.feeds[0]
+        await spin(lambda: received.is_set() or feed_task.done())
+        ledger = runtime.kernel.ledger
+        row = await run_sync(ledger, ledger.get, "inbound", incoming.event_id)
+        assert row and (row["state"], row["reason"]) == ("ignored", "shutting_down")
+        assert [r["event_id"] for r in await run_sync(ledger, ledger.rows, "dedupe")] == [
+            incoming.event_id
+        ]
+        assert attempts == [retrying, busy, incoming]
+        assert not feed_task.done()
+    finally:
+        release.set()
+        await stopping
+    assert feed_task.cancelled()
+    assert not any(w.startswith("inbound.") for w in runtime.health()["warnings"])
+
+
 @pytest.mark.parametrize("end", [None, RuntimeError("fictional iterator failure")])
 async def test_unexpected_feed_end_reported_even_when_channel_online(feed, end):
     runtime, queue, _ = feed
