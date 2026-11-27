@@ -134,7 +134,7 @@ class AttentionJudgments:
         if count or any(msg.reply_to for msg in messages):
             args = (self._snapshot, conversation, messages, count)
             tables = (
-                await finalization.persist(*args)
+                await finalization.read(*args)
                 if finalization
                 else await run_sync(self.agent.ledger, *args)
             )

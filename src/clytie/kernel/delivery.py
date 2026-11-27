@@ -60,14 +60,22 @@ class OwnedFinalization:
             task.exception()  # 后台失败仍由原等待者传播，不产生未领取异常。
         self._release_if_complete()
 
-    async def persist(self, function, *args, **kwargs):
+    def read(self, function, *args, **kwargs):
+        """观察性读取仍占原凭证；读取异常本身没有待确认的写入。"""
+        return self._command(False, function, args, kwargs)
+
+    def persist(self, function, *args, **kwargs):
+        return self._command(True, function, args, kwargs)
+
+    async def _command(self, writing, function, args, kwargs):
         async def command():
             async with self.lock:
                 try:
                     with finalizer_scope(self.token):
                         return await run_sync(self.delivery.ledger, function, *args, **kwargs)
                 except BaseException:
-                    self.failed = True
+                    if writing:
+                        self.failed = True
                     raise
 
         return await asyncio.shield(self.track(asyncio.create_task(command())))

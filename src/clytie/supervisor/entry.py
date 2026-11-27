@@ -145,9 +145,10 @@ async def companion_main(home, cid):
     runtime.stop_requested = stop_requested.is_set
     heartbeat.start()
 
-    async def refresh():
+    async def refresh(*, read_storage=True):
         while True:
-            await runtime.refresh_health()
+            if read_storage:
+                await runtime.refresh_health()
             heartbeat.update(
                 runtime.health(),
                 interval=runtime.config.get("heartbeat_seconds", 5),
@@ -155,7 +156,15 @@ async def companion_main(home, cid):
             )
             await clock.sleep(runtime.config.get("heartbeat_seconds", 5))
 
+    async def use_cached_storage_health():
+        nonlocal heartbeat_task
+        # A previous health read may still be queued behind a closing writer.
+        heartbeat_task.cancel()
+        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        heartbeat_task = asyncio.create_task(refresh(read_storage=False))
+
     heartbeat_task = asyncio.create_task(refresh())
+    runtime.on_storage_close = use_cached_storage_health
     pressure_task = asyncio.create_task(
         pressure_updates(runtime, clock, lambda value: emit(value.pop("type"), **value))
     )

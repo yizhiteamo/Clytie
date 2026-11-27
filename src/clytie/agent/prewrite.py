@@ -42,7 +42,7 @@ class Prewrites:
         if cid in agent.opening or fast_cancel(event.message, agent.cancel_words()) is not None:
             return
         finalization = batch["finalizations"][0]
-        watermark = await finalization.persist(agent.ledger.prepare_watermark, cid)
+        watermark = await finalization.read(agent.ledger.prepare_watermark, cid)
         if watermark is None or cid in agent.kernel.queue.running:
             return
         if agent.shutting_down or event is not batch["events"][-1] or cid in agent.opening:
