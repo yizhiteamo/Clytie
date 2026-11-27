@@ -7,7 +7,7 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 ## 1. 参考资料范围
 
 - 只依据 OneBot v11 标准仓库（`botuniverse/onebot-11`）的公开文档：`api/`、`message/`、`event/`、`communication/`。
-- 标准没有覆盖的部分以本文为准。可以参考协议端公开的接口文档（用户 2026-11-27 授权，原先连文档也不读）。仍然不读取协议端的源码，不复制其代码或示例，也不根据错误文本推断含义。
+- 标准没有覆盖的部分以本文为准。可以阅读协议端公开的接口文档和源码作为参考（用户 2026-11-27 授权；原先两者都不读）。不把协议端的代码、示例或定义原文复制进本仓库：NapCat 的许可证禁止未经许可复制和修改。不根据错误文本推断含义。
 - 本文中标准之外的字段，在真实链路测试（用户当次同意）中核对。核对结果与本文不一致时，先改本文，再改代码。
 
 ## 2. 表情回应 `set_msg_emoji_like`（标准之外）
@@ -81,11 +81,12 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 供本体补收掉线期间的消息（catch-up-spec §8–§9）。下面的动作和字段在标准之外，按第 1 节在真实核对中确认；不一致时先改本节，再改代码。
 
 - 插件配置 `history`，默认 `false`。为 `false` 时 `supports_history = false`，不发送下面的动作。
-- 依据：NapCat 公开文档（napneko.pages.dev 的"接口"和"完整接口定义"页，2026-11-27 查阅）。私聊历史的参数表写明：`user_id`（字符串，QQ 号）、`message_seq`（字符串，默认 `'0'`，"起始信息"）、`count`（数字，默认 20）、`reverseOrder`（布尔，默认 `false`，"倒序"）；返回 `messages`（消息数组，"参考 onebot11"）。群历史在接口列表中写明参数 `group_id`、`count`，其余参数文档没有展开，按与私聊相同处理，真实核对时确认。
-- 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": "<对方账号>", "message_seq": "<位置>", "count": <条数>, "reverseOrder": false}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": <群号>, "message_seq": "<位置>", "count": <条数>, "reverseOrder": false}, "echo": ...}`。第一次请求的 `message_seq` 为 `"0"`，表示从最新一条开始。
-- 返回：`status = "ok"` 时，`data.messages` 是列表，每一项是标准的私聊或群消息事件格式（`message_id`、`user_id`、`time`、`message`、`sender` 等）。`data.messages` 不是列表时，这次读取按失败处理。
+- 依据（2026-11-27 查阅）：NapCat 公开文档（napneko.pages.dev 的"接口"和"完整接口定义"页），以及 NapCat 源码中这两个动作和消息编号的实现。下面写的是读到的行为，真实核对时确认。
+- 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": "<对方账号>", "message_seq": "<位置>", "count": <条数>, "reverse_order": false}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": "<群号>", "message_seq": "<位置>", "count": <条数>, "reverse_order": false}, "echo": ...}`。两个动作的参数相同，账号和群号按字符串发送。`reverse_order` 是新名字，`reverseOrder` 是旧版兼容名，只发新名字。
+- 第一次请求的 `message_seq` 为 `"0"`：协议端返回这个会话最新的 `count` 条。带位置时，协议端从这条消息开始取，结果**包含这条消息本身**。
+- 返回：`status = "ok"` 时，`data.messages` 是列表，每一项是标准的私聊或群消息事件格式，按时间从早到晚排列。每项的 `message_id`、`message_seq`、`real_id` 是同一个数，`real_seq` 是平台的消息序号。`data.messages` 不是列表时，这次读取按失败处理。会话中没有符合条件的消息时，协议端返回失败（"消息不存在"），不是空列表。
 - 每项按实时事件的映射处理（同一个函数）：自己发的消息跳过；缺少 `self_id` 时用本连接的账号；畸形的项跳过并计数。
-- 分页：第一次请求取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求的 `message_seq` 取本页最早一项的 `message_seq` 字段；项中没有这个字段时不翻页，只用第一页。返回可能包含作为位置的那一项本身，按 `message_id` 去重。文档没有写明返回顺序和 `reverseOrder` 的确切含义，所以插件不依赖返回顺序，自己按 `time` 排序。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
+- 分页：第一次请求取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求的 `message_seq` 取本页最早一项的 `message_id`；结果中这一项会重复出现，按 `message_id` 去重。插件仍然自己按 `time` 排序，不依赖返回顺序。翻页请求失败时停止翻页，用已经取到的部分；只有第一页失败才算这次读取失败。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
 - `status = "failed"` 且 `retcode = 1404`：本连接内按不支持处理，不再发送；重连后按配置重新启用。其他失败、超时、断线：这次读取失败，只记动作名、`status` 和 `retcode`。
-- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。文档没有说明这一点。另外核对：位置参数用 `message_seq` 是否能翻页，`reverseOrder` 为 `false` 时取的是不是位置之前的消息，群历史的参数是否与私聊相同。
-- 测试：私聊和群的请求格式；分页和停止条件；没有 `message_seq` 时只用第一页；自己的消息被跳过；`data.messages` 不是列表；1404 后本连接内不再请求；配置为 `false` 时不请求。
+- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。按源码，两边都用"平台消息编号 + 会话类型 + 会话"算出同一个散列值，重启协议端后也不变；仍以核对为准。另外核对：`reverse_order` 为 `false` 时取的是位置之前的消息；翻页的位置能用 `message_id`。
+- 测试：私聊和群的请求格式；分页、去掉重复的位置项和停止条件；翻页失败时用已取到的部分；第一页失败算读取失败；自己的消息被跳过；`data.messages` 不是列表；1404 后本连接内不再请求；配置为 `false` 时不请求。
