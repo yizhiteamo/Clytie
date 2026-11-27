@@ -7,7 +7,7 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 ## 1. 参考资料范围
 
 - 只依据 OneBot v11 标准仓库（`botuniverse/onebot-11`）的公开文档：`api/`、`message/`、`event/`、`communication/`。
-- 标准没有覆盖的部分以本文为准。实现时不读取任何协议端的源码、文档或示例代码，也不根据错误文本推断含义。
+- 标准没有覆盖的部分以本文为准。可以参考协议端公开的接口文档（用户 2026-11-27 授权，原先连文档也不读）。仍然不读取协议端的源码，不复制其代码或示例，也不根据错误文本推断含义。
 - 本文中标准之外的字段，在真实链路测试（用户当次同意）中核对。核对结果与本文不一致时，先改本文，再改代码。
 
 ## 2. 表情回应 `set_msg_emoji_like`（标准之外）
@@ -84,7 +84,7 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 - 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": <对方账号>, "count": <条数>}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": <群号>, "count": <条数>}, "echo": ...}`。
 - 返回：`status = "ok"` 时，`data.messages` 是列表，每一项是标准的私聊或群消息事件格式（`message_id`、`user_id`、`time`、`message`、`sender` 等）。`data.messages` 不是列表时，这次读取按失败处理。
 - 每项按实时事件的映射处理（同一个函数）：自己发的消息跳过；缺少 `self_id` 时用本连接的账号；畸形的项跳过并计数。
-- 分页：第一次请求不带位置参数，取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求在 `params` 中加上 `message_seq`，取本页最早一项的 `message_seq`。项中没有 `message_seq` 时不翻页，只用第一页。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
+- 分页：第一次请求不带位置参数，取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求带上本页最早一项的位置（`message_seq` 或 `message_id`，以协议端公开文档和真实核对为准），并注意返回中是否包含这一项本身，按编号去重。拿不到位置时不翻页，只用第一页。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
 - `status = "failed"` 且 `retcode = 1404`：本连接内按不支持处理，不再发送；重连后按配置重新启用。其他失败、超时、断线：这次读取失败，只记动作名、`status` 和 `retcode`。
 - 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。
 - 测试：私聊和群的请求格式；分页和停止条件；没有 `message_seq` 时只用第一页；自己的消息被跳过；`data.messages` 不是列表；1404 后本连接内不再请求；配置为 `false` 时不请求。
