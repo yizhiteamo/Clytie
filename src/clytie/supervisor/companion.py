@@ -1,6 +1,7 @@
 """单伴侣运行时：复用宿主、Agent 和账本，不重放旧任务。"""
 
 import asyncio
+import re
 from copy import deepcopy
 
 from clytie.agent import Agent
@@ -16,6 +17,7 @@ from clytie.plugin_host.support import HostLog, timed
 from clytie.sdk import CancelToken, PluginUnavailable
 from clytie.sdk.channel import channel_state
 from clytie.sdk.context import ServiceUnavailable
+from clytie.storage.owner import StorageBusy
 
 from .common import finish_shutdown, read
 
@@ -50,6 +52,9 @@ class Companion:
         self._memory_notices = set()
         self.agent = self.kernel = None
         self.channels, self.feeds = {}, []
+        self._inbound_failed = 0
+        self._inbound_retrying = 0
+        self._feeds_ended = 0
         self.escalated = asyncio.Event()
         self.config = {}
         self._closing = None
@@ -202,14 +207,54 @@ class Companion:
         return True
 
     async def consume(self, channel):
-        async for event in channel.events():
-            await self.agent.receive(event)
+        try:
+            async for event in channel.events():
+                await self._receive_event(event)
+        finally:
+            if not self._closing and not self.stop_requested():
+                self._feeds_ended += 1
+
+    async def _receive_event(self, event):
+        delay = 0
+        try:
+            while True:
+                try:
+                    await self.agent.receive(event)
+                    return
+                except StorageBusy:
+                    if self._closing or self.stop_requested():
+                        return
+                    if not delay:
+                        self._inbound_retrying += 1
+                    delay = min(2 * delay, 30) if delay else 1
+                    await self.clock.sleep(delay)
+                    if self._closing or self.stop_requested():
+                        return
+                except Exception as exc:
+                    self._inbound_failed += 1
+                    code = getattr(exc, "code", None)
+                    if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+                        code = "inbound_error"
+                    self.log.warning(
+                        "inbound.receive_failed", error_type=type(exc).__name__, code=code
+                    )
+                    return
+        finally:
+            if delay:
+                self._inbound_retrying -= 1
 
     def health(self):
         if not self.kernel:
             return {}
         notices = set(self.agent.boundary.warnings) | self._memory_notices
         notices.update(self.agent.appearance_warnings)
+        for kind, count in (
+            ("failed", self._inbound_failed),
+            ("storage_busy", self._inbound_retrying),
+            ("feed_ended", self._feeds_ended),
+        ):
+            if count:
+                notices.add(f"inbound.{kind}={count}")
         if self._storage_close_stage:
             counts = self._storage_close_counts()
             notices.update(f"storage_close.{kind}={count}" for kind, count in counts.items())
@@ -552,7 +597,7 @@ class Companion:
         return counts, notices
 
     async def refresh_health(self):
-        from clytie.storage.owner import StorageBusy, StorageFailed
+        from clytie.storage.owner import StorageFailed
 
         if not self.kernel:
             return
