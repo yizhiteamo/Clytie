@@ -73,6 +73,7 @@ class Prewrites:
                     [],
                     use,
                     materials=materials,
+                    catch_up=batch.get("catch_up"),
                 )
                 token.raise_if_cancelled()
                 if agent.clock.now() >= deadline:

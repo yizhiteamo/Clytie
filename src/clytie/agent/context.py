@@ -1,7 +1,7 @@
 """从同一本账本装配上下文；不向插件开放账本。"""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 
 from pydantic import TypeAdapter
@@ -20,6 +20,11 @@ PART = TypeAdapter(MessagePart)
 
 def message(role, text):
     return ChatMessage(role=role, parts=[TextPart(text=text)])
+
+
+def history_time(value):
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 class HistoryMessage(NamedTuple):
@@ -185,7 +190,7 @@ class Context:
             msg = row["message"]
             sender = Actor.model_validate(msg["sender"])
             yield HistoryMessage(
-                row["received_at"],
+                history_time(msg["sent_at"] if row.get("historical") else row["received_at"]),
                 "user",
                 sender,
                 row["event_id"],
@@ -204,7 +209,7 @@ class Context:
             if not self.visible(record, conversation):
                 continue
             yield HistoryMessage(
-                row.get("created_at", record["created_at"]),
+                history_time(row.get("created_at", record["created_at"])),
                 "assistant",
                 None,
                 row["intent_id"],
@@ -272,6 +277,7 @@ class Context:
         materials=None,
         use=None,
         available_tools=(),
+        catch_up=None,
     ):
         agent = self.agent
         tables, pending = await run_sync(
@@ -383,8 +389,11 @@ class Context:
             result.append(message("system", "当前模式：" + mode.name))
         result.extend(message("system", s.title + "\n" + s.text) for s in sections)
         history = []
+        visible_sources = {}
         for item in self.history_rows(ledger, conversation, {e.event_id for e in events}):
             parts = [PART.validate_python(p) for p in item.parts]
+            if catch_up and item.role == "user":
+                visible_sources[item.key] = (item.sender, item.prefix + self.render_parts(parts))
             history.append(
                 (
                     item.at,
@@ -430,16 +439,31 @@ class Context:
         reminder_position = len(result)
         authors = [sender for _, sender in reversed(kept) if sender is not None]
         result.extend(msg for msg, _ in reversed(kept))
+        if catch_up:
+            result.append(message("system", catch_up.instructions))
+            cutoff = sorted(history, key=lambda row: row[0])[-len(kept)][0] if kept else None
+            for sender, earlier in catch_up.prior_context(events, cutoff, visible_sources):
+                authors.append(sender)
+                result.append(
+                    message(
+                        "user",
+                        "当时在聊的：" + earlier[: limits.get("max_single_message_chars", 2000)],
+                    )
+                )
         for event in events:
             msg = event.message
-            text = f"{msg.sender.role} {actor_label(msg.sender)}：" + self.render_parts(msg.parts)
+            prefix = f"{msg.sender.role} {actor_label(msg.sender)}："
+            if catch_up:
+                local_time = msg.sent_at.astimezone(agent.clock.local_tz)
+                prefix = f"[{local_time:%Y-%m-%d %H:%M:%S}] " + prefix
+            text = prefix + self.render_parts(msg.parts)
             offsets = self.image_offsets(
                 msg.parts,
                 media,
                 event.event_id,
                 event.received_at.isoformat(),
                 0,
-                f"{msg.sender.role} {actor_label(msg.sender)}：",
+                prefix,
             )
             if msg.reply_to:
                 text += "\n引用：" + await self.quote(

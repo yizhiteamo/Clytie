@@ -556,6 +556,7 @@ class Tick(SDKModel):
 
 
 class ChannelFeatures(SDKModel):
+    supports_history: bool = False
     supports_media_fetch: bool = False
     max_text_chars: int
     max_images_per_message: int = Field(default=1, ge=1, strict=True)

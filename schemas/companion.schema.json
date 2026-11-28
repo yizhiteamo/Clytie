@@ -11,6 +11,27 @@
       "type": "string",
       "minLength": 1
     },
+    "catch_up": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "settle_seconds": {"type": "number", "minimum": 0, "default": 10},
+        "min_interval_seconds": {"type": "number", "minimum": 0, "default": 60},
+        "request_interval_seconds": {"type": "number", "minimum": 0, "default": 1},
+        "conversation_timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "default": 30},
+        "overlap_minutes": {"type": "number", "minimum": 0, "default": 5},
+        "private_hours": {"type": "number", "exclusiveMinimum": 0, "default": 24},
+        "group_hours": {"type": "number", "exclusiveMinimum": 0, "default": 24},
+        "private_max": {"type": "integer", "minimum": 1, "default": 50},
+        "group_scan_max": {"type": "integer", "minimum": 1, "default": 200},
+        "group_people_max": {"type": "integer", "minimum": 1, "default": 3},
+        "group_addressed_max": {"type": "integer", "minimum": 1, "default": 10},
+        "group_context_before": {"type": "integer", "minimum": 0, "default": 5},
+        "notice_after_minutes": {"type": "number", "minimum": 0, "default": 15},
+        "notice_interval_hours": {"type": "number", "minimum": 0, "default": 3}
+      }
+    },
     "attention": {
       "type": "object",
       "properties": {

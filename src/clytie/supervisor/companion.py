@@ -19,6 +19,7 @@ from clytie.sdk.channel import channel_state
 from clytie.sdk.context import ServiceUnavailable
 from clytie.storage.owner import StorageBusy
 
+from .catch_up import PlatformCatchUp
 from .common import finish_shutdown, read
 
 
@@ -52,6 +53,7 @@ class Companion:
         self._memory_notices = set()
         self.agent = self.kernel = None
         self.channels, self.feeds = {}, []
+        self.catch_up = {}
         self._inbound_failed = 0
         self._inbound_retrying = 0
         self._feeds_ended = 0
@@ -201,7 +203,15 @@ class Companion:
                 raise
         if self.stop_requested():
             return False
-        for channel in self.channels.values():
+        for binding, channel in self.channels.items():
+            if config.get("catch_up", {}).get("enabled", True):
+                plugin = next(
+                    entry["plugin"] for entry in config["channels"] if entry["account"] == binding
+                )
+                recovery = PlatformCatchUp(self, binding, plugin, channel)
+                self.catch_up[binding] = recovery
+                recovery.observe()
+                recovery.track(recovery.watch())
             self.feeds.append(asyncio.create_task(self.consume(channel)))
         await self.refresh_health()
         return True
@@ -209,17 +219,28 @@ class Companion:
     async def consume(self, channel):
         try:
             async for event in channel.events():
+                recovery = self.catch_up.get(event.channel_id)
+                if recovery is not None:
+                    recovery.observe()
                 await self._receive_event(event)
         finally:
             if not self._closing and not self.stop_requested():
                 self._feeds_ended += 1
 
-    async def _receive_event(self, event):
+    async def _receive_event(self, event, *, holding=None, historical=False):
         delay = 0
         try:
             while True:
                 try:
-                    await self.agent.receive(event)
+                    current = holding
+                    if current is None and not self._closing and event.message:
+                        recovery = self.catch_up.get(event.channel_id)
+                        if recovery:
+                            current = recovery.holds.get(event.conversation.conversation_id)
+                    if current is not None and (historical or current.waiting):
+                        await self.agent.receive(event, holding=current, historical=historical)
+                    else:
+                        await self.agent.receive(event)
                     return
                 except StorageBusy:
                     if self._closing or self.stop_requested():
@@ -248,6 +269,11 @@ class Companion:
             return {}
         notices = set(self.agent.boundary.warnings) | self._memory_notices
         notices.update(self.agent.appearance_warnings)
+        if any(not c.channel.features().supports_history for c in self.catch_up.values()):
+            notices.add("catch_up.unsupported")
+        failed = sum(c.failed for c in self.catch_up.values())
+        if failed:
+            notices.add(f"catch_up.failed={failed}")
         for kind, count in (
             ("failed", self._inbound_failed),
             ("storage_busy", self._inbound_retrying),
@@ -352,6 +378,8 @@ class Companion:
             return dict(state="stopped", stopped=[], not_stopped={}, reason=None)
         agent, kernel = self.agent, self.kernel
         agent.shutting_down = True
+        for recovery in self.catch_up.values():
+            await recovery.stop()
         self.host.plugin_models.pop(self.cid, None)
         for (cid, _), runtime in self.host.runtimes.items():
             if cid == self.cid:

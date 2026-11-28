@@ -9,6 +9,7 @@ from clytie.sdk.immutable import thaw
 from clytie.sdk.types import ChannelFeatures, ChannelState, ErrorInfo, MediaContent, Receipt
 
 from .capture import Capture
+from .history import read_history
 from .mapping import _number, encode_parts, normalize_event
 
 _NOT_SENT = object()
@@ -36,6 +37,7 @@ class OneBotChannel:
         self._stop = asyncio.Event()
         self._cancel = CancelToken()
         self._auth_invalid = False
+        self._history_enabled = self._config.get("history", False)
         self._reaction_enabled = self._configured_reactions()
         self._remove_enabled = self._config.get("react_remove", False)
         self._last_heartbeat = ctx.clock.monotonic()
@@ -58,6 +60,7 @@ class OneBotChannel:
 
     def features(self):
         return ChannelFeatures(
+            supports_history=self._history_enabled,
             max_text_chars=self._config.get("max_text_chars", 4000),
             max_images_per_message=self._config.get("max_images_per_message", 4),
             supports_react=self._reaction_enabled,
@@ -148,6 +151,7 @@ class OneBotChannel:
         self._reaction_enabled = self._configured_reactions()
         self._remove_enabled = self._config.get("react_remove", False)
         self._last_heartbeat = self.ctx.clock.monotonic()
+        self._history_enabled = self._config.get("history", False)
         await self._publish("online")
         self._heartbeat = asyncio.create_task(self._watch_heartbeat(self._ws))
 
@@ -347,6 +351,9 @@ class OneBotChannel:
         if _number(data.get("group_id")) != group or _number(data.get("user_id")) != account:
             return None
         return True
+
+    async def history(self, conversation_id, *, after, limit, cancel):
+        return await read_history(self, conversation_id, after, limit, cancel)
 
     async def send(self, intent, cancel):
         cancel.raise_if_cancelled()
