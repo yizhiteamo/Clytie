@@ -1,5 +1,6 @@
 """补收的离线时序，通过生产入站、账本、上下文与虚构模型核对。"""
 
+import asyncio
 import json
 from datetime import timedelta
 from zoneinfo import ZoneInfo
@@ -120,6 +121,8 @@ async def test_reconnect_anchor_live_dedupe_one_owner_reply_and_restart(h):
         )
     )
     assert h.audit("catch_up.done")[0]["unseen"] == 1
+    assert h.agent.ledger.get("inbound", old.event_id)["historical"] is True
+    assert "historical" not in h.agent.ledger.get("inbound", live.event_id)
     assert h.agent.ledger.get("inbound", seen.event_id)["reason"] == "shutting_down"
     await h.tick(61)
     for restart in (False, True):
@@ -187,6 +190,161 @@ async def test_no_anchor_and_clamped_lookback(h):
     cid, after, limit, _ = h.calls[0]
     assert (cid, limit) == ("owner_private", 50)
     assert after == h.clock.now() - timedelta(hours=24, seconds=1)
+
+
+@pytest.mark.parametrize(
+    "interruption", ["flicker", "failed", "empty_timeout", "disconnect", "cooldown"]
+)
+async def test_incomplete_recovery_reuses_original_anchor(h, interruption):
+    seed = h.seed()
+    await h.tick(7200)
+    if interruption == "cooldown":
+        h.switch("online")
+        await h.tick(12)
+        await h.recovery.cycle
+        h.switch("offline")
+    await h.tick(1)
+    missed = event(h.agent, "fictional missed during outage")
+    h.history["owner_private"] = [missed]
+    await h.tick(1)
+    h.switch("online")
+    await h.tick(1)
+    live = event(h.agent, "fictional live after reconnect")
+    await h.companion._receive_event(live)
+    if interruption == "failed":
+        h.failure = RuntimeError("fictional failure")
+    h.block = interruption in ("empty_timeout", "disconnect")
+    await h.tick(4 if interruption == "flicker" else 10)
+    if interruption == "empty_timeout":
+        await h.tick(30)
+    h.switch("offline")
+    await h.tick(1)
+    await h.agent.drain()
+    assert h.agent.ledger.get("inbound", missed.event_id) is None
+    if interruption == "cooldown":
+        assert len(h.calls) == 1
+        await h.tick(60)
+    h.failure, h.block = None, False
+    previous = len(h.calls)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.calls) == previous + 1
+    assert h.calls[-1][1] == seed.message.sent_at - timedelta(minutes=5)
+    assert h.agent.ledger.get("inbound", missed.event_id)["state"] == "processing"
+    # After successful processing the next recovery uses its own boundary.
+    await h.tick(6 * 60)
+    newest = event(h.agent)
+    await h.companion._receive_event(newest)
+    h.switch("offline")
+    await h.tick(61)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert h.calls[-1][1] == newest.message.sent_at - timedelta(minutes=5)
+
+
+@pytest.mark.parametrize("first_use", [True, False])
+async def test_first_use_and_unsupported_do_not_pin_recovery(h, first_use):
+    if not first_use:
+        h.seed()
+        h.supported = False
+    await h.tick(7200)
+    h.switch("online")
+    await h.tick(1)
+    live = event(h.agent)
+    await h.companion._receive_event(live)
+    h.switch("offline")
+    await h.tick(1)
+    h.supported = True
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert len(h.calls) == 1
+    assert h.calls[0][1] == live.message.sent_at - timedelta(minutes=5)
+
+
+async def test_cooldown_starts_after_successful_read_finishes(h):
+    h.seed()
+    await h.tick(1)
+    release = asyncio.Event()
+    read = h.channel.history
+
+    async def delayed(*args, **kwargs):
+        rows = await read(*args, **kwargs)
+        await release.wait()
+        return rows
+
+    h.channel.history = delayed
+    h.switch("online")
+    await h.tick(10)
+    await h.tick(20)
+    release.set()
+    await h.tick(2)
+    await h.recovery.cycle
+    h.switch("offline")
+    await h.tick(44)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert len(h.calls) == 1
+
+
+async def test_partial_timeout_completes_only_the_conversation_processed(h):
+    h.recovery.settings["request_interval_seconds"] = 0
+    h.seed()
+    group_seed = h.seed(scene="public_group")
+    await h.tick(7200)
+    missed = event(h.agent)
+    read = h.channel.history
+
+    async def partial(cid, **kwargs):
+        await read(cid, **kwargs)
+        if cid == "owner_private":
+            await kwargs["cancel"].wait()
+            return [missed]
+        raise RuntimeError("fictional interrupted read")
+
+    h.channel.history = partial
+    h.switch("online")
+    await h.tick(1)
+    await h.companion._receive_event(event(h.agent, scene="public_group"))
+    await h.tick(42)
+    await h.recovery.cycle
+    assert h.audit("catch_up.done")[-1]["unseen"] == 1
+    assert h.audit("catch_up.failed")[-1]["conversation_id"] == "test_group"
+    h.switch("offline")
+    await h.tick(1)
+    h.channel.history = read
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert [cid for cid, *_ in h.calls] == ["owner_private", "test_group", "test_group"]
+    assert h.calls[-1][1] == group_seed.message.sent_at - timedelta(minutes=5)
+
+
+async def test_realtime_message_received_after_reply_preserves_order(h):
+    await h.tick(0.1)
+    await h.agent.receive(event(h.agent, "fictional first"))
+    await h.agent.drain()
+    await h.tick(0.7)
+    second = event(h.agent, "fictional second")
+    second = second.model_copy(
+        update={
+            "message": second.message.model_copy(
+                update={"sent_at": second.message.sent_at.replace(microsecond=0)}
+            )
+        }
+    )
+    await h.agent.receive(second)
+    await h.agent.drain()
+    await h.tick(1)
+    await h.agent.receive(event(h.agent, "fictional third"))
+    await h.agent.drain()
+    history = [text_parts(m.parts) for m in h.model.requests[-1].messages]
+    first_reply = next(i for i, s in enumerate(history) if s == "fictional reply")
+    assert first_reply < next(i for i, s in enumerate(history) if "fictional second" in s)
 
 
 async def test_owner_limit_batch_and_historical_cancel(h, monkeypatch):
@@ -391,7 +549,7 @@ async def test_quiet_history_and_queued_live_contribute_in_sent_order(h):
     live = live.model_copy(
         update={
             "message": live.message.model_copy(
-                update={"sent_at": old.message.sent_at + timedelta(milliseconds=250)}
+                update={"sent_at": old.message.sent_at - timedelta(milliseconds=250)}
             )
         }
     )

@@ -1,6 +1,7 @@
 """单个平台连接的历史读取、恢复窗口和私聊提醒。"""
 
 import asyncio
+import json
 import re
 from datetime import datetime, timedelta
 
@@ -60,7 +61,9 @@ class PlatformCatchUp:
                 self.targets[cid] = False
         self.online = False
         self.down_since = self.last_notice = self.notice_recovery = None
-        self.last_read, self.watermarks = {}, {}
+        self.last_completed, self.watermarks = {}, {}
+        self.pending_recoveries = {}
+        self.anchor_lock = asyncio.Lock()
         self.failed = 0
         self.holds = {}
         self.cycle = None
@@ -102,26 +105,58 @@ class PlatformCatchUp:
         holds = {
             cid: HeldConversation(self.agent, private) for cid, private in self.targets.items()
         }
+        restored = self.clock.now()
+        anchors = None
         if supported:
             self.holds = holds
-        self.cycle = self.track(self.run(self.clock.now(), downtime, holds))
+            # A short-lived connection still establishes the earliest boundary.
+            # Finishing this local lookup is independent of reading the platform.
+            anchors = self.track(self.remember_anchors(restored, self.pending_recoveries))
+        else:
+            self.pending_recoveries = {}
+        self.cycle = self.track(self.run(restored, downtime, holds, anchors))
 
     async def watch(self):
         while True:
             self.observe()
             await self.clock.sleep(0.25)
 
-    def anchors(self, restored):
+    def anchors(self, cutoffs):
         # SDK timestamps are UTC. Comparing without the suffix preserves
         # microseconds, including when one timestamp is exactly a whole second.
         rows = self.ledger.db.execute(
-            "SELECT json_extract(data,'$.conversation_id'), json_extract(data,'$.message.sent_at'), "
-            "rtrim(replace(json_extract(data,'$.received_at'),'+00:00',''),'Z') AS received "
-            "FROM inbound WHERE json_extract(data,'$.channel_id')=? AND received<? "
-            "AND json_extract(data,'$.message.sent_at') IS NOT NULL ORDER BY received,rowid",
-            (self.binding, restored.isoformat().removesuffix("+00:00")),
+            """
+            WITH cutoffs AS (SELECT key AS cid, value AS cutoff FROM json_each(?)),
+            candidates AS (
+                SELECT rowid AS seq, json_extract(data,'$.conversation_id') AS cid,
+                       json_extract(data,'$.message.sent_at') AS sent,
+                       rtrim(replace(json_extract(data,'$.received_at'),'+00:00',''),'Z') AS received
+                  FROM inbound WHERE json_extract(data,'$.channel_id')=?
+            ), ranked AS (
+                SELECT cid, sent,
+                       row_number() OVER (PARTITION BY cid ORDER BY received DESC, seq DESC) AS rank
+                  FROM candidates JOIN cutoffs USING (cid)
+                 WHERE received < cutoff AND sent IS NOT NULL
+            )
+            SELECT cid, sent FROM ranked WHERE rank=1
+            """,
+            (json.dumps(cutoffs), self.binding),
         )
-        return {cid: sent for cid, sent, _ in rows if cid in self.targets}
+        return dict(rows)
+
+    async def remember_anchors(self, restored, pending):
+        async with self.anchor_lock:
+            cutoffs = {
+                cid: pending.get(cid, restored).isoformat().removesuffix("+00:00")
+                for cid in self.targets
+            }
+            anchors = await run_sync(self.ledger, self.anchors, cutoffs)
+            for cid in self.targets:
+                if cid in anchors:
+                    pending.setdefault(cid, restored)
+                else:
+                    pending.pop(cid, None)
+            return anchors
 
     def anchor(self, cid, sent):
         hours = self.settings["private_hours" if self.targets[cid] else "group_hours"]
@@ -198,25 +233,27 @@ class PlatformCatchUp:
 
     async def one(self, cid, held, restored, downtime, anchors):
         if not self.channel.features().supports_history:
+            self.pending_recoveries = {}
             await finish_accepted(held.release_live())
             await self.notice(cid, restored, downtime)
             return
         if cid not in anchors:
             await finish_accepted(held.release_live())
             return
-        last_read = self.last_read.get(cid)
+        completed = self.last_completed.get(cid)
         if (
-            last_read is not None
-            and self.clock.monotonic() - last_read < self.settings["min_interval_seconds"]
+            completed is not None
+            and self.clock.monotonic() - completed < self.settings["min_interval_seconds"]
         ):
             await finish_accepted(held.release_live())
             return
         after = self.anchor(cid, anchors[cid])
-        self.last_read[cid] = self.clock.monotonic()
         limit = self.settings["private_max" if held.private else "group_scan_max"]
         try:
             rows = await self.read(cid, after, limit)
         except Exception as exc:
+            if not self.channel.features().supports_history:
+                self.pending_recoveries = {}
             code = getattr(exc, "code", None)
             if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z_]{0,63}", code):
                 code = "timeout" if isinstance(exc, TimeoutError) else "history_failed"
@@ -252,8 +289,8 @@ class PlatformCatchUp:
             )
 
         new, responding, recorded = await finish_accepted(ingest())
-        if rows:
-            self.watermarks[cid] = rows[-1].message.sent_at
+        if channel_state(self.channel).status != "online":
+            return
         await self.audit(
             "catch_up.done",
             conversation_id=cid,
@@ -263,8 +300,14 @@ class PlatformCatchUp:
             recorded=recorded,
             limit_reached=len(rows) == limit,
         )
+        if rows:
+            self.watermarks[cid] = rows[-1].message.sent_at
+        self.last_completed[cid] = self.clock.monotonic()
+        self.pending_recoveries.pop(cid, None)
+        if not self.channel.features().supports_history:
+            self.pending_recoveries = {}
 
-    async def run(self, restored, downtime, holds):
+    async def run(self, restored, downtime, holds, anchor_lookup):
         async def release_at_deadline():
             await self.clock.sleep(
                 self.settings["settle_seconds"] + self.settings["conversation_timeout_seconds"]
@@ -274,11 +317,7 @@ class PlatformCatchUp:
         deadline = asyncio.create_task(release_at_deadline())
         try:
             await self.clock.sleep(self.settings["settle_seconds"])
-            anchors = (
-                await run_sync(self.ledger, self.anchors, restored)
-                if holds and self.channel.features().supports_history
-                else {}
-            )
+            anchors = await asyncio.shield(anchor_lookup) if anchor_lookup is not None else {}
             for index, (cid, held) in enumerate(holds.items()):
                 if index:
                     await self.clock.sleep(self.settings["request_interval_seconds"])

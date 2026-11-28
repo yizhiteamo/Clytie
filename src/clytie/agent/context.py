@@ -190,7 +190,7 @@ class Context:
             msg = row["message"]
             sender = Actor.model_validate(msg["sender"])
             yield HistoryMessage(
-                history_time(msg.get("sent_at") or row["received_at"]),
+                history_time(msg["sent_at"] if row.get("historical") else row["received_at"]),
                 "user",
                 sender,
                 row["event_id"],

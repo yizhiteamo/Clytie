@@ -122,11 +122,11 @@ async def test_cancelled_receive_waiter_does_not_abandon_accepted_input(tmp_path
         entered, release = asyncio.Event(), threading.Event()
         original = Ledger.claim_inbound
 
-        def claim(store, value):
+        def claim(store, value, **kwargs):
             if value.event_id == incoming.event_id:
                 owner.loop.call_soon_threadsafe(entered.set)
                 assert release.wait(10)
-            return original(store, value)
+            return original(store, value, **kwargs)
 
         monkeypatch.setattr(Ledger, "claim_inbound", claim)
         caller = asyncio.create_task(runtime.agent.receive(incoming))

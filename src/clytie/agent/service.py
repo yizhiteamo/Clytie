@@ -617,7 +617,11 @@ class Agent:
     async def _claim_inbound(self, event, finalization, state):
         # 接受点仍使用普通容量，满时明确抛出 storage_busy，不能借收尾槽假接收。
         command = finalization.track(
-            asyncio.create_task(run_sync(self.ledger, self.ledger.claim_inbound, event))
+            asyncio.create_task(
+                run_sync(
+                    self.ledger, self.ledger.claim_inbound, event, historical=state["historical"]
+                )
+            )
         )
         key, new = await asyncio.shield(command)
         state["accepted"] = new

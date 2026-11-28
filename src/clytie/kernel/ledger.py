@@ -165,7 +165,7 @@ class Ledger:
             (encode(dict(kind=kind, trace_id=trace_id, at=self.now(), **data)),),
         )
 
-    def claim_inbound(self, event):
+    def claim_inbound(self, event, *, historical=False):
         if event.companion_id != self.companion_id or not event.dedupable:
             raise ValueError("wrong companion or non-dedupable event")
         key = encode(
@@ -177,6 +177,8 @@ class Ledger:
                 return existing["event_id"], False
             self.put("dedupe", key, dict(event_id=event.event_id, first_seen_at=self.now()))
             data = dump(event)
+            if historical:
+                data["historical"] = True
             data["content_written_at"] = self.now()
             data.update(
                 state="received",
