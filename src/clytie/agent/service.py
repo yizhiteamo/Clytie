@@ -2120,7 +2120,11 @@ class Agent:
             await finalization.persist(audit_busy)
             return ProactiveSubmission(status="busy")
 
-        if channel_state(self.kernel.delivery.channels.get(channel)).status != "online":
+        if channel_state(self.kernel.delivery.channels.get(channel)).status in {
+            "offline",
+            "connecting",
+            "auth_invalid",
+        }:
             return await busy("platform_offline")
         if conversation_id in self.opening or any(
             key[0] == conversation_id for key in self.batches

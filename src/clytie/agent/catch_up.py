@@ -229,7 +229,7 @@ class HeldConversation:
         # A reaction-only directive for these replies is also subject to the
         # batch's stale decision and its single atomic record.
         retry_actors = {e.message.sender.actor_id for e, _, state in response if state.get("retry")}
-        keys = {}
+        reactions_by_batch = {}
         for row in response:
             event, _, state = row
             state["batch_reaction"] = event.message.sender.actor_id in retry_actors or (
@@ -239,20 +239,20 @@ class HeldConversation:
             )
             key = await self._release(row, note=note, assemble=True)
             if isinstance(key, tuple):
-                keys[key] = None
+                reactions_by_batch.setdefault(key, []).append(state.get("reaction"))
                 batch = self.agent.batches[key]
                 batch["recovery"] = self
                 batch["stale_minutes"] = settings["group_stale_minutes"]
-                if reaction := state.get("reaction"):
-                    batch["reaction"] = reaction
                 if trace := row[2].get("retry"):
                     batch.setdefault("retry_sources", {})[row[0].event_id] = trace
                     if not batch["catch_up"].retry:
                         batch["catch_up"] = replace(batch["catch_up"], retry=True)
                     self.retry_traces.add(trace)
                 responding += row[0].event_id in selected
-        for key in keys:
+        for key, reactions in reactions_by_batch.items():
             if key in self.agent.batches:
+                if all(reactions):
+                    self.agent.batches[key]["reaction"] = reactions[-1]
                 try:
                     await self.agent.attention(key)
                 except Exception as exc:

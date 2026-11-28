@@ -508,8 +508,80 @@ async def test_recovery_reaction_only_is_atomic_for_owner_batch(h, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("reaction_first", [False, True])
+async def test_owner_mixed_reaction_replies_to_whole_batch(h, monkeypatch, reaction_first):
+    from clytie.sdk.behavior import ReactOnly
+
+    h.recovery.settings["request_interval_seconds"] = 0
+    original, trace = h.failed_reply(text="fictional missed question")
+    h.clock.advance(1)
+    live = event(h.agent, "fictional live message")
+    reaction_id = original.event_id if reaction_first else live.event_id
+    behavior = h.agent.host.behavior
+
+    async def opinions(cid, point, arg, **kwargs):
+        if point == "before_attention" and arg[0].event_id == reaction_id:
+            return ReactOnly(emoji="👌")
+        return await behavior(cid, point, arg, **kwargs)
+
+    monkeypatch.setattr(h.agent.host, "behavior", opinions)
+    h.switch("online")
+    await h.companion._receive_event(live)
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == len(h.channel.sent) == 1 and not h.channel.reacts
+    context = str(h.model.requests[0].messages)
+    assert "fictional missed question" in context and "fictional live message" in context
+    reply = h.channel.sent[0].trace_id
+    assert h.agent.ledger.get("record", trace)["retry_handled_by"] == reply
+    assert h.agent.ledger.get("record", reply)["retry_of_trace_ids"] == [trace]
+
+
+async def test_stale_group_mixed_reaction_replies_after_judgment(h, monkeypatch):
+    from clytie.sdk.behavior import ReactOnly
+
+    h.seed(scene="public_group")
+    h.clock.advance(1)
+    group = [
+        event(h.agent, text, scene="public_group", mention=True)
+        for text in ("fictional group question", "fictional group followup")
+    ]
+    h.history["test_group"] = group
+    h.clock.advance(3601)
+    h.model.turns.append({"text": '{"respond":true}', "finish": "stop"})
+    behavior = h.agent.host.behavior
+
+    async def opinions(cid, point, arg, **kwargs):
+        if point == "before_attention" and arg[0].event_id == group[-1].event_id:
+            return ReactOnly(emoji="👌")
+        return await behavior(cid, point, arg, **kwargs)
+
+    monkeypatch.setattr(h.agent.host, "behavior", opinions)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == 2 and len(h.channel.sent) == 1 and not h.channel.reacts
+    assert h.audit("catch_up.done")[-1]["stale_respond"] == 1
+    context = str(h.model.requests[-1].messages)
+    assert "fictional group question" in context and "fictional group followup" in context
+
+
+async def test_proactive_without_channel_state_is_accepted(h, monkeypatch):
+    monkeypatch.delattr(h.channel, "state")
+    monkeypatch.delattr(type(h.channel), "state")
+    assert not hasattr(h.channel, "state")
+    result = await h.agent.submit("owner_private", reason="scheduled", topic="fictional")
+    assert result.status == "accepted"
+    await h.agent.drain()
+    assert len(h.channel.sent) == 1 and not h.audit("proactive.busy")
+
+
+@pytest.mark.parametrize("status", ["offline", "connecting", "auth_invalid"])
 @pytest.mark.parametrize("direct", [False, True])
-async def test_offline_proactive_is_busy_before_writing(h, direct):
+async def test_offline_proactive_is_busy_before_writing(h, direct, status):
+    h.status = status
     content = {"parts": [ImagePart(raw_ref="fictional")]} if direct else {"topic": "fictional"}
     result = await h.agent.submit("owner_private", reason="scheduled", **content)
     assert result.status == "busy"
