@@ -236,7 +236,7 @@ class Companion:
                     if current is None and not self._closing and event.message:
                         recovery = self.catch_up.get(event.channel_id)
                         if recovery:
-                            current = recovery.holds.get(event.conversation.conversation_id)
+                            current = await recovery.holding_for(event.conversation.conversation_id)
                     if current is not None and (historical or current.waiting):
                         await self.agent.receive(event, holding=current, historical=historical)
                     else:

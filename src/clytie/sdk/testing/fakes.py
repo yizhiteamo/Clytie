@@ -12,6 +12,7 @@ from clytie.sdk.types import (
     QUOTA_UNKNOWN,
     BusEvent,
     ChannelFeatures,
+    ChannelState,
     ContextRequest,
     ContextSection,
     DeliveryIntent,
@@ -91,6 +92,9 @@ class FakeChannel:
     async def close(self) -> None:
         await self.ctx.clock.sleep(0)
         self.connected = False
+
+    def state(self):
+        return ChannelState(status="online" if self.connected else "offline")
 
     async def events(self) -> AsyncIterator[EventEnvelope]:
         for event in self.incoming:

@@ -33,7 +33,7 @@ class Reactions:
             if finalization is not None
             else await run_sync(self.ledger, self._source, trace)
         )
-        if not self.enabled or r["kind"] != "task" or not r["source_event_id"]:
+        if not self.enabled or r["kind"] != "task" or not event:
             return False
         if self.audience == "owner" and r["requester"]["role"] != "owner":
             return False
@@ -117,12 +117,7 @@ class Reactions:
 
     def _source(self, trace):
         record = self.ledger.get("record", trace)
-        event = (
-            self.ledger.get("inbound", record["source_event_id"])
-            if record["source_event_id"]
-            else None
-        )
-        return record, event
+        return record, self.ledger.source_inbound(record)
 
     def _register(self, trace, state):
         r, event = self._source(trace)

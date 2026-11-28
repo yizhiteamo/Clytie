@@ -30,7 +30,9 @@ WITH RECURSIVE recent(trace) AS (
     SELECT r.id, json_extract(r.data,'$.source_event_id'), json_extract(r.data,'$.parent_trace_id')
     FROM ancestors a JOIN record r ON r.id=a.parent WHERE a.source IS NULL
 ), family(root,id) AS (
-    SELECT a.id, a.id FROM ancestors a JOIN inbound e ON e.id=a.source
+    SELECT a.id, a.id FROM ancestors a JOIN record root ON root.id=a.id
+    LEFT JOIN record original ON original.id=json_extract(root.data,'$.retry_of_trace_ids[#-1]')
+    JOIN inbound e ON e.id=coalesce(a.source,json_extract(original.data,'$.source_event_id'))
     WHERE json_extract(e.data,'$.conversation_id')=:group
       AND json_extract(e.data,'$.conversation.kind')='group'
       AND json_type(e.data,'$.message')='object'

@@ -123,9 +123,7 @@ def task_view(ledger, record, *, full=False):
         unrecovered=bool(unfinished and not lock_held(ledger.path.parent / ".lock")),
     )
     if full:
-        inbound = (
-            ledger.get("inbound", record["source_event_id"]) if record["source_event_id"] else None
-        )
+        inbound = ledger.source_inbound(record)
         task["content"] = dict(
             inbound=inbound.get("message") if inbound else None,
             invocations=[{k: i[k] for k in ("tool", "args", "result")} for i in invocations],

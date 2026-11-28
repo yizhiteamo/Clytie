@@ -18,6 +18,7 @@ from clytie.kernel.task_card import render_task_card
 from clytie.plugin_host.memory import bind_scene
 from clytie.sdk import CancelToken, ProactiveSubmission
 from clytie.sdk.behavior import Defer, Ignore, Judge, Judgment, Mode, ReactOnly, Respond, Skip
+from clytie.sdk.channel import channel_state
 from clytie.sdk.context import validate_proactive
 from clytie.sdk.types import (
     Budget,
@@ -724,7 +725,8 @@ class Agent:
             and event.message.sender.role != "owner"
             and await finalization.read(self.safety_belt.paused, event.conversation.conversation_id)
         ):
-            await finalization.persist(self.ledger.ignore, key, "safety_paused")
+            if not state.get("retry"):
+                await finalization.persist(self.ledger.ignore, key, "safety_paused")
             await self.host.behavior(self.cid, "message_received", event)
             return None
         channel = self.kernel.delivery.channels.get(event.channel_id)
@@ -757,21 +759,16 @@ class Agent:
             self.cid, "before_attention", (event, self.host.companion_state(self.cid))
         )
         if isinstance(before, Ignore):
-            await finalization.persist(self.ledger.ignore, key)
+            if not state.get("retry"):
+                await finalization.persist(self.ledger.ignore, key)
             return None
-        if isinstance(before, ReactOnly):
+        if isinstance(before, ReactOnly) and state.get("batch_reaction"):
+            state["reaction"] = (before.emoji, event.message.ref)
+        elif isinstance(before, ReactOnly):
             record = await self.kernel.open_record(event_id=key, finalization=finalization)
             state["trace"] = record["trace_id"]
             self._bind_finalization(record["trace_id"], finalization)
-            intent = self.intent(
-                record, [], kind="react", emoji=before.emoji, target=event.message.ref
-            )
-            # 宿主已检验插件 message.react；owner Ignore 降级是本体例外。
-            await self.kernel.allow_reaction_exception(
-                record["trace_id"], intent, permissions=("message.react",)
-            )
-            await self.kernel.seal(record["trace_id"], "ok", [intent])
-            await self.kernel.delivery.deliver(record["trace_id"], finalization=finalization)
+            await self._react_only(record, finalization, before.emoji, event.message.ref)
             return record["trace_id"]
         batch_key = (event.conversation.conversation_id, event.message.sender.actor_id)
         if assemble:
@@ -810,6 +807,14 @@ class Agent:
     async def _mark_addressed(self, event, finalization):
         return await finalization.read(self.conversation_messages.mark, event)
 
+    async def _react_only(self, record, finalization, emoji, target):
+        trace = record["trace_id"]
+        intent = self.intent(record, [], kind="react", emoji=emoji, target=target)
+        # 宿主已检验插件 message.react；owner Ignore 降级是本体例外。
+        await self.kernel.allow_reaction_exception(trace, intent, permissions=("message.react",))
+        await self.kernel.seal(trace, "ok", [intent])
+        await self.kernel.delivery.deliver(trace, finalization=finalization)
+
     async def attention(self, key, *, judgment=None, registration=None):
         batch = self.batches[key]
         generation = batch["generation"]
@@ -840,6 +845,25 @@ class Agent:
         finalization = batch["finalizations"][0]
         event = batch["events"][-1]
         generation = batch["generation"]
+
+        def paused():
+            return (
+                event.conversation.kind == "group"
+                and event.message.sender.role != "owner"
+                and self.safety_belt.paused(event.conversation.conversation_id)
+            )
+
+        recovery = batch.get("recovery")
+        if recovery and not await recovery.should_respond(batch):
+            self.batches.pop(key)
+            for responsibility in batch["finalizations"]:
+                responsibility.release()
+            return None
+        if batch.get("reaction"):
+            self.batches.pop(key)
+            async with self._opening_record(event.conversation.conversation_id):
+                return await self._respond(batch, Respond(), paused, False)
+        judgment = judgment or batch.get("stale_judgment")
         supplied = (event, [e.message for e in batch["events"]])
         origin = []
         if judgment is not None:
@@ -850,20 +874,12 @@ class Agent:
             supplied,
             judge_origin=origin,
             resume_registration=registration,
-            mentioned=any(
-                e.addressed.mention or e.addressed.reply_to_self for e in batch["events"]
-            ),
+            mentioned=any(e.addressed.mention or e.addressed.reply_to_self for e in batch["events"])
+            or bool(batch.get("stale_judgment")),
         )
 
         if generation != batch["generation"]:
             return None
-
-        def paused():
-            return (
-                event.conversation.kind == "group"
-                and event.message.sender.role != "owner"
-                and self.safety_belt.paused(event.conversation.conversation_id)
-            )
 
         remaining = 120 - (self.clock.monotonic() - batch["started"])
         defer = isinstance(opinion, Judge) or (isinstance(opinion, Defer) and remaining > 0)
@@ -885,7 +901,9 @@ class Agent:
             async def later():
                 if isinstance(opinion, Judge):
                     result = Judgment(status="failed")
-                    if remaining > 0:
+                    if batch.get("stale_judgment") is not None:
+                        result = batch["stale_judgment"]
+                    elif remaining > 0:
                         result = await self.judgments.decide(
                             event.conversation,
                             tuple(batch["events"]),
@@ -942,22 +960,32 @@ class Agent:
         event = batch["events"][-1]
         finalization = batch["finalizations"][0]
         reason = None
+        sources = batch.get("retry_sources", {})
 
         def should_open():
             nonlocal reason
             safety_paused = already_paused or paused()
-            if safety_paused or isinstance(opinion, Skip) or self.shutting_down:
+            recovery_reason = (
+                batch["recovery"].guard_reason(event) if batch.get("recovery") else None
+            )
+            if safety_paused or isinstance(opinion, Skip) or self.shutting_down or recovery_reason:
                 reason = (
                     "stopped"
                     if self.shutting_down
                     else "safety_paused"
                     if safety_paused
-                    else "skipped"
+                    else recovery_reason or "skipped"
                 )
-                self._ignore_unhandled(
-                    [e.event_id for e in batch["events"]],
-                    "safety_paused" if safety_paused else None,
-                )
+                if reason == "skipped" and sources and event.conversation.kind == "group":
+                    self.ledger.skip_catch_up(
+                        [e.event_id for e in batch["events"] if e.event_id not in sources],
+                        list(dict.fromkeys(sources.values())),
+                    )
+                else:
+                    self._ignore_unhandled(
+                        [e.event_id for e in batch["events"]],
+                        recovery_reason or ("safety_paused" if safety_paused else None),
+                    )
                 return False
             return True
 
@@ -984,6 +1012,7 @@ class Agent:
         batch["opening_record"] = True
         record = await self.kernel.open_record(
             event_id=event.event_id,
+            retry_of_trace_ids=list(dict.fromkeys(sources.values())),
             finalization=finalization,
             guard=should_open,
             **(
@@ -997,6 +1026,10 @@ class Agent:
             ),
         )
         if record is None:
+            if sources and reason is None:
+                await finalization.persist(
+                    self._ignore_unhandled, [e.event_id for e in batch["events"]]
+                )
             await self.prewrites.discard(batch, reason)
             for responsibility in batch["finalizations"]:
                 responsibility.release()
@@ -1012,8 +1045,15 @@ class Agent:
             if draft.use.memories:
                 await self.memory.reinforce_used(draft.use.memories)
         await finalization.persist(
-            self.ledger.merge, [e.event_id for e in batch["events"][:-1]], trace
+            self.ledger.merge,
+            [e.event_id for e in batch["events"][:-1] if e.event_id not in sources],
+            trace,
         )
+        if reaction := batch.get("reaction"):
+            await self._react_only(record, finalization, *reaction)
+            for responsibility in batch["finalizations"]:
+                responsibility.release()
+            return trace
         for responsibility in batch["finalizations"][1:]:
             responsibility.release()
         extra = ""
@@ -2072,14 +2112,16 @@ class Agent:
             scene=target["scene"],
         )
 
-        async def busy():
+        async def busy(busy_reason=reason):
             def audit_busy():
                 with self.ledger.transaction():
-                    self.ledger.audit("proactive.busy", plugin=plugin_id, reason=reason)
+                    self.ledger.audit("proactive.busy", plugin=plugin_id, reason=busy_reason)
 
             await finalization.persist(audit_busy)
             return ProactiveSubmission(status="busy")
 
+        if channel_state(self.kernel.delivery.channels.get(channel)).status != "online":
+            return await busy("platform_offline")
         if conversation_id in self.opening or any(
             key[0] == conversation_id for key in self.batches
         ):

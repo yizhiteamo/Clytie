@@ -3,7 +3,7 @@
 import asyncio
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,12 @@ class JoinAnswer(BaseModel):
 class SendAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     send: bool
+
+
+class StaleAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    respond: bool
+    calling_me: bool | None = None
 
 
 class AttentionJudgments:
@@ -121,7 +127,7 @@ class AttentionJudgments:
             for i, part in enumerate(parts, 1)
         )
 
-    async def _chat(self, conversation, events, *, history, finalization):
+    async def _chat(self, conversation, events, *, history, finalization, after_batch=None):
         messages = [e.message if isinstance(e, EventEnvelope) else e for e in events]
         messages = [
             m
@@ -159,9 +165,12 @@ class AttentionJudgments:
             room = remaining - len(f"[{count}] ")
             if room <= 0:
                 break
-            body = (item.prefix + self._render([PART.validate_python(p) for p in item.parts]))[
-                :room
-            ]
+            later = after_batch is not None and datetime.fromisoformat(item.at) > after_batch
+            body = (
+                ("本批之后 " if later else "")
+                + item.prefix
+                + self._render([PART.validate_python(p) for p in item.parts])
+            )[:room]
             ref = MessageRef.model_validate(item.ref) if item.ref else None
             if item.role == "assistant" and item.key in receipts:
                 row = ledger.get("intent", item.key)
@@ -235,6 +244,43 @@ class AttentionJudgments:
             conversation, messages, parse, deadline=deadline, token=token, finalization=finalization
         )
         return result if result is not None else Judgment(status="failed")
+
+    async def stale(self, conversation, events, age, finalization):
+        chat, _ = await self._chat(
+            conversation,
+            events,
+            history=True,
+            finalization=finalization,
+            after_batch=max(e.message.sent_at for e in events),
+        )
+        named = any(e.addressed.name for e in events)
+        prompt = (
+            f"本批消息距今约 {int(age.total_seconds() // 60)} 分钟。结合之后群里聊的内容，"
+            "现在回应还合适吗？话题还在继续吗？对方还在等吗？别人是不是已经答过了？"
+            "只返回 JSON 对象，respond 是布尔值。"
+            + ("同时用 calling_me 回答是不是在叫你。" if named else "")
+        )
+        persona = self.agent.persona.scene_text(conversation.scene)[
+            : self.config.get("persona_chars", 1500)
+        ]
+
+        def parse(text):
+            answer = StaleAnswer.model_validate_json(text)
+            if named and answer.calling_me is None:
+                raise ValueError("calling_me")
+            return Judgment(
+                status="ok", join=answer.respond, calling_me=answer.calling_me if named else None
+            ), answer.model_dump(exclude_none=True)
+
+        result = await self._call(
+            conversation,
+            [message("system", prompt), message("system", persona), *chat],
+            parse,
+            deadline=None,
+            token=None,
+            finalization=finalization,
+        )
+        return result or Judgment(status="failed")
 
     async def recheck(
         self, conversation, new_events, draft_text, *, trace=None, token=None, deadline=None

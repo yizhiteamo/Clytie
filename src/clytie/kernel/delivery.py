@@ -212,13 +212,7 @@ class Delivery:
                 return self._receipt(intent, "failed", blocked)
             if self.admission is not None:
                 record = await finalization.persist(self.ledger.get, "record", intent.trace_id)
-                inbound = (
-                    await finalization.persist(
-                        self.ledger.get, "inbound", record["source_event_id"]
-                    )
-                    if record.get("source_event_id")
-                    else None
-                )
+                inbound = await finalization.read(self.ledger.source_inbound, record)
                 if (
                     not await self.admission.allows_delivery_checked(intent, inbound)
                     or token.cancelled
