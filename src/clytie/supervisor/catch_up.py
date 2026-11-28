@@ -9,6 +9,7 @@ from clytie.agent.catch_up import HeldConversation
 from clytie.backup.coordination import run_sync
 from clytie.sdk import CancelToken
 from clytie.sdk.channel import channel_state
+from clytie.sdk.types import EventEnvelope
 
 DEFAULTS = dict(
     settle_seconds=10,
@@ -23,6 +24,8 @@ DEFAULTS = dict(
     group_people_max=3,
     group_addressed_max=10,
     group_context_before=5,
+    failed_replies=True,
+    group_stale_minutes=60,
     notice_after_minutes=15,
     notice_interval_hours=3,
 )
@@ -66,6 +69,7 @@ class PlatformCatchUp:
         self.anchor_lock = asyncio.Lock()
         self.failed = 0
         self.holds = {}
+        self.failed_lookup = None
         self.cycle = None
         self.jobs = set()
 
@@ -106,15 +110,70 @@ class PlatformCatchUp:
             cid: HeldConversation(self.agent, private) for cid, private in self.targets.items()
         }
         restored = self.clock.now()
+        self.failed_lookup = (
+            self.track(self.read_failed_replies(restored, targets_only=True))
+            if not supported and self.settings["failed_replies"]
+            else None
+        )
+        self.holds = holds
         anchors = None
         if supported:
-            self.holds = holds
             # A short-lived connection still establishes the earliest boundary.
             # Finishing this local lookup is independent of reading the platform.
             anchors = self.track(self.remember_anchors(restored, self.pending_recoveries))
         else:
             self.pending_recoveries = {}
         self.cycle = self.track(self.run(restored, downtime, holds, anchors))
+
+    async def holding_for(self, cid):
+        held = self.holds.get(cid)
+        if held and not self.channel.features().supports_history:
+            lookup = self.failed_lookup
+            if lookup is None or cid not in await asyncio.shield(lookup):
+                return None
+            if held is not self.holds.get(cid):
+                return None
+        return held
+
+    async def read_failed_replies(self, restored, *, targets_only=False):
+        try:
+            return await run_sync(self.ledger, self.failed_replies, restored, targets_only)
+        except Exception as exc:
+            self.failed += 1
+            self.companion.log.warning(
+                "catch_up.failed", error_type=type(exc).__name__, code="failed_reply_lookup"
+            )
+            return {}
+
+    def failed_replies(self, restored, targets_only):
+        """Read eligible records and their merged inputs on the ledger owner."""
+        result = {}
+        for cid, private in self.targets.items():
+            hours = self.settings["private_hours" if private else "group_hours"]
+            since = restored - timedelta(hours=hours)
+            for trace, value in self.ledger.failed_reply_inputs(self.binding, cid, since, restored):
+                if not (value.get("message") or {}).get("parts"):
+                    continue
+                event = self.agent.conversation_messages.mark(
+                    EventEnvelope.model_validate(
+                        {key: value[key] for key in EventEnvelope.model_fields if key in value}
+                    )
+                )
+                flags = event.addressed
+                if (
+                    event.channel_id == self.binding
+                    and event.conversation.conversation_id == cid
+                    and (
+                        event.message.sender.role == "owner"
+                        if private
+                        else flags.mention or flags.reply_to_self or flags.name
+                    )
+                ):
+                    replies = result.setdefault(cid, [])
+                    if targets_only:
+                        break
+                    replies.append((event, trace))
+        return result
 
     async def watch(self):
         while True:
@@ -231,21 +290,27 @@ class PlatformCatchUp:
             self.notice_recovery = restored
             await self.audit("catch_up.notice", conversation_id=cid)
 
-    async def one(self, cid, held, restored, downtime, anchors):
+    async def one(self, cid, held, restored, downtime, anchors, retries):
+        async def without_history():
+            if retries:
+                await self.process(cid, held, [], False, retries)
+            else:
+                await finish_accepted(held.release_live())
+
         if not self.channel.features().supports_history:
             self.pending_recoveries = {}
-            await finish_accepted(held.release_live())
+            await without_history()
             await self.notice(cid, restored, downtime)
             return
         if cid not in anchors:
-            await finish_accepted(held.release_live())
+            await without_history()
             return
         completed = self.last_completed.get(cid)
         if (
             completed is not None
             and self.clock.monotonic() - completed < self.settings["min_interval_seconds"]
         ):
-            await finish_accepted(held.release_live())
+            await without_history()
             return
         after = self.anchor(cid, anchors[cid])
         limit = self.settings["private_max" if held.private else "group_scan_max"]
@@ -261,7 +326,7 @@ class PlatformCatchUp:
             await self.audit(
                 "catch_up.failed", conversation_id=cid, error_type=type(exc).__name__, code=code
             )
-            await finish_accepted(held.release_live())
+            await without_history()
             await self.notice(cid, restored, downtime)
             return
         rows = sorted(
@@ -278,15 +343,24 @@ class PlatformCatchUp:
             ),
             key=lambda e: e.message.sent_at,
         )[-limit:]
+        await self.process(cid, held, rows, len(rows) == limit, retries)
+        if channel_state(self.channel).status != "online":
+            return
+        if rows:
+            self.watermarks[cid] = rows[-1].message.sent_at
+        self.last_completed[cid] = self.clock.monotonic()
+        self.pending_recoveries.pop(cid, None)
+        if not self.channel.features().supports_history:
+            self.pending_recoveries = {}
 
+    async def process(self, cid, held, rows, full, retries):
         async def ingest():
             for event in rows:
                 if self.agent.shutting_down:
                     break
                 await self.companion._receive_event(event, holding=held, historical=True)
-            return await held.finish(
-                self.settings, len(rows) == limit, tuple(e.event_id for e in rows)
-            )
+            await held.stage_retries(retries)
+            return await held.finish(self.settings, full, tuple(e.event_id for e in rows))
 
         new, responding, recorded = await finish_accepted(ingest())
         if channel_state(self.channel).status != "online":
@@ -298,14 +372,11 @@ class PlatformCatchUp:
             unseen=new,
             responding=responding,
             recorded=recorded,
-            limit_reached=len(rows) == limit,
+            limit_reached=full,
+            failed_replies=len(held.retry_traces),
+            stale_judged=held.judged,
+            stale_respond=held.judged_respond,
         )
-        if rows:
-            self.watermarks[cid] = rows[-1].message.sent_at
-        self.last_completed[cid] = self.clock.monotonic()
-        self.pending_recoveries.pop(cid, None)
-        if not self.channel.features().supports_history:
-            self.pending_recoveries = {}
 
     async def run(self, restored, downtime, holds, anchor_lookup):
         async def release_at_deadline():
@@ -318,12 +389,17 @@ class PlatformCatchUp:
         try:
             await self.clock.sleep(self.settings["settle_seconds"])
             anchors = await asyncio.shield(anchor_lookup) if anchor_lookup is not None else {}
+            # Delivery may finish during the settling interval. Eligibility is
+            # evaluated now, using the original connection time as the cutoff.
+            retries = (
+                await self.read_failed_replies(restored) if self.settings["failed_replies"] else {}
+            )
             for index, (cid, held) in enumerate(holds.items()):
                 if index:
                     await self.clock.sleep(self.settings["request_interval_seconds"])
                 if not self.online or self.agent.shutting_down or self.companion.stop_requested():
                     break
-                await self.one(cid, held, restored, downtime, anchors)
+                await self.one(cid, held, restored, downtime, anchors, retries.get(cid, []))
         finally:
             deadline.cancel()
             await asyncio.gather(deadline, return_exceptions=True)

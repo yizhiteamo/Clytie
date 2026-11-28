@@ -68,6 +68,17 @@ class Harness:
             )
         ]
 
+    def failed_reply(self, **options):
+        msg = event(self.agent, **options)
+        ledger = self.agent.ledger
+        ledger.claim_inbound(msg)
+        record = ledger.open_record(event_id=msg.event_id)
+        trace = record["trace_id"]
+        intent = self.agent.intent(record, msg.message.parts)
+        ledger.seal(trace, "ok", [intent])
+        ledger.fail_intent(intent.intent_id, "transient")
+        return msg, trace
+
     async def tick(self, seconds):
         await self.clock.advance_and_drain(seconds)
 
@@ -164,6 +175,422 @@ async def test_unsupported_never_waits_or_reads(h):
     await h.agent.drain()
     assert len(h.channel.sent) == 1
     assert not h.calls
+
+
+async def test_failed_lookup_preserves_live_intake_without_platform_history(h, monkeypatch):
+    h.supported = False
+
+    def unavailable(*args):
+        raise RuntimeError("fictional lookup failure")
+
+    monkeypatch.setattr(h.recovery, "failed_replies", unavailable)
+    h.switch("online")
+    await h.companion._receive_event(event(h.agent))
+    await h.agent.drain()
+    assert len(h.channel.sent) == 1 and not h.calls
+    assert h.recovery.failed == 1
+    assert "fictional lookup failure" not in str(h.companion.log.entries)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+@pytest.mark.parametrize("supports_history", [False, True])
+async def test_owner_failed_replies_merge_and_mark_all(h, count, supports_history):
+    h.supported = supports_history
+    originals = [h.failed_reply(text=f"fictional unsent {i}") for i in range(count)]
+    ledger = h.agent.ledger
+    before = [ledger.get("inbound", msg.event_id) for msg, _ in originals]
+    h.clock.advance(1)
+    if supports_history:
+        h.history["owner_private"] = [event(h.agent, "fictional history")]
+    h.switch("online")
+    await h.companion._receive_event(event(h.agent, "fictional live"))
+    assert not h.model.requests
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == len(h.channel.sent) == 1
+    record = ledger.rows("record")[-1]
+    assert record["retry_of_trace_ids"] == [trace for _, trace in originals]
+    assert all(
+        ledger.get("record", trace)["retry_handled_by"] == record["trace_id"]
+        for _, trace in originals
+    )
+    assert before == [ledger.get("inbound", msg.event_id) for msg, _ in originals]
+    context = str(h.model.requests[0].messages)
+    assert "当时没发出去" in context and "fictional live" in context
+    assert all(f"fictional unsent {i}" in context for i in range(count))
+    if supports_history:
+        assert "fictional history" in context
+    assert h.audit("catch_up.done")[0]["failed_replies"] == count
+
+
+async def test_stale_group_skip_marks_original_across_restart(h):
+    msg, trace = h.failed_reply(scene="public_group", mention=True)
+    h.model.turns.append({"text": '{"respond":false}', "finish": "stop"})
+    await h.tick(3601)
+    unseen = event(h.agent, scene="public_group", mention=True)
+    h.history["test_group"] = [unseen]
+    await h.tick(3601)
+    ledger = h.agent.ledger
+    before = ledger.get("inbound", msg.event_id)
+    for _ in range(2):
+        h.reset()
+        h.switch("online")
+        await h.tick(12)
+        await h.recovery.cycle
+        await h.agent.drain()
+        assert ledger.get("record", trace)["retry_handled_by"] is None
+        assert ledger.get("inbound", unseen.event_id)["reason"] == "catch_up"
+        assert ledger.get("inbound", msg.event_id) == before
+        assert len(h.model.requests) == 1 and not h.channel.sent
+        assert len(ledger.rows("record")) == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "partial",
+        "unknown",
+        "permanent",
+        "not_sent_before_restart",
+        "interrupted",
+        "invocation",
+        "unaddressed",
+        "expired",
+        "disabled",
+        "proactive",
+        "replacement",
+    ],
+)
+async def test_failed_reply_exclusions(h, case):
+    ledger = h.agent.ledger
+    _, trace = h.failed_reply(scene="public_group", mention=case != "unaddressed")
+    record = ledger.get("record", trace)
+    intent = ledger.intents(trace)[0]
+    with ledger.transaction():
+        if case in {"partial", "unknown"}:
+            other = dict(
+                intent,
+                intent_id="fictional_second",
+                status="sent" if case == "partial" else "unknown",
+            )
+            ledger.put("intent", other["intent_id"], other)
+            ledger._aggregate(trace)
+        elif case in {"permanent", "not_sent_before_restart"}:
+            intent["error"]["code"] = case
+            ledger.put("intent", intent["intent_id"], intent)
+        elif case == "invocation":
+            ledger.put("invocation", "fictional_call", {"trace_id": trace})
+        elif case == "replacement":
+            record["retry_of_trace_ids"] = ["fictional_original"]
+        elif case == "proactive":
+            record["proactive"] = True
+        elif case == "interrupted":
+            record["exec_status"] = case
+        if case not in {"partial", "unknown"}:
+            ledger.put("record", trace, record)
+    h.clock.advance(24 * 3600 + 1 if case == "expired" else 1)
+    h.recovery.settings["failed_replies"] = case != "disabled"
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert not h.model.requests and len(ledger.rows("record")) == 1
+    assert "retry_handled_by" not in ledger.get("record", trace)
+
+
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        ('{"respond":true,"calling_me":true}', True),
+        ('{"respond":true,"calling_me":false}', False),
+        ('{"respond":true}', False),
+        ("invalid", False),
+        ("timeout", False),
+    ],
+)
+async def test_stale_named_history_uses_one_judgment(h, answer, expected):
+    from clytie.sdk.behavior import Respond
+
+    h.seed(scene="public_group")
+    await h.tick(1)
+    named = event(h.agent, "fictional_internal", scene="public_group")
+    await h.tick(3601)
+    later = event(h.agent, "fictional later topic", scene="public_group", role="member")
+    h.history["test_group"] = [named, later]
+
+    async def delayed(request, cancel):
+        await cancel.wait()
+        cancel.raise_if_cancelled()
+
+    h.model.turns.append(delayed if answer == "timeout" else {"text": answer, "finish": "stop"})
+    behavior = h.agent.host.behavior
+
+    async def attention(cid, point, arg, **kwargs):
+        if point == "attention":
+            assert arg[2].calling_me is True
+            return Respond()
+        return await behavior(cid, point, arg, **kwargs)
+
+    h.agent.host.behavior = attention
+    h.switch("online")
+    await h.tick(12)
+    if answer == "timeout":
+        await h.tick(21)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == 1 + int(expected)
+    assert len(h.channel.sent) == int(expected)
+    assert "fictional later topic" in str(h.model.requests[0].messages)
+    audit = h.audit("catch_up.done")[-1]
+    assert (audit["stale_judged"], audit["stale_respond"]) == (1, int(expected))
+    assert "fictional" not in str(audit)
+    if not expected:
+        assert h.agent.ledger.get("inbound", named.event_id)["reason"] == "catch_up"
+
+
+async def test_failed_replacement_is_not_retried_after_restart(h):
+    from clytie.sdk.types import Receipt
+
+    _, trace = h.failed_reply()
+    ledger = h.agent.ledger
+    h.agent.kernel.delivery.max_attempts = 1
+
+    async def failed_send(intent, cancel):
+        return Receipt(
+            intent_id=intent.intent_id,
+            status="failed",
+            at=h.clock.now(),
+            error={"code": "transient", "message": ""},
+        )
+
+    h.channel.send = failed_send
+    h.clock.advance(1)
+    h.switch("online")
+    await h.companion._receive_event(event(h.agent))
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    replacement = ledger.get("record", trace)["retry_handled_by"]
+    assert ledger.get("record", replacement)["delivery_status"] == "failed"
+    h.reset()
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert len(h.model.requests) == 1 and len(ledger.rows("record")) == 2
+
+
+async def test_settle_includes_last_failed_intent_and_original_merged_input(h):
+    ledger = h.agent.ledger
+    earlier = event(h.agent, "fictional first input")
+    ledger.claim_inbound(earlier)
+    later = event(h.agent, "fictional last input")
+    ledger.claim_inbound(later)
+    record = ledger.open_record(event_id=later.event_id)
+    trace = record["trace_id"]
+    ledger.merge([earlier.event_id], trace)
+    intent = h.agent.intent(record, later.message.parts)
+    ledger.seal(trace, "ok", [intent])
+    h.clock.advance(1)
+    h.switch("online")
+    await h.tick(1)
+    ledger.fail_intent(intent.intent_id, "transient")
+    await h.tick(11)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == 1
+    text = str(h.model.requests[0].messages)
+    assert "fictional first input" in text and "fictional last input" in text
+    assert ledger.get("inbound", earlier.event_id)["merged_into"] == trace
+    assert ledger.rows("record")[-1]["retry_of_trace_ids"] == [trace]
+
+
+async def test_failed_replacement_insert_rolls_back_all_marks(h):
+    originals = [h.failed_reply() for _ in range(2)]
+    db = h.agent.ledger.db
+    db.execute("""CREATE TEMP TRIGGER reject_retry BEFORE INSERT ON record
+                  WHEN json_type(NEW.data,'$.retry_of_trace_ids')='array'
+                  BEGIN SELECT RAISE(ABORT,'fictional write failure'); END""")
+    await h.tick(1)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    assert len(h.agent.ledger.rows("record")) == 2
+    assert all(
+        "retry_handled_by" not in h.agent.ledger.get("record", trace) for _, trace in originals
+    )
+    assert any(kind == "catch_up.inbound_failed" for _, kind, _ in h.agent.log.entries)
+    db.execute("DROP TRIGGER reject_retry")
+    h.reset()
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.agent.ledger.rows("record")) == 3
+
+
+async def test_group_skip_rolls_back_marks_if_history_write_fails(h):
+    import sqlite3
+
+    ledger = h.agent.ledger
+    originals = [h.failed_reply(scene="public_group", mention=True)[1] for _ in range(2)]
+    fresh = event(h.agent, scene="public_group", mention=True)
+    ledger.claim_inbound(fresh)
+    ledger.db.execute("""CREATE TEMP TRIGGER reject_history BEFORE UPDATE ON inbound
+                         BEGIN SELECT RAISE(ABORT,'fictional write failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.skip_catch_up([fresh.event_id], originals)
+    assert all("retry_handled_by" not in ledger.get("record", t) for t in originals)
+    assert ledger.get("inbound", fresh.event_id)["state"] == "received"
+
+
+async def test_overlapping_recoveries_cannot_overwrite_a_mark(h):
+    ledger = h.agent.ledger
+    first, original = h.failed_reply()
+    second, other = h.failed_reply()
+    # Both snapshots were taken before either writer committed.
+    record = ledger.open_record(event_id=first.event_id, retry_of_trace_ids=[original])
+    assert (
+        ledger.open_record(event_id=second.event_id, retry_of_trace_ids=[other, original]) is None
+    )
+    assert "retry_handled_by" not in ledger.get("record", other)
+    ledger.skip_catch_up([], [other, original])
+    assert ledger.get("record", other)["retry_handled_by"] is None
+    assert ledger.get("record", original)["retry_handled_by"] == record["trace_id"]
+    assert len(ledger.rows("record")) == 3
+
+
+async def test_failed_group_replies_share_three_speaker_limit_and_safety_belt(h):
+    ledger = h.agent.ledger
+    traces = []
+    for i in range(4):
+        traces.append(
+            h.failed_reply(scene="public_group", mention=True, role="member", actor=f"member_{i}")[
+                1
+            ]
+        )
+        h.clock.advance(1)
+    h.agent.safety_belt.settings["replies"] = 3
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert ledger.get("record", traces[0])["retry_handled_by"] is None
+    for trace in traces[1:]:
+        new = ledger.get("record", trace)["retry_handled_by"]
+        assert ledger.get("record", new)["retry_of_trace_ids"] == [trace]
+    assert h.agent.safety_belt.paused("test_group")
+    assert h.audit("catch_up.done")[-1]["stale_judged"] == 0
+
+
+async def test_recovery_reaction_only_is_atomic_for_owner_batch(h, monkeypatch):
+    from clytie.sdk.behavior import ReactOnly
+
+    h.recovery.settings["request_interval_seconds"] = 0
+    originals = [h.failed_reply()[1] for _ in range(2)]
+    behavior = h.agent.host.behavior
+
+    async def opinions(cid, point, arg, **kwargs):
+        if point == "before_attention":
+            return ReactOnly(emoji="👌")
+        return await behavior(cid, point, arg, **kwargs)
+
+    monkeypatch.setattr(h.agent.host, "behavior", opinions)
+    h.clock.advance(1)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert not h.model.requests and len(h.channel.reacts) == 1
+    record = h.agent.ledger.rows("record")[-1]
+    assert record["retry_of_trace_ids"] == originals
+    assert all(
+        h.agent.ledger.get("record", t)["retry_handled_by"] == record["trace_id"] for t in originals
+    )
+
+
+@pytest.mark.parametrize("reaction_first", [False, True])
+async def test_owner_mixed_reaction_replies_to_whole_batch(h, monkeypatch, reaction_first):
+    from clytie.sdk.behavior import ReactOnly
+
+    h.recovery.settings["request_interval_seconds"] = 0
+    original, trace = h.failed_reply(text="fictional missed question")
+    h.clock.advance(1)
+    live = event(h.agent, "fictional live message")
+    reaction_id = original.event_id if reaction_first else live.event_id
+    behavior = h.agent.host.behavior
+
+    async def opinions(cid, point, arg, **kwargs):
+        if point == "before_attention" and arg[0].event_id == reaction_id:
+            return ReactOnly(emoji="👌")
+        return await behavior(cid, point, arg, **kwargs)
+
+    monkeypatch.setattr(h.agent.host, "behavior", opinions)
+    h.switch("online")
+    await h.companion._receive_event(live)
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == len(h.channel.sent) == 1 and not h.channel.reacts
+    context = str(h.model.requests[0].messages)
+    assert "fictional missed question" in context and "fictional live message" in context
+    reply = h.channel.sent[0].trace_id
+    assert h.agent.ledger.get("record", trace)["retry_handled_by"] == reply
+    assert h.agent.ledger.get("record", reply)["retry_of_trace_ids"] == [trace]
+
+
+async def test_stale_group_mixed_reaction_replies_after_judgment(h, monkeypatch):
+    from clytie.sdk.behavior import ReactOnly
+
+    h.seed(scene="public_group")
+    h.clock.advance(1)
+    group = [
+        event(h.agent, text, scene="public_group", mention=True)
+        for text in ("fictional group question", "fictional group followup")
+    ]
+    h.history["test_group"] = group
+    h.clock.advance(3601)
+    h.model.turns.append({"text": '{"respond":true}', "finish": "stop"})
+    behavior = h.agent.host.behavior
+
+    async def opinions(cid, point, arg, **kwargs):
+        if point == "before_attention" and arg[0].event_id == group[-1].event_id:
+            return ReactOnly(emoji="👌")
+        return await behavior(cid, point, arg, **kwargs)
+
+    monkeypatch.setattr(h.agent.host, "behavior", opinions)
+    h.switch("online")
+    await h.tick(12)
+    await h.recovery.cycle
+    await h.agent.drain()
+    assert len(h.model.requests) == 2 and len(h.channel.sent) == 1 and not h.channel.reacts
+    assert h.audit("catch_up.done")[-1]["stale_respond"] == 1
+    context = str(h.model.requests[-1].messages)
+    assert "fictional group question" in context and "fictional group followup" in context
+
+
+async def test_proactive_without_channel_state_is_accepted(h, monkeypatch):
+    monkeypatch.delattr(h.channel, "state")
+    monkeypatch.delattr(type(h.channel), "state")
+    assert not hasattr(h.channel, "state")
+    result = await h.agent.submit("owner_private", reason="scheduled", topic="fictional")
+    assert result.status == "accepted"
+    await h.agent.drain()
+    assert len(h.channel.sent) == 1 and not h.audit("proactive.busy")
+
+
+@pytest.mark.parametrize("status", ["offline", "connecting", "auth_invalid"])
+@pytest.mark.parametrize("direct", [False, True])
+async def test_offline_proactive_is_busy_before_writing(h, direct, status):
+    h.status = status
+    content = {"parts": [ImagePart(raw_ref="fictional")]} if direct else {"topic": "fictional"}
+    result = await h.agent.submit("owner_private", reason="scheduled", **content)
+    assert result.status == "busy"
+    assert not h.agent.ledger.rows("record") and not h.model.requests
+    assert h.audit("proactive.busy")[-1]["reason"] == "platform_offline"
+    h.status = "online"
+    assert (
+        await h.agent.submit("owner_private", reason="scheduled", **content)
+    ).status == "accepted"
 
 
 async def test_private_history_containing_only_live_duplicates_replies_once(h):

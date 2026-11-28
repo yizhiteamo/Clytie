@@ -16,6 +16,8 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {"type": "boolean", "default": true},
+        "failed_replies": {"type": "boolean", "default": true},
+        "group_stale_minutes": {"type": "number", "minimum": 0, "default": 60},
         "settle_seconds": {"type": "number", "minimum": 0, "default": 10},
         "min_interval_seconds": {"type": "number", "minimum": 0, "default": 60},
         "request_interval_seconds": {"type": "number", "minimum": 0, "default": 1},

@@ -47,6 +47,11 @@ HEALTH_SQL = (
     "json_extract(data,'$.conversation_id'),json_extract(data,'$.error_written_at')) "
     "WHERE json_extract(data,'$.kind')='reply' AND json_extract(data,'$.status')='sent'",
     "CREATE INDEX IF NOT EXISTS intent_trace ON intent(json_extract(data,'$.trace_id'))",
+    "CREATE INDEX IF NOT EXISTS missed_reply ON record(json_extract(data,'$.channel_id'),"
+    "json_extract(data,'$.conversation_id'),json_extract(data,'$.created_at')) "
+    "WHERE json_extract(data,'$.delivery_status')='failed' AND json_type(data,'$.retry_handled_by') IS NULL",
+    "CREATE INDEX IF NOT EXISTS merged_inbound ON inbound(json_extract(data,'$.merged_into')) "
+    "WHERE json_extract(data,'$.merged_into') IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS child_trace ON record(json_extract(data,'$.parent_trace_id'))",
     "CREATE INDEX IF NOT EXISTS belt_trips ON audit(json_extract(data,'$.conversation_id'),id) "
     "WHERE json_extract(data,'$.kind')='safety_belt.tripped'",
@@ -294,13 +299,24 @@ class Ledger:
         partial_groups=(),
         proactive=False,
         proactive_plugin=None,
+        retry_of_trace_ids=(),
     ):
         with self.transaction():
             event = self.get("inbound", event_id) if event_id else None
             if event_id and event is None:
                 raise ValueError("unknown inbound")
-            if event and event["state"] != "received":
-                raise ValueError("inbound already consumed")
+            retry_event = event is not None and event["state"] != "received"
+            if retry_event:
+                linked = (
+                    retry_of_trace_ids
+                    and self.db.execute(
+                        """SELECT 1 FROM record WHERE id IN (SELECT value FROM json_each(?))
+                       AND (json_extract(data,'$.source_event_id')=? OR id=?) LIMIT 1""",
+                        (encode(retry_of_trace_ids), event_id, event.get("merged_into")),
+                    ).fetchone()
+                )
+                if not linked:
+                    raise ValueError("inbound already consumed")
             if not event and invocation is None and conversation is None:
                 raise ValueError("explicit invocation required without inbound")
             source = (
@@ -331,7 +347,8 @@ class Ledger:
             record = dict(
                 trace_id=trace,
                 companion_id=self.companion_id,
-                source_event_id=event_id,
+                # The original inbound keeps its unique source record.
+                source_event_id=None if retry_event else event_id,
                 conversation_id=source["conversation_id"],
                 channel_id=source["channel_id"],
                 scene=source["scene"],
@@ -359,20 +376,81 @@ class Ledger:
                     self.audit("partial_group_context", group_id=group)
             if self.get("record", trace):
                 raise ValueError("duplicate trace")
+            if retry_of_trace_ids:
+                if not self._mark_retries(retry_of_trace_ids, trace):
+                    return None
+                record["retry_of_trace_ids"] = list(retry_of_trace_ids)
             self.put("record", trace, record)
-            if event:
+            if event and not retry_event:
                 event["state"] = "processing"
                 self.put("inbound", event_id, event)
         return record
 
+    def failed_reply_inputs(self, channel_id, conversation_id, since, restored):
+        rows = self.db.execute(
+            """WITH eligible AS (
+                SELECT id, rowid AS seq, json_extract(data,'$.source_event_id') AS source FROM record
+                WHERE json_extract(data,'$.channel_id')=?
+                  AND json_extract(data,'$.conversation_id')=?
+                  AND json_extract(data,'$.created_at')>=?
+                  AND json_extract(data,'$.created_at')<?
+                  AND json_extract(data,'$.delivery_status')='failed'
+                  AND json_extract(data,'$.kind')='chat'
+                  AND json_extract(data,'$.exec_status')!='interrupted'
+                  AND json_extract(data,'$.proactive') IS NOT 1
+                  AND json_type(data,'$.retry_handled_by') IS NULL
+                  AND json_type(data,'$.retry_of_trace_ids') IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM invocation
+                      WHERE json_extract(invocation.data,'$.trace_id')=record.id)
+                  AND EXISTS (SELECT 1 FROM intent WHERE json_extract(intent.data,'$.trace_id')=record.id
+                      AND json_extract(intent.data,'$.kind')='reply')
+                  AND NOT EXISTS (SELECT 1 FROM intent WHERE json_extract(intent.data,'$.trace_id')=record.id
+                      AND (json_extract(intent.data,'$.status') IS NOT 'failed'
+                        OR json_extract(intent.data,'$.error.code') IS NOT 'transient'))
+            )
+            SELECT e.id, i.data FROM eligible e JOIN inbound i
+                ON i.id=e.source OR json_extract(i.data,'$.merged_into')=e.id
+            ORDER BY e.seq, i.rowid
+            """,
+            (channel_id, conversation_id, since.isoformat(), restored.isoformat()),
+        )
+        for trace, data in rows:
+            yield trace, json.loads(data)
+
+    def source_inbound(self, record):
+        source = record.get("source_event_id")
+        if not source and record.get("retry_of_trace_ids"):
+            original = self.get("record", record["retry_of_trace_ids"][-1])
+            source = original["source_event_id"]
+        return self.get("inbound", source) if source else None
+
+    def _mark_retries(self, traces, replacement):
+        sources = [self.get("record", trace) for trace in traces]
+        if replacement and any("retry_handled_by" in source for source in sources):
+            return False
+        for source in sources:
+            if "retry_handled_by" not in source:
+                source["retry_handled_by"] = replacement
+                self.put("record", source["trace_id"], source)
+        return True
+
+    def skip_catch_up(self, event_ids, traces):
+        with self.transaction():
+            self._mark_retries(traces, None)
+            for key in event_ids:
+                self._ignore(key, "catch_up")
+            self.audit("catch_up.skipped", reason="catch_up", failed_replies=len(traces))
+
     def ignore(self, event_id, reason=None):
         with self.transaction():
-            event = self.get("inbound", event_id)
-            if event["state"] != "received":
-                raise ValueError("inbound already consumed")
-            event["state"] = "ignored"
-            event["reason"] = reason
-            self.put("inbound", event_id, event)
+            self._ignore(event_id, reason)
+
+    def _ignore(self, event_id, reason):
+        event = self.get("inbound", event_id)
+        if event["state"] != "received":
+            raise ValueError("inbound already consumed")
+        event.update(state="ignored", reason=reason)
+        self.put("inbound", event_id, event)
 
     def merge(self, event_ids, trace):
         with self.transaction():

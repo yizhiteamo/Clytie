@@ -16,6 +16,7 @@ from clytie.sdk.testing import MockClock
 from clytie.sdk.types import (
     Actor,
     ChannelFeatures,
+    ChannelState,
     Conversation,
     EventEnvelope,
     ImagePart,
@@ -67,6 +68,9 @@ class Channel:
             supports_card=True,
             media_limits={"image": {"max_bytes": 1024, "formats": ["image/png"]}},
         )
+
+    def state(self):
+        return ChannelState(status="online")
 
     async def send(self, intent, cancel):
         self.sent.append(intent)
