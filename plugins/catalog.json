@@ -250,7 +250,7 @@
         "url": null
       },
       "summary": "正向文本 WebSocket、可信账号核验与明确发送收据。",
-      "version": "0.3.0"
+      "version": "0.3.1"
     },
     {
       "category": "behavior",

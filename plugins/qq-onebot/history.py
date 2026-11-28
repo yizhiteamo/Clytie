@@ -47,7 +47,7 @@ async def read_history(channel, conversation_id, after, limit, cancel):
                 {
                     "group_id" if group else "user_id": peer,
                     "message_seq": cursor,
-                    "reverse_order": False,
+                    "reverse_order": True,
                     "count": size,
                 },
                 cancel,

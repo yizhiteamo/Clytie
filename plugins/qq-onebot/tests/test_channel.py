@@ -469,7 +469,7 @@ async def test_history_matches_live_event_and_addresses_bound_conversation(tmp_p
             "group_id" if kind == "group" else "user_id": peer,
             "message_seq": "0",
             "count": 50,
-            "reverse_order": False,
+            "reverse_order": True,
         }
     finally:
         await channel.close()
@@ -538,6 +538,7 @@ async def test_history_pages_overlap_limit_after_and_partial_cancel(tmp_path, la
         expected = [2, 3, 5] if last_page == "complete" else [3, 5]
         assert [e.message.ref.platform_message_id for e in events] == list(map(str, expected))
         assert len(wire.actions) == (2 if last_page == "cancelled" else 3)
+        assert all(action["params"]["reverse_order"] is True for action in wire.actions[1:])
         assert ctx.state.snapshot.states[ctx.plugin_id]["malformed"] >= 1
     finally:
         await channel.close()
