@@ -1,6 +1,7 @@
 """官方说话时机插件。判断只通过宿主的 attention 协议请求。"""
 
 from collections import OrderedDict
+from dataclasses import dataclass, field
 
 from clytie.sdk.behavior import Defer, Judge, JudgeFacts, Respond, Skip
 from clytie.sdk.types import Addressed, ContextSection, TextPart
@@ -8,6 +9,12 @@ from clytie.sdk.types import Addressed, ContextSection, TextPart
 from .timing import Group, Tuning
 
 BANDS = ("low", "medium", "high")
+
+
+@dataclass
+class ReplyParts:
+    pending: set[str] = field(default_factory=set)
+    counted: bool = False
 
 
 def remember(mapping, key, value):
@@ -25,6 +32,7 @@ class Plugin:
             raise ValueError("fatigue_stop must exceed fatigue_start")
         self.groups = {}
         self.arrivals = OrderedDict()
+        self.follow_up_judgments = {}
         self.responding = {}
         self.records = {}
         self.intents = {}
@@ -32,6 +40,7 @@ class Plugin:
     async def stop(self):
         self.groups.clear()
         self.arrivals.clear()
+        self.follow_up_judgments.clear()
         self.responding.clear()
         self.records.clear()
         self.intents.clear()
@@ -66,17 +75,27 @@ class Plugin:
         while self.arrivals and next(iter(self.arrivals.values()))[0] < now - 120:
             self.arrivals.popitem(last=False)
         mark = event.addressed or Addressed()
-        self.arrivals[event.message.ref] = (now, mark)
+        follow_up = "none"
         if event.conversation.kind == "group":
             group = self.group(event.conversation.conversation_id, now)
+            group.recent_senders.append((event.message.ref, event.message.sender.actor_id))
+            follow_up = group.follow_up(event.message.sender.actor_id)
             group.incoming(
                 now,
                 event.message.sender.actor_id,
                 mark.mention or mark.reply_to_self or mark.name is not None,
             )
+        self.arrivals[event.message.ref] = (now, mark, follow_up)
 
     def response(self, event, natural=False, focus=None):
-        remember(self.responding, event.event_id, (event.message.sender.role == "owner", natural))
+        sender = event.message.sender
+        partner = sender.actor_id
+        if focus is not None and focus != event.message.ref:
+            recent = self.groups[event.conversation.conversation_id].recent_senders
+            actor = next((actor for ref, actor in reversed(recent) if ref == focus), None)
+            if actor is not None and actor != self.ctx.companion_id:
+                partner = actor
+        remember(self.responding, event.event_id, (sender.role == "owner", natural, partner))
         return Respond(focus=focus or event.message.ref, recheck_after=15 if natural else None)
 
     async def attention(self, input):
@@ -86,7 +105,7 @@ class Plugin:
         private = event.conversation.kind == "private"
         state = None if private else self.group(cid, now)
         arrivals = [self.arrivals[m.ref] for m in batch if m.ref in self.arrivals]
-        marks = [mark for _, mark in arrivals] or [event.addressed or Addressed()]
+        marks = [mark for _, mark, _ in arrivals] or [event.addressed or Addressed()]
         direct = any(mark.mention or mark.reply_to_self for mark in marks)
         named = any(mark.name for mark in marks)
         if arrivals and not results:
@@ -102,8 +121,10 @@ class Plugin:
             return Respond(focus=event.message.ref if direct or named else None)
         if direct:
             return self.response(event)
+        owner = event.message.sender.role == "owner"
         if results:
             result = results[0]
+            was_follow_up = self.follow_up_judgments.pop(event.event_id, False)
             if result.status == "ok" and result.new_topic:
                 state.fatigue /= 2
             if named:
@@ -112,12 +133,26 @@ class Plugin:
                     if result.status == "ok" and result.calling_me is False
                     else self.response(event)
                 )
+            if result.status == "failed" and was_follow_up and not owner:
+                return Skip()
             if result.status == "failed" or result.join:
                 return self.response(event, natural=True, focus=result.focus or event.message.ref)
             return Skip()
-        owner = event.message.sender.role == "owner"
         band = self.band(cid)
-        if not named:
+        rules = self.ctx.config.get("judge", "model") == "rules"
+        follow_up = arrivals[-1][2] if arrivals and not named else "none"
+        if follow_up != "none":
+            if rules and not owner:
+                return Skip()
+            last = state.last_owner_follow_up_judge if owner else state.last_follow_up_judge
+            if now - last < self.t.follow_up_gap_seconds:
+                return Skip()
+            if owner:
+                state.last_owner_follow_up_judge = now
+            elif self.ctx.random.random() >= state.fatigue_factor(band):
+                return Skip()
+            state.last_follow_up_judge = state.last_judge = now
+        elif not named:
             if now - state.last_judge < self.t.judge_interval:
                 return Skip()
             question = any(
@@ -127,8 +162,10 @@ class Plugin:
             )
             if self.ctx.random.random() >= state.willingness(band, owner, question, now):
                 return Skip()
-        if self.ctx.config.get("judge", "model") == "rules":
+        if rules:
             return self.response(event, natural=not named)
+        if follow_up != "none":
+            remember(self.follow_up_judgments, event.event_id, True)
         state.last_judge = now
         state.judgments += 1
         people, share = state.share()
@@ -145,6 +182,7 @@ class Plugin:
                 ignored_recently=state.level > 0,
                 owner_spoke=owner,
                 name_hit=named,
+                follow_up=follow_up,
             ),
         )
 
@@ -156,8 +194,8 @@ class Plugin:
                 and intent.task_id is None
             ):
                 if intent.trace_id not in self.intents:
-                    remember(self.intents, intent.trace_id, set())
-                self.intents[intent.trace_id].add(intent.intent_id)
+                    remember(self.intents, intent.trace_id, ReplyParts())
+                self.intents[intent.trace_id].pending.add(intent.intent_id)
 
     async def on_event(self, event):
         payload = event.payload
@@ -167,16 +205,22 @@ class Plugin:
             decision = self.responding.pop(payload["event_id"], None)
             if decision is not None:
                 remember(self.records, trace, (payload["actor_id"], *decision))
-        elif (
-            event.name == "reply.sent"
-            and trace in self.records
-            and set(payload["intent_ids"]).intersection(self.intents.get(trace, ()))
-        ):
-            actor, owner, natural = self.records.pop(trace)
-            self.intents.pop(trace, None)
+        elif event.name == "reply.sent" and trace in self.records:
+            parts = self.intents.get(trace)
+            if parts is None or parts.pending.isdisjoint(payload["intent_ids"]):
+                return
+            parts.pending.difference_update(payload["intent_ids"])
+            actor, owner, natural, partner = self.records[trace]
             now = self.ctx.clock.monotonic()
             lag = max(0, (self.ctx.clock.now() - event.at).total_seconds())
-            self.group(cid, now).replied(now, actor, owner, natural, sent_at=now - lag)
+            group = self.group(cid, now)
+            group.sent_part(partner, now - lag)
+            if not parts.counted:
+                group.replied(now, actor, owner, natural, sent_at=now - lag)
+                parts.counted = True
+            if not parts.pending:
+                self.records.pop(trace)
+                self.intents.pop(trace)
 
     async def hint(self, request):
         if request.conversation is None or request.conversation.kind != "group":

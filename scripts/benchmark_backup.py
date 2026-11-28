@@ -194,7 +194,7 @@ async def setup(directory, scale, *, core_assets=False, record_payload=False, se
         "summary": "离线不可变文件提供者",
         "category": "example",
         "version": "1.0.0",
-        "requires": {"sdk": ">=0.7,<0.23"},
+        "requires": {"sdk": ">=0.7,<0.24"},
         "entry": "plugin:Plugin",
         "contributes": {"backup": {"snapshot": {"factory": "backup"}}},
         "permissions": [],

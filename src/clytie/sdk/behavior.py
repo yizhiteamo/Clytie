@@ -61,6 +61,7 @@ class JudgeFacts(SDKModel):
     ignored_recently: bool = Field(strict=True)
     owner_spoke: bool = Field(strict=True)
     name_hit: bool = Field(strict=True)
+    follow_up: Literal["none", "partner", "others"] = "none"
 
 
 class Judge(SDKModel):

@@ -6,7 +6,7 @@
   "category": "channel",
   "version": "0.3.1",
   "requires": {
-    "sdk": ">=0.22,<0.23"
+    "sdk": ">=0.22,<0.24"
   },
   "dependencies": {},
   "conflicts": [],

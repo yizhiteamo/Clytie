@@ -43,6 +43,36 @@ def text(msg):
     return "\n".join(part.text for part in msg.parts)
 
 
+@pytest.mark.parametrize("follow_up", [None, "none", "partner", "others"])
+async def test_follow_up_prompt_and_legacy_facts(tmp_path, follow_up):
+    fields = FACTS.model_dump(exclude={"follow_up"})
+    if follow_up is not None:
+        fields["follow_up"] = follow_up
+    facts = JudgeFacts.model_validate(fields)
+    assert facts.follow_up == (follow_up or "none")
+    agent, _, model = await make_agent(tmp_path, {"text": json.dumps(ANSWER), "finish": "stop"})
+    try:
+        item = group(agent, "fictional group message")
+        result = await AttentionJudgments(agent).decide(item.conversation, [item], facts)
+        assert result.join
+        prompt = text(model.requests[0].messages[0])
+        if facts.follow_up == "none":
+            assert prompt == (
+                "你看到群里这些消息，像平常一样想想要不要接话。话题与你无关、已经聊累了，"
+                "或者没有想说的话，都可以不接。只返回 JSON 对象。join 和 new_topic 是布尔值，"
+                "分别表示想接话和换了话题。focus 填你想接的那条消息的序号，没有就填 null。"
+            )
+        else:
+            assert "刚" in prompt and "别人" in prompt and "看法" in prompt
+            sender = "刚回应过的人" if follow_up == "partner" else "群里的其他人"
+            assert sender in text(model.requests[0].messages[-1])
+        (row,) = [r for r in agent.ledger.rows("audit") if r.get("purpose") == "attention"]
+        assert row["join"] and "follow_up" not in row and "facts" not in row
+        assert "fictional group message" not in json.dumps(row)
+    finally:
+        await finish(agent)
+
+
 async def test_judge_request_projection_media_persona_focus_and_usage(tmp_path):
     async def response(req, cancel):
         return ModelTurn(
