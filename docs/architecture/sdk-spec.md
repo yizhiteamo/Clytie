@@ -45,7 +45,7 @@
 | type | 字段 |
 |---|---|
 | `text` | `text: str` |
-| `mention` | `actor_id: str`，`is_self: bool` |
+| `mention` | `actor_id: str`，`is_self: bool`，`display_name: str?`（SDK 0.24） |
 | `image` / `audio` / `video` / `file` | `asset: AssetRef?`，`raw_ref: str?`（尚未下载时） |
 | `link` | `url: str`，`title: str?` |
 | `quote` | `message_ref: MessageRef` |
@@ -627,3 +627,8 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 
 - `JudgeFacts` 新增 `follow_up: none | partner | others`，默认 `none`：她刚在这个群说过话，这批消息可能在接她的话。本体按它选用判断的说明（chat-behavior-spec §3.3、§5.3a）。
 - 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0044。
+
+### SDK 0.24 @ 别人时的显示名（B7e，2026-11-29）
+
+- `MentionPart` 新增 `display_name: str?`，默认为空：平台给出的被 @ 的人在这个会话中的显示名。本体只用于显示，不作为身份依据（chat-behavior-spec §11.2）。
+- 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0045。
