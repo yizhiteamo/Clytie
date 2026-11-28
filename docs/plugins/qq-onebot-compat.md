@@ -83,10 +83,10 @@ OneBot v11 标准没有规定表情回应、`file` 和 `mface` 消息段，也�
 - 插件配置 `history`，默认 `false`。为 `false` 时 `supports_history = false`，不发送下面的动作。
 - 依据（2026-11-27 查阅）：NapCat 公开文档（napneko.pages.dev 的"接口"和"完整接口定义"页），以及 NapCat 源码中这两个动作和消息编号的实现。下面写的是读到的行为，真实核对时确认。
 - 私聊：`{"action": "get_friend_msg_history", "params": {"user_id": "<对方账号>", "message_seq": "<位置>", "count": <条数>, "reverse_order": true}, "echo": ...}`；群：`{"action": "get_group_msg_history", "params": {"group_id": "<群号>", "message_seq": "<位置>", "count": <条数>, "reverse_order": true}, "echo": ...}`。两个动作的参数相同，账号和群号按字符串发送。`reverse_order` 是新名字，`reverseOrder` 是旧版兼容名，只发新名字。
-- 第一次请求的 `message_seq` 为 `"0"`：协议端返回这个会话最新的 `count` 条。带位置时，协议端从这条消息开始取，结果**包含这条消息本身**；方向由 `reverse_order` 决定：`false` 取这条和它**之后**的消息，`true` 取这条和它**之前**的消息。往前翻页用 `true`，第一页这个参数不起作用，也一样发 `true`（2026-11-28 真实核对：`false` 返回的是之后的消息，和原先的写法相反，已改正；`true` 的方向待核对确认）。
+- 第一次请求的 `message_seq` 为 `"0"`：协议端返回这个会话最新的 `count` 条。带位置时，协议端从这条消息开始取，结果**包含这条消息本身**；方向由 `reverse_order` 决定：`false` 取这条和它**之后**的消息，`true` 取这条和它**之前**的消息。往前翻页用 `true`，第一页这个参数不起作用，也一样发 `true`（2026-11-28 真实核对：`false` 返回的是之后的消息，和原先的写法相反，已改正；`true` 的方向同日核对确认）。
 - 返回：`status = "ok"` 时，`data.messages` 是列表，每一项是标准的私聊或群消息事件格式，按时间从早到晚排列。每项的 `message_id`、`message_seq`、`real_id` 是同一个数，`real_seq` 是平台的消息序号。`data.messages` 不是列表时，这次读取按失败处理。会话中没有符合条件的消息时，协议端返回失败（"消息不存在"），不是空列表。
 - 每项按实时事件的映射处理（同一个函数）：自己发的消息跳过；缺少 `self_id` 时用本连接的账号；畸形的项跳过并计数。
 - 分页：第一次请求取最新的 `count` 条（`history_page_size`，默认 50）。需要更早的消息时，下一次请求的 `message_seq` 取本页最早一项的 `message_id`；结果中这一项会重复出现，按 `message_id` 去重。插件仍然自己按 `time` 排序，不依赖返回顺序。翻页请求失败时停止翻页，用已经取到的部分；只有第一页失败才算这次读取失败。翻到发送时间不晚于 `after`、或者取满 `limit` 时停止。两次请求之间至少间隔 1 秒。
 - `status = "failed"` 且 `retcode = 1404`：本连接内按不支持处理，不再发送；重连后按配置重新启用。其他失败、超时、断线：这次读取失败，只记动作名、`status` 和 `retcode`。
-- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。按源码，两边都用"平台消息编号 + 会话类型 + 会话"算出同一个散列值，重启协议端后也不变；仍以核对为准。2026-11-28 在测试群核对：`message_id` 一致；翻页的位置能用 `message_id`，结果包含位置项；`reverse_order: false` 取的是位置之后的消息。还要核对：`reverse_order: true` 取的是位置和它之前的消息。
+- 真实核对的第一项：同一条消息，实时推送和历史读取给出的 `message_id` 必须相同（kernel-spec §3）。按源码，两边都用"平台消息编号 + 会话类型 + 会话"算出同一个散列值，重启协议端后也不变；仍以核对为准。2026-11-28 在测试群核对：`message_id` 一致；翻页的位置能用 `message_id`，结果包含位置项；`reverse_order: false` 取的是位置之后的消息，`reverse_order: true` 取的是位置和它之前的消息。
 - 测试：私聊和群的请求格式，每一页的 `reverse_order` 都是 `true`；分页、去掉重复的位置项和停止条件；翻页失败时用已取到的部分；第一页失败算读取失败；自己的消息被跳过；`data.messages` 不是列表；1404 后本连接内不再请求；配置为 `false` 时不请求。
