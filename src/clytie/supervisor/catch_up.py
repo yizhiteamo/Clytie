@@ -111,7 +111,7 @@ class PlatformCatchUp:
         }
         restored = self.clock.now()
         self.failed_lookup = (
-            self.track(run_sync(self.ledger, self.failed_replies, restored))
+            self.track(self.read_failed_replies(restored, targets_only=True))
             if not supported and self.settings["failed_replies"]
             else None
         )
@@ -135,7 +135,17 @@ class PlatformCatchUp:
                 return None
         return held
 
-    def failed_replies(self, restored):
+    async def read_failed_replies(self, restored, *, targets_only=False):
+        try:
+            return await run_sync(self.ledger, self.failed_replies, restored, targets_only)
+        except Exception as exc:
+            self.failed += 1
+            self.companion.log.warning(
+                "catch_up.failed", error_type=type(exc).__name__, code="failed_reply_lookup"
+            )
+            return {}
+
+    def failed_replies(self, restored, targets_only):
         """Read eligible records and their merged inputs on the ledger owner."""
         result = {}
         for cid, private in self.targets.items():
@@ -159,7 +169,10 @@ class PlatformCatchUp:
                         else flags.mention or flags.reply_to_self or flags.name
                     )
                 ):
-                    result.setdefault(cid, []).append((event, trace))
+                    replies = result.setdefault(cid, [])
+                    if targets_only:
+                        break
+                    replies.append((event, trace))
         return result
 
     async def watch(self):
@@ -379,9 +392,7 @@ class PlatformCatchUp:
             # Delivery may finish during the settling interval. Eligibility is
             # evaluated now, using the original connection time as the cutoff.
             retries = (
-                await run_sync(self.ledger, self.failed_replies, restored)
-                if self.settings["failed_replies"]
-                else {}
+                await self.read_failed_replies(restored) if self.settings["failed_replies"] else {}
             )
             for index, (cid, held) in enumerate(holds.items()):
                 if index:

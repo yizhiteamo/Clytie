@@ -211,6 +211,10 @@ class Companion:
                 recovery = PlatformCatchUp(self, binding, plugin, channel)
                 self.catch_up[binding] = recovery
                 recovery.observe()
+                # Resolve which conversations need a hold before opening the
+                # live feed on a platform without history. No settling delay.
+                if recovery.failed_lookup is not None:
+                    await recovery.failed_lookup
                 recovery.track(recovery.watch())
             self.feeds.append(asyncio.create_task(self.consume(channel)))
         await self.refresh_health()

@@ -177,6 +177,21 @@ async def test_unsupported_never_waits_or_reads(h):
     assert not h.calls
 
 
+async def test_failed_lookup_preserves_live_intake_without_platform_history(h, monkeypatch):
+    h.supported = False
+
+    def unavailable(*args):
+        raise RuntimeError("fictional lookup failure")
+
+    monkeypatch.setattr(h.recovery, "failed_replies", unavailable)
+    h.switch("online")
+    await h.companion._receive_event(event(h.agent))
+    await h.agent.drain()
+    assert len(h.channel.sent) == 1 and not h.calls
+    assert h.recovery.failed == 1
+    assert "fictional lookup failure" not in str(h.companion.log.entries)
+
+
 @pytest.mark.parametrize("count", [1, 2])
 @pytest.mark.parametrize("supports_history", [False, True])
 async def test_owner_failed_replies_merge_and_mark_all(h, count, supports_history):
