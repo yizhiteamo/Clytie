@@ -107,7 +107,12 @@ def test_judge_priority_typed_facts_and_response_options():
     assert merge(response) == response
     from pydantic import ValidationError
 
-    for change in ({"participants": "1"}, {"owner_spoke": "fictional text"}, {"notes": "extra"}):
+    for change in (
+        {"participants": "1"},
+        {"owner_spoke": "fictional text"},
+        {"follow_up": "unrestricted text"},
+        {"notes": "extra"},
+    ):
         with pytest.raises(ValidationError):
             JudgeFacts.model_validate(facts().model_dump() | change)
 

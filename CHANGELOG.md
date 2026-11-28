@@ -1,5 +1,10 @@
 # 变更记录
 
+## SDK 0.23.0（群聊接着聊）
+
+- `JudgeFacts.follow_up` 可取 `none`、`partner` 或 `others`，默认为 `none`。已有插件可以省略此字段。
+- `chat-timing` 在群回复发出后识别接着聊的消息。窗口时长和判断间隔可分别通过 `tuning.follow_up_seconds` 和 `tuning.follow_up_gap_seconds` 调整。
+
 ## SDK 0.22.0（掉线期间的消息补收）
 
 - 平台可用 `supports_history` 声明可选的 `history()` 方法。QQ OneBot 的 `history` 默认关闭。

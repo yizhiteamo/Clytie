@@ -6,7 +6,7 @@
   "category": "behavior",
   "version": "0.1.0",
   "requires": {
-    "sdk": ">=0.17,<0.23"
+    "sdk": ">=0.23,<0.24"
   },
   "entry": "plugin:Plugin",
   "permissions": [],
@@ -133,6 +133,16 @@
             "type": "number",
             "exclusiveMinimum": 0,
             "default": 30
+          },
+          "follow_up_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 120
+          },
+          "follow_up_gap_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 10
           },
           "low_probability": {
             "type": "number",

@@ -19,10 +19,18 @@ from .context import PART, LedgerSnapshot, message
 from .policy import actor_label
 from .safety_belt import UNREGISTERED_USAGE
 
+JOIN_FORMAT = (
+    "只返回 JSON 对象。join 和 new_topic 是布尔值，"
+    "分别表示想接话和换了话题。focus 填你想接的那条消息的序号，没有就填 null。"
+)
 JOIN_PROMPT = (
     "你看到群里这些消息，像平常一样想想要不要接话。话题与你无关、已经聊累了，"
-    "或者没有想说的话，都可以不接。只返回 JSON 对象。join 和 new_topic 是布尔值，"
-    "分别表示想接话和换了话题。focus 填你想接的那条消息的序号，没有就填 null。"
+    "或者没有想说的话，都可以不接。" + JOIN_FORMAT
+)
+FOLLOW_UP_PROMPT = (
+    "你刚在群里说过话。看看大家是在接你的话，还是在和别人聊。"
+    "对方在跟你说，或者你对这个话题有自己的看法，就自然地接话。"
+    "如果他们在和别人聊，你也没什么想说的，就让他们继续。" + JOIN_FORMAT
 )
 RECHECK_PROMPT = (
     "看一下刚来的消息和你写好的回复，现在还要发这段回复吗？只返回 JSON 对象，send 是布尔值。"
@@ -208,12 +216,18 @@ class AttentionJudgments:
     ):
         facts = JudgeFacts.model_validate(facts)
         chat, refs = await self._chat(conversation, events, history=True, finalization=finalization)
-        prompt = JOIN_PROMPT + ("calling_me 表示这些消息是不是在叫你。" if facts.name_hit else "")
+        prompt = JOIN_PROMPT if facts.follow_up == "none" else FOLLOW_UP_PROMPT
+        if facts.name_hit:
+            prompt += "calling_me 表示这些消息是不是在叫你。"
         persona = self.agent.persona.scene_text(conversation.scene)[
             : self.config.get("persona_chars", 1500)
         ]
         messages = [message("system", prompt), message("system", persona), *chat]
         yn = {True: "是", False: "否"}
+        relationship = {
+            "partner": ["这批消息来自你刚回应过的人。"],
+            "others": ["这批消息来自群里的其他人。"],
+        }
         messages.append(
             message(
                 "system",
@@ -223,6 +237,7 @@ class AttentionJudgments:
                         f"和同一人连续来回 {facts.rounds_with_same_person} 轮。对方接话很快：{yn[facts.counterpart_fast]}。",
                         f"疲劳程度：{facts.fatigue}。最近主动说话没人理：{yn[facts.ignored_recently]}。",
                         f"这批消息有主人发言：{yn[facts.owner_spoke]}。这批消息出现你的名字：{yn[facts.name_hit]}。",
+                        *relationship.get(facts.follow_up, ()),
                     )
                 ),
             )

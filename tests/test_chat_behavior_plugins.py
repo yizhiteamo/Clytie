@@ -10,7 +10,7 @@ from clytie.clock import SystemClock
 from clytie.plugin_host.identity import IdentityResolver
 from clytie.plugin_host.support import timed
 from clytie.sdk.testing import FakeChannel, FakeModel, FakeWebSocket, MockClock
-from clytie.sdk.types import Addressed, ModelTurn, ToolCall
+from clytie.sdk.types import Addressed, ModelTurn, Receipt, ToolCall
 from clytie.supervisor.companion import Companion
 
 from .host_helpers import SOURCE, enable, plugin
@@ -21,6 +21,57 @@ from .test_config import write_yaml
 from .test_kernel_service import new_record, reply
 from .test_openai_api_integration import Protocol
 from .test_storage_agent_lifecycle import inbound, private_home
+
+
+async def test_failed_second_split_keeps_first_sent_window(tmp_path, monkeypatch):
+    paragraphs = ["虚构的短句。" * 9, "另一段虚构回复。" * 5]
+    agent, channel, model = await make_agent(
+        tmp_path, {"finish": "stop", "text": "\n\n".join(paragraphs)}
+    )
+    try:
+        agent.kernel.bus = agent.host.event_bus
+        agent.host.configure(
+            agent.cid,
+            plugins={
+                "chat-timing": {
+                    "config": {"tuning": {"medium_probability": 1, "judge_interval": 1}}
+                },
+                "reply-form": {"config": {"tuning": {"interval_seconds": [0, 0]}}},
+            },
+        )
+        timing = (await enable(agent.host, "chat-timing")).plugin
+        await enable(agent.host, "reply-form")
+        first_sent = []
+        original = channel.send
+
+        async def send(intent, cancel):
+            if not first_sent:
+                first_sent.append(agent.clock.monotonic())
+                return await original(intent, cancel)
+            agent.clock.advance(20)
+            return Receipt(
+                intent_id=intent.intent_id,
+                status="failed",
+                at=agent.clock.now(),
+                error={"code": "invalid_request", "message": "fictional failure"},
+            )
+
+        monkeypatch.setattr(channel, "send", send)
+        await agent.receive(group(agent, "fictional question", mention=True))
+        await agent.clock.advance_and_drain(3)
+        await agent.drain()
+        await agent.host.event_bus.drain()
+        assert [a["receipt"]["status"] for a in agent.ledger.rows("attempt")] == ["sent", "failed"]
+        assert len(model.requests) == 1
+        for elapsed, expected in [(114, "partner"), (122, "none")]:
+            agent.clock.advance(first_sent[0] + elapsed - agent.clock.monotonic())
+            event = group(agent, "fictional continuation")
+            await timing.incoming(event)
+            agent.clock.advance(5)
+            query = await timing.attention((event, [event.message]))
+            assert query.facts.follow_up == expected
+    finally:
+        await finish(agent)
 
 
 async def test_companion_group_receipts_and_task_events(tmp_path, monkeypatch):
@@ -104,7 +155,12 @@ async def test_companion_group_receipts_and_task_events(tmp_path, monkeypatch):
 
         for i in range(2):
             await runtime.agent.receive(
-                inbound(runtime, text="虚构的入站标记", scene="public_group", role="member")
+                inbound(
+                    runtime,
+                    text="虚构的入站标记",
+                    scene="public_group",
+                    role="owner" if i else "member",
+                )
             )
             await clock.advance_and_drain(5)
             assert await timed(listener.observed.get(), watchdog, 10) == "message.received"

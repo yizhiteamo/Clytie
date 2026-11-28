@@ -12,6 +12,8 @@ class Tuning:
     group_quiet: float = 5
     group_max: float = 20
     judge_interval: float = 30
+    follow_up_seconds: float = 120
+    follow_up_gap_seconds: float = 10
     low_probability: float = 0.05
     medium_probability: float = 0.15
     high_probability: float = 0.3
@@ -38,6 +40,10 @@ class Group:
         self.fatigue = 0.0
         self.updated = now
         self.last_in = self.last_reply = self.last_judge = -inf
+        self.last_follow_up_judge = -inf
+        self.replied_to = {}
+        # Only inbound references and logical actors. Nothing here survives plugin reload.
+        self.recent_senders = deque(maxlen=50)
         self.rounds = 0
         self.partner = None
         self.first_speaker = None
@@ -57,6 +63,11 @@ class Group:
             self.judgments = self.natural = 0
         self.fatigue *= 0.5 ** ((now - self.updated) / self.t.half_life)
         self.updated = now
+        self.replied_to = {
+            actor: sent
+            for actor, sent in self.replied_to.items()
+            if now - sent <= self.t.follow_up_seconds
+        }
         while self.turns and self.turns[0][0] < now - self.t.share_window:
             self.turns.popleft()
         while self.unanswered and self.unanswered[0] <= now:
@@ -95,6 +106,15 @@ class Group:
             else:
                 people.add(actor)
         return len(people), own / len(self.turns) if self.turns else 0.0
+
+    def follow_up(self, actor):
+        if not self.replied_to:
+            return "none"
+        return "partner" if actor in self.replied_to else "others"
+
+    def sent_part(self, actor, sent):
+        if self.updated - sent <= self.t.follow_up_seconds:
+            self.replied_to[actor] = max(sent, self.replied_to.get(actor, -inf))
 
     def replied(self, now, actor, owner, natural, *, sent_at=None):
         self.turns.append((now, None))
@@ -140,16 +160,19 @@ class Group:
         band = min(2, band + int(owner)) - int(self.level > 0)
         if band < 0:
             return 0
-        start, stop = self.thresholds(band)
-        if self.fatigue >= stop:
-            return 0
         probability = (self.t.low_probability, self.t.medium_probability, self.t.high_probability)[
             band
-        ]
-        if self.fatigue >= start:
-            probability *= 1 - 0.75 * (self.fatigue - start) / (stop - start)
+        ] * self.fatigue_factor(band)
         if question:
             probability *= self.t.question_boost
         if now - self.last_reply <= self.t.recent_seconds and self.fatigue < self.t.fatigue_start:
             probability *= self.t.recent_boost
         return probability
+
+    def fatigue_factor(self, band):
+        start, stop = self.thresholds(band)
+        if self.fatigue >= stop:
+            return 0
+        if self.fatigue <= start:
+            return 1
+        return 1 - 0.75 * (self.fatigue - start) / (stop - start)

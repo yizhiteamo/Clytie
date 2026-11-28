@@ -2,6 +2,7 @@ import importlib.util
 import sys
 from datetime import timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -342,3 +343,247 @@ async def test_reloaded_addressed_batch_continues_without_wait(module, tmp_path)
     await plugin.stop()
     await plugin.start(ctx)
     assert await plugin.attention(batch) == Respond(focus=event.message.ref)
+
+
+async def candidate(plugin, actor="member", **address):
+    clock = plugin.ctx.clock
+    event = message(clock, clock.monotonic(), actor=actor, **address)
+    await plugin.incoming(event)
+    supplied = (event, [event.message])
+    delay = await plugin.attention(supplied)
+    expected_delay = Defer(seconds=3, prepare=True) if address else Defer(seconds=5)
+    assert delay == expected_delay
+    clock.advance(delay.seconds)
+    return supplied, await plugin.attention(supplied)
+
+
+async def notify(plugin, name, **fields):
+    if name == "message.received":
+        fields["scene"] = "public_group"
+    await plugin.on_event(
+        BusEvent(
+            name=name,
+            source="core",
+            at=plugin.ctx.clock.now(),
+            payload={"trace_id": TRACE_ID, "conversation_id": "test_group", **fields},
+        )
+    )
+
+
+async def prepare_split(plugin, *, kind="reply", task=None, actor="member"):
+    (event, _), decision = await candidate(plugin, actor, mention=True)
+    assert isinstance(decision, Respond)
+    trace = uuid4().hex
+    await notify(
+        plugin, "message.received", trace_id=trace, event_id=event.event_id, actor_id=actor
+    )
+    intents = [
+        sample_intent().model_copy(
+            update={"trace_id": trace, "intent_id": key * 32, "kind": kind, "task_id": task}
+        )
+        for key in ("b", "c")
+    ]
+    await plugin.before_send(intents)
+    return intents
+
+
+async def sent(plugin, intent):
+    await notify(
+        plugin,
+        "reply.sent",
+        trace_id=intent.trace_id,
+        intent_ids=[intent.intent_id],
+        task_id=intent.task_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "actor,fatigue,roll,band,expected",
+    [
+        ("member", 2, 0.99, "medium", "partner"),
+        ("peer", 2, 0.99, "medium", "others"),
+        ("peer", 5, 0.69, "medium", "others"),
+        ("peer", 5, 0.71, "medium", None),
+        ("peer", 8, 0, "medium", None),
+        ("peer", 8, 0.1, "high", "others"),
+        ("peer", 6, 0, "low", None),
+        ("owner", 20, 0.99, "medium", "others"),
+    ],
+)
+async def test_follow_up_fatigue_only_and_owner(
+    module, tmp_path, monkeypatch, actor, fatigue, roll, band, expected
+):
+    plugin, clock = await setup(module, tmp_path, activity=band, tuning={f"{band}_probability": 0})
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    event = message(clock, 2, actor=actor)
+    await plugin.incoming(event)
+    clock.advance(5)
+    state = plugin.group("test_group", clock.monotonic())
+    state.fatigue, state.level, state.backoff_end = fatigue, 3, 900
+    monkeypatch.setattr(plugin.ctx.random, "random", lambda: roll)
+    result = await plugin.attention((event, [event.message]))
+    if expected is None:
+        assert isinstance(result, Skip)
+    else:
+        assert isinstance(result, Judge) and result.facts.follow_up == expected
+
+
+async def test_split_receipts_extend_window_and_partners_expire_individually(module, tmp_path):
+    plugin, clock = await setup(module, tmp_path, tuning={"medium_probability": 1})
+    first, second = await prepare_split(plugin)
+    await sent(plugin, first)
+    _, result = await candidate(plugin, "peer")
+    assert result.facts.follow_up == "others"
+    clock.advance(45)
+    await sent(plugin, second)
+    clock.advance(75)
+    _, result = await candidate(plugin)
+    assert result.facts.follow_up == "partner"
+    # A second reply to another person keeps the group window open.
+    first, _ = await prepare_split(plugin, actor="peer")
+    await sent(plugin, first)
+    clock.advance(45)
+    _, result = await candidate(plugin)
+    assert result.facts.follow_up == "others"
+    clock.advance(5)
+    _, result = await candidate(plugin, "peer")
+    assert result.facts.follow_up == "partner"
+    clock.advance(121)
+    _, result = await candidate(plugin)
+    assert result.facts.follow_up == "none"
+
+
+@pytest.mark.parametrize("kind,task", [("proactive", None), ("reply", "abcdabcd")])
+async def test_proactive_and_task_receipts_do_not_open_follow_up(module, tmp_path, kind, task):
+    plugin, _ = await setup(module, tmp_path, tuning={"medium_probability": 1})
+    first, _ = await prepare_split(plugin, kind=kind, task=task)
+    await sent(plugin, first)
+    _, result = await candidate(plugin)
+    assert result.facts.follow_up == "none"
+
+
+async def test_follow_up_ten_second_gap_and_normal_thirty_second_gap(module, tmp_path):
+    plugin, clock = await setup(
+        module, tmp_path, tuning={"follow_up_seconds": 18, "medium_probability": 1}
+    )
+    _, normal = await candidate(plugin)
+    assert normal.facts.follow_up == "none"
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    _, first_query = await candidate(plugin)
+    assert first_query.facts.follow_up == "partner"
+    _, too_soon = await candidate(plugin)
+    assert isinstance(too_soon, Skip)
+    _, second_query = await candidate(plugin)
+    assert second_query.facts.follow_up == "partner"
+    clock.advance(4)
+    _, outside = await candidate(plugin)
+    assert isinstance(outside, Skip)
+    clock.advance(21)
+    _, normal = await candidate(plugin)
+    assert normal.facts.follow_up == "none"
+
+
+@pytest.mark.parametrize("actor,expected", [("owner", Respond), ("peer", Skip)])
+@pytest.mark.parametrize("mode", ["rules", "model"])
+async def test_follow_up_fallback_keeps_original_decision_after_expiry(
+    module, tmp_path, actor, expected, mode
+):
+    plugin, clock = await setup(module, tmp_path, judge=mode, tuning={"medium_probability": 0})
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    args, result = await candidate(plugin, actor)
+    if mode == "model":
+        assert isinstance(result, Judge)
+        clock.advance(121)
+        result = await plugin.attention((*args, Judgment(status="failed")))
+    assert isinstance(result, expected)
+    if expected is Respond:
+        assert result.recheck_after == 15
+
+
+async def test_rules_follow_up_throttles_owner_without_model_judgments(module, tmp_path):
+    plugin, clock = await setup(
+        module, tmp_path, judge="rules", tuning={"follow_up_seconds": 12, "medium_probability": 1}
+    )
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    _, decision = await candidate(plugin, "owner")
+    assert isinstance(decision, Respond)
+    _, decision = await candidate(plugin, "owner")
+    assert isinstance(decision, Skip)
+    clock.advance(3)
+    _, decision = await candidate(plugin, "owner")
+    assert isinstance(decision, Skip)
+    assert (await plugin.status({}))["json"]["groups"]["test_group"]["judgments_today"] == 0
+
+
+@pytest.mark.parametrize(
+    "address", [{"mention": True}, {"reply_to_self": True}, {"name": "external"}]
+)
+async def test_follow_up_keeps_addressed_priority(module, tmp_path, address):
+    plugin, _ = await setup(module, tmp_path, tuning={"medium_probability": 0})
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    await candidate(plugin, "peer")
+    args, decision = await candidate(plugin, "peer", **address)
+    if "name" in address:
+        assert (
+            isinstance(decision, Judge) and decision.prepare and decision.facts.follow_up == "none"
+        )
+        decision = await plugin.attention((*args, Judgment(status="failed")))
+    assert decision == Respond(focus=args[0].message.ref)
+
+
+async def test_follow_up_recheck_fatigue_cold_and_natural_count_once(module, tmp_path):
+    plugin, clock = await setup(module, tmp_path, tuning={"medium_probability": 0})
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    args, query = await candidate(plugin)
+    assert isinstance(query, Judge)
+    state = plugin.group("test_group", clock.monotonic())
+    state.fatigue = 4
+    state.rounds = 3
+    result = await plugin.attention((*args, Judgment(status="ok", join=True, new_topic=True)))
+    assert result == Respond(focus=args[0].message.ref, recheck_after=15)
+    assert state.fatigue == 2
+    await notify(plugin, "message.received", event_id=args[0].event_id, actor_id="member")
+    intent = sample_intent()
+    await plugin.before_send([intent])
+    await sent(plugin, intent)
+    await sent(plugin, intent)
+    assert state.fatigue > 2 and state.natural == 1 and state.judgments == 1
+    clock.advance(180)
+    assert (await plugin.status({}))["json"]["groups"]["test_group"]["ignored_level"] == 1
+
+
+@pytest.mark.parametrize("target", ["history", "self", "evicted", "none"])
+async def test_follow_up_partner_uses_focus_sender(module, tmp_path, target):
+    plugin, clock = await setup(module, tmp_path, tuning={"medium_probability": 1})
+    history = message(clock, "history", actor="peer")
+    await plugin.incoming(history)
+    if target == "evicted":
+        for i in range(50):
+            await plugin.incoming(message(clock, i, actor="member"))
+    clock.advance(1)
+    args, query = await candidate(plugin, "member")
+    assert isinstance(query, Judge)
+    own_ref = history.message.ref.model_copy(update={"platform_message_id": "fictional-output"})
+    focus = {
+        "history": history.message.ref,
+        "evicted": history.message.ref,
+        "self": own_ref,
+        "none": None,
+    }[target]
+    decision = await plugin.attention((*args, Judgment(status="ok", join=True, focus=focus)))
+    assert decision.focus == (focus or args[0].message.ref)
+    await notify(plugin, "message.received", event_id=args[0].event_id, actor_id="member")
+    intent = sample_intent()
+    await plugin.before_send([intent])
+    await sent(plugin, intent)
+    _, from_peer = await candidate(plugin, "peer")
+    assert from_peer.facts.follow_up == ("partner" if target == "history" else "others")
+    clock.advance(5)
+    _, from_member = await candidate(plugin, "member")
+    assert from_member.facts.follow_up == ("others" if target == "history" else "partner")
