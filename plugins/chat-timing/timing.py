@@ -41,6 +41,7 @@ class Group:
         self.updated = now
         self.last_in = self.last_reply = self.last_judge = -inf
         self.last_follow_up_judge = -inf
+        self.last_owner_follow_up_judge = -inf
         self.replied_to = {}
         # Only inbound references and logical actors. Nothing here survives plugin reload.
         self.recent_senders = deque(maxlen=50)

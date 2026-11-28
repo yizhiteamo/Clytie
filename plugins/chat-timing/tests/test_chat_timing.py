@@ -503,6 +503,45 @@ async def test_follow_up_fallback_keeps_original_decision_after_expiry(
         assert result.recheck_after == 15
 
 
+@pytest.mark.parametrize("mode", ["model", "rules"])
+@pytest.mark.parametrize("order", [("peer", "owner"), ("owner", "peer")])
+async def test_simultaneous_follow_up_batches_reserve_owner_gap(module, tmp_path, mode, order):
+    plugin, clock = await setup(module, tmp_path, judge=mode)
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    batches = []
+    for actor in order:
+        event = message(clock, actor, actor=actor)
+        await plugin.incoming(event)
+        batch = (event, [event.message])
+        assert await plugin.attention(batch) == Defer(seconds=5)
+        batches.append(batch)
+    clock.advance(5)
+    decisions = [await plugin.attention(batch) for batch in batches]
+    owner_decision = Judge if mode == "model" else Respond
+    assert isinstance(decisions[order.index("owner")], owner_decision)
+    peer_decision = Judge if mode == "model" and order[0] == "peer" else Skip
+    assert isinstance(decisions[order.index("peer")], peer_decision)
+
+    _, within_gap = await candidate(plugin, "owner")
+    assert isinstance(within_gap, Skip)
+    _, at_boundary = await candidate(plugin, "owner")
+    assert isinstance(at_boundary, owner_decision)
+
+
+async def test_rules_peer_skip_leaves_normal_interval_available(module, tmp_path):
+    plugin, clock = await setup(
+        module, tmp_path, judge="rules", tuning={"follow_up_seconds": 6, "medium_probability": 1}
+    )
+    first, _ = await prepare_split(plugin)
+    await sent(plugin, first)
+    _, peer = await candidate(plugin, "peer")
+    assert isinstance(peer, Skip)
+    clock.advance(2)
+    _, normal = await candidate(plugin, "peer")
+    assert isinstance(normal, Respond)
+
+
 async def test_rules_follow_up_throttles_owner_without_model_judgments(module, tmp_path):
     plugin, clock = await setup(
         module, tmp_path, judge="rules", tuning={"follow_up_seconds": 12, "medium_probability": 1}

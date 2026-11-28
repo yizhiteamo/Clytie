@@ -139,11 +139,17 @@ class Plugin:
                 return self.response(event, natural=True, focus=result.focus or event.message.ref)
             return Skip()
         band = self.band(cid)
+        rules = self.ctx.config.get("judge", "model") == "rules"
         follow_up = arrivals[-1][2] if arrivals and not named else "none"
         if follow_up != "none":
-            if now - state.last_follow_up_judge < self.t.follow_up_gap_seconds:
+            if rules and not owner:
                 return Skip()
-            if not owner and self.ctx.random.random() >= state.fatigue_factor(band):
+            last = state.last_owner_follow_up_judge if owner else state.last_follow_up_judge
+            if now - last < self.t.follow_up_gap_seconds:
+                return Skip()
+            if owner:
+                state.last_owner_follow_up_judge = now
+            elif self.ctx.random.random() >= state.fatigue_factor(band):
                 return Skip()
             state.last_follow_up_judge = state.last_judge = now
         elif not named:
@@ -156,9 +162,7 @@ class Plugin:
             )
             if self.ctx.random.random() >= state.willingness(band, owner, question, now):
                 return Skip()
-        if self.ctx.config.get("judge", "model") == "rules":
-            if follow_up != "none" and not owner:
-                return Skip()
+        if rules:
             return self.response(event, natural=not named)
         if follow_up != "none":
             remember(self.follow_up_judgments, event.event_id, True)
