@@ -579,7 +579,7 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 ### SDK 0.16 群聊行为
 
 行为环节收到的 `EventEnvelope.addressed` 由本体填写，记录是否被 @、是否回复本伴侣、是否命中内部或对外名字。平台提供的值在入站时覆盖。默认值为 None。
-`JudgeFacts` 只接受 chat-behavior-spec §3.2 的八个字段。只有发起判断的处理器收到带第三项 `Judgment` 的输入，其他处理器仍使用原来的两项。主人私聊遇到 Judge 直接回应。
+`JudgeFacts` 只接受 chat-behavior-spec §3.2 列出的字段（SDK 0.16 为八个，SDK 0.23 新增 `follow_up`）。只有发起判断的处理器收到带第三项 `Judgment` 的输入，其他处理器仍使用原来的两项。主人私聊遇到 Judge 直接回应。
 `ReplyDraft.focus` 是要接的话的引用，默认为空；`interleaved` 是焦点之后其他人在本会话发出的消息数，默认 0。回复形式插件可以根据这两项选择是否引用。
 
 ### SDK 0.17 边等边写（补测后追加，用户 2026-11-22 确认）
@@ -622,3 +622,8 @@ backup.snapshot 的 capture 不得重入被捕获屏障暂停的本体存储队�
 - `ChannelFeatures` 新增 `supports_history: bool = False`。支持的平台提供可选方法 `async history(conversation_id, *, after, limit, cancel) -> list[EventEnvelope]`：返回这个会话中发送时间晚于 `after` 的最新 `limit` 条消息，按发送时间从早到晚排列，映射与 `events()` 相同，`event_id` 与实时推送一致。
 - 只有本体的补收调用它（catch-up-spec §8）。以后的会话服务 `history`（platform-capabilities-spec §2）可以复用。
 - 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0042。
+
+### SDK 0.23 接着聊（B7d，2026-11-28）
+
+- `JudgeFacts` 新增 `follow_up: none | partner | others`，默认 `none`：她刚在这个群说过话，这批消息可能在接她的话。本体按它选用判断的说明（chat-behavior-spec §3.3、§5.3a）。
+- 新增字段有默认值，已有插件不用修改。决策记录见 ADR 0044。

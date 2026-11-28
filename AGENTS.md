@@ -153,7 +153,7 @@ Codex 向用户报告进度时固定为四项，每项一两句，总共不超�
 | `docs/architecture/platform-capabilities-spec.md` | 平台能力的插件化路线：本体与插件的分界、会话服务、能力之间的依赖、能力包、越界代码清理、官方插件仓库 |
 | `docs/architecture/vision-spec.md` | B6 看图：取图、附图规则、`core_view_image`、截图文字、后续演进 |
 | `docs/architecture/appearance-spec.md` | V2 认出自己的形象：形象资料、导入检查、认图规则、自检、`core_view_appearance` |
-| `docs/architecture/chat-behavior-spec.md` | B7 群聊行为：被叫到的标记、轻量判断、群聊安全带、`chat-timing` 与 `reply-form` 插件 |
+| `docs/architecture/chat-behavior-spec.md` | B7 群聊行为：被叫到的标记、轻量判断、群聊安全带、接着聊、`chat-timing` 与 `reply-form` 插件 |
 | `docs/architecture/content-spec.md` | B9 内容来源：`web-tools` 插件（搜索、读网页）、轻量能力、只访问公网、资料保留，B9b 和看视频的方向 |
 | `docs/architecture/comic-spec.md` | C 漫画工具与漫画简报：`comic-maker` 插件、角色表、字体库、`appearance.read`、能力之间的服务调用 |
 | `docs/architecture/proactive-spec.md` | B8 主动私聊与睡眠作息：`proactive-chat` 插件、主动开口使用能力、暂停主动聊天、B8b 已确认的方向 |
